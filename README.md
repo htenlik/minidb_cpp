@@ -33,7 +33,7 @@ Record Store <-> Pager
 
 1. **Pager / fixed-size disk pages** ✅
 2. **Row serialization/deserialization** ✅
-3. Record storage
+3. **Persistent RID-based record storage** ✅
 4. In-memory B+ tree
 5. Persist B+ tree nodes into pages
 6. SQL lexer
@@ -81,6 +81,17 @@ those bytes would not reconstruct valid strings in another process.
 The 294-byte row layout and the database file format version are separate concerns. The
 file header identifies the surrounding database format; row encoding describes how an
 individual row is converted to bytes within a future record-storage layer.
+
+## Record storage
+
+The record store persists rows in fixed-slot RecordPages linked through page IDs. Each
+record is addressed by a stable `RecordId { pageId, slotId }`; scans visit linked pages
+in order and occupied slots in increasing order. Deletes do not compact or move other
+records, and freed slots can be reused by later inserts. Record-heap head page IDs remain
+explicit caller-owned values until a future catalog milestone.
+
+The exact RecordPage version 1 header, occupancy bitmap, capacity calculation, and RID
+semantics are documented in [docs/storage-format.md](docs/storage-format.md).
 
 ## Build
 

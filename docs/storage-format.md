@@ -64,4 +64,86 @@ valid page storage.
 
 The database format version describes the file and page-level container. The current
 fixed row encoding independently describes a 294-byte row value. Record placement inside
-data pages is intentionally undefined until the record-storage milestone.
+data pages is defined by the RecordPage layout below.
+
+## Record identifiers
+
+A persistent record identifier is:
+
+```text
+RecordId {
+    PageId pageId;  // uint32
+    SlotId slotId;  // uint16
+}
+```
+
+`INVALID_SLOT_ID` is `0xFFFF`. A valid RID contains neither `INVALID_PAGE_ID` nor
+`INVALID_SLOT_ID`, and page 0 can never be a RID page. RIDs contain physical identifiers,
+not process-local pointers, so an occupied record remains addressable after the database
+closes and reopens. Future indexes can map keys to these RIDs without depending on the
+RecordStore implementation.
+
+Updates overwrite the same fixed-size slot. Deletes clear occupancy without moving any
+other row, so other RIDs remain stable. A deleted slot can later be reused; without a
+generation counter, a stale RID for that deleted slot will then identify the replacement
+record. VACUUM and compaction semantics are not defined yet.
+
+## RecordPage layout: version 1
+
+RecordPage layout version 1 is separate from database file format version 1 and the row
+encoding. Every persistent multi-byte field is little-endian.
+
+| Offset | Size | Encoding | Field | Version 1 value or meaning |
+| ---: | ---: | --- | --- | --- |
+| 0 | 8 | Raw bytes | Record-page magic/type | ASCII `MDBRECPG` |
+| 8 | 4 | `uint32`, little-endian | RecordPage layout version | `1` |
+| 12 | 4 | `uint32`, little-endian | RecordPage header size | `32` |
+| 16 | 4 | `PageId`, little-endian | Next record-page ID | Next page or `INVALID_PAGE_ID` |
+| 20 | 2 | `uint16`, little-endian | Live-record count | Occupied slots, `0`–`13` |
+| 22 | 2 | `uint16`, little-endian | Slot capacity | `13` |
+| 24 | 4 | `uint32`, little-endian | Serialized slot size | `294` |
+| 28 | 4 | Zero-filled | Reserved header field | `0` |
+| 32 | 2 | Bitmap | Slot occupancy | One bit per slot |
+| 34 | 3822 | Fixed slots | 13 serialized Rows | 294 bytes per slot |
+| 3856 | 240 | Unused | Reserved page tail | Zero on initialization |
+
+Occupancy byte 0 uses bits 0–7 for slots 0–7. Occupancy byte 1 uses bits 0–4 for slots
+8–12; its remaining bits must be zero. A set bit means the corresponding slot is live.
+Row values and deletion sentinels are never used to infer occupancy.
+
+Slot `i` begins at:
+
+```text
+slot_offset(i) = 34 + (i * 294), for 0 <= i < 13
+```
+
+The capacity is derived as the largest `N` satisfying:
+
+```text
+32 + ceil(N / 8) + (N * 294) <= 4096
+```
+
+For `N = 13`, the used size is `32 + 2 + 3822 = 3856` bytes. `N = 14` would require
+`32 + 2 + 4116 = 4150` bytes, so it does not fit.
+
+When opening a RecordPage, MiniDB++ validates its magic, supported layout version,
+header size, slot capacity, serialized slot size, reserved field, next-page ID, live
+count, occupancy count, and unused occupancy bits. Corruption is rejected without repair.
+
+## RecordStore heap chain
+
+A RecordStore is a singly linked sequence of RecordPages. Its head page ID is supplied
+explicitly when reopening because no catalog exists yet:
+
+```text
+head -> RecordPage -> RecordPage -> ... -> INVALID_PAGE_ID
+```
+
+Insertion scans the chain for the first free slot. If every page is full, it allocates,
+initializes, and links a new RecordPage. Full scans return live `(RecordId, Row)` pairs in
+linked-page order and then increasing slot-ID order. RecordStore validates the chain and
+rejects dangling links, invalid page types, and cycles.
+
+The fixed-slot region is intentionally specific to the current fixed-size Row. Supporting
+variable-length tuples will require a new RecordPage layout version, likely with a slot
+directory of offsets and lengths. The `(pageId, slotId)` RID shape can remain unchanged.
