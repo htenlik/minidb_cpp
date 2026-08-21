@@ -31,20 +31,34 @@ Record Store <-> Pager
 
 ## Milestones
 
-1. **Pager / fixed-size disk pages**  <- current
-2. Row serialization + record storage
-3. In-memory B+ tree
-4. Persist B+ tree nodes into pages
-5. SQL lexer + parser
-6. Query executor
-7. TCP server/client protocol
-8. Benchmarks, tests, architecture documentation
+1. **Pager / fixed-size disk pages** ✅
+2. **Row serialization/deserialization** ✅
+3. Record storage
+4. In-memory B+ tree
+5. Persist B+ tree nodes into pages
+6. SQL lexer
+7. SQL parser
+8. Query executor
+9. TCP server/client protocol
+10. Benchmarks, tests, architecture documentation
 
-## Current milestone
+## Row serialization
 
-The pager owns a database file divided into fixed-size 4096-byte pages. It can create/open
-a file, allocate pages, lazily load pages, track dirty pages, flush changes, and recover
-written page data after reopening the file.
+Rows contain a 32-bit ID, a username of at most 32 bytes, and an email address of at most
+255 bytes. Every row serializes to exactly 294 bytes using this layout:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | ID (`uint32_t`, little-endian) |
+| 4 | 1 | Username length (`uint8_t`) |
+| 5 | 32 | Username bytes, followed by zero padding |
+| 37 | 2 | Email length (`uint16_t`, little-endian) |
+| 39 | 255 | Email bytes, followed by zero padding |
+
+Explicit serialization produces a stable, deterministic disk format. Writing a C++
+`Row` object directly would instead persist implementation details such as `std::string`
+pointers and capacity, along with potentially platform-dependent padding and byte order;
+those bytes would not reconstruct valid strings in another process.
 
 ## Build
 
