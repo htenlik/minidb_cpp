@@ -34,8 +34,8 @@ Record Store <-> Pager
 1. **Pager / fixed-size disk pages** ✅
 2. **Row serialization/deserialization** ✅
 3. **Persistent RID-based record storage** ✅
-4. In-memory B+ tree
-5. Persist B+ tree nodes into pages
+4. **In-memory B+ tree primary index (Milestone 4A)** ✅
+5. Persist B+ tree nodes into pages (Milestone 4B)
 6. SQL lexer
 7. SQL parser
 8. Query executor
@@ -92,6 +92,15 @@ explicit caller-owned values until a future catalog milestone.
 
 The exact RecordPage version 1 header, occupancy bitmap, capacity calculation, and RID
 semantics are documented in [docs/storage-format.md](docs/storage-format.md).
+
+## Primary index
+
+The Milestone 4A B+ tree is an in-memory unique primary index mapping 32-bit keys to
+existing `RecordId` values. It implements logarithmic lookup, insertion and deletion,
+linked-leaf range scans, redistribution, merging, root growth/shrink, and structural
+validation. Tree nodes are deliberately not persisted or assigned Pager page IDs yet.
+See [docs/bplus-tree.md](docs/bplus-tree.md) for its invariants and the Milestone 4B
+persistence boundary.
 
 ## Build
 
