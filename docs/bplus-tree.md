@@ -134,12 +134,14 @@ heap slot may be logically considered reusable by higher layers.
 Transactions, WAL, crash atomicity, and generation-aware RIDs remain future design work.
 Milestone 4A intentionally does not redesign the persistent RID or RecordPage format.
 
-## Milestone 4B persistence boundary
+## Persistent implementation boundary
 
-The separator convention, search decisions, occupancy mathematics, split/borrow/merge
-rules, root cases, and leaf-chain range algorithm can guide the persistent tree.
-The current node representation cannot be persisted directly. Milestone 4B must replace
-pointer ownership with page IDs and page pin/access lifetimes, define explicit node byte
-layouts and versions, mark modified pages dirty, validate persistent node fields, and
-connect the metadata/catalog root through a separately reviewed design. Raw pointers,
-`std::vector`, and whole-object dumps are not an on-disk format.
+The separator convention, search decisions, insertion/split mathematics, root growth,
+and leaf-chain range algorithm also guide the separate Milestone 4B.1 page-native tree.
+That implementation uses PageIds and explicit byte layouts rather than persisting this
+class's pointers, vectors, or object representation. See
+[bplus-tree-storage.md](bplus-tree-storage.md).
+
+The in-memory implementation remains the complete insertion/deletion reference.
+Persistent redistribution, merging, root shrink, and page reclamation are deferred to
+Milestone 4B.2.

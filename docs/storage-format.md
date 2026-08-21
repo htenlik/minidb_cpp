@@ -147,3 +147,10 @@ rejects dangling links, invalid page types, and cycles.
 The fixed-slot region is intentionally specific to the current fixed-size Row. Supporting
 variable-length tuples will require a new RecordPage layout version, likely with a slot
 directory of offsets and lengths. The `(pageId, slotId)` RID shape can remain unchanged.
+
+## Persistent index pages
+
+Persistent B+ tree metadata, leaf, and internal pages use independent versioned page
+formats. They do not reuse the database catalog-root placeholder. Their exact layouts,
+capacities, links, and validation rules are documented in
+[bplus-tree-storage.md](bplus-tree-storage.md).
