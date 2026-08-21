@@ -6,6 +6,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(minidb_core
     src/database_format.cpp
     src/pager.cpp
+    src/record_page.cpp
     src/row.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
