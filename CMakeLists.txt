@@ -34,3 +34,7 @@ add_test(NAME record_page_test COMMAND record_page_test)
 add_executable(record_store_test tests/record_store_test.cpp)
 target_link_libraries(record_store_test PRIVATE minidb_core)
 add_test(NAME record_store_test COMMAND record_store_test)
+
+add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
+target_link_libraries(bplus_tree_test PRIVATE minidb_core)
+add_test(NAME bplus_tree_test COMMAND bplus_tree_test)
