@@ -197,7 +197,10 @@ private:
     [[nodiscard]] IndexKey subtreeMinimum(PageId pageId, const Metadata& metadata) const;
     [[nodiscard]] PageId allocateLeaf(const LeafNode& leaf);
     [[nodiscard]] PageId allocateInternal(const InternalNode& internalNode);
-    [[nodiscard]] SplitResult splitLeaf(PageId pageId, LeafNode leaf);
+    [[nodiscard]] SplitResult splitLeaf(
+        PageId pageId,
+        LeafNode leaf,
+        const Metadata& metadata);
     [[nodiscard]] SplitResult splitInternal(PageId pageId, InternalNode internalNode);
 };
 
