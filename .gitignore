@@ -1,0 +1,9 @@
+# CMake build output
+/build/
+/cmake-build-*/
+
+# Local database files
+*.db
+
+# Platform/editor files
+.DS_Store
