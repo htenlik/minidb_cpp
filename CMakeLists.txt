@@ -7,6 +7,7 @@ add_library(minidb_core
     src/database_format.cpp
     src/pager.cpp
     src/record_page.cpp
+    src/record_store.cpp
     src/row.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
