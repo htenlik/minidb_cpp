@@ -1,33 +1,55 @@
 #pragma once
+
+#include "minidb/database_format.hpp"
+
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <unordered_map>
+
 namespace minidb {
+
 class Pager {
 public:
-    static constexpr std::size_t PAGE_SIZE = 4096;
+    static constexpr std::size_t PAGE_SIZE = database_format::PAGE_SIZE;
     using Page = std::array<std::byte, PAGE_SIZE>;
+
     explicit Pager(const std::string& path);
     ~Pager();
+
     Pager(const Pager&) = delete;
     Pager& operator=(const Pager&) = delete;
-    Page& getPage(std::uint32_t pageId);
-    std::uint32_t allocatePage();
-    void markDirty(std::uint32_t pageId);
-    void flush(std::uint32_t pageId);
+
+    Page& getPage(PageId pageId);
+    PageId allocatePage();
+    void markDirty(PageId pageId);
+    void flush(PageId pageId);
     void flushAll();
-    [[nodiscard]] std::uint32_t pageCount() const noexcept { return pageCount_; }
+
+    [[nodiscard]] PageId pageCount() const noexcept { return pageCount_; }
+    [[nodiscard]] const database_format::DatabaseHeader& databaseHeader() const noexcept {
+        return databaseHeader_;
+    }
+
 private:
-    struct Frame { Page data{}; bool dirty = false; };
+    struct Frame {
+        Page data{};
+        bool dirty = false;
+    };
+
     std::string path_;
     std::fstream file_;
-    std::uint32_t pageCount_ = 0;
-    std::unordered_map<std::uint32_t, std::unique_ptr<Frame>> cache_;
+    PageId pageCount_ = 0;
+    database_format::DatabaseHeader databaseHeader_{};
+    std::unordered_map<PageId, std::unique_ptr<Frame>> cache_;
+
     void openOrCreate();
-    void loadPageFromDisk(std::uint32_t pageId, Frame& frame);
+    void initializeDatabase();
+    void loadAndValidateDatabaseHeader();
+    void loadPageFromDisk(PageId pageId, Frame& frame);
+    static void requireDataPage(PageId pageId);
 };
+
 } // namespace minidb
