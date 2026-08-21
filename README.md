@@ -42,6 +42,24 @@ Record Store <-> Pager
 9. TCP server/client protocol
 10. Benchmarks, tests, architecture documentation
 
+**Milestone 2.5 — versioned database metadata page** ✅
+
+## On-disk format
+
+```text
+MiniDB++ database file
+
+Page 0: database metadata / file header
+Page 1: allocatable storage
+Page 2: allocatable storage
+...
+```
+
+New databases begin with one 4096-byte metadata page, so the first normal allocation
+returns page ID 1. Existing databases are validated for the MiniDB++ magic, format
+version, page size, header size, and whole-page file size before normal pages are exposed.
+See [docs/storage-format.md](docs/storage-format.md) for the exact version 1 byte layout.
+
 ## Row serialization
 
 Rows contain a 32-bit ID, a username of at most 32 bytes, and an email address of at most
@@ -60,6 +78,10 @@ Explicit serialization produces a stable, deterministic disk format. Writing a C
 pointers and capacity, along with potentially platform-dependent padding and byte order;
 those bytes would not reconstruct valid strings in another process.
 
+The 294-byte row layout and the database file format version are separate concerns. The
+file header identifies the surrounding database format; row encoding describes how an
+individual row is converted to bytes within a future record-storage layer.
+
 ## Build
 
 ```bash
@@ -73,9 +95,9 @@ Example:
 
 ```text
 minidb> .pages
-0 page(s)
+1 page(s)
 minidb> .alloc
-allocated page 0
+allocated page 1
 minidb> .flush
 flushed
 minidb> .quit
