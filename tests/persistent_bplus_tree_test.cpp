@@ -79,6 +79,17 @@ std::uint32_t readUint32(
     return value;
 }
 
+std::uint16_t readUint16(
+    const minidb::Pager::Page& page,
+    std::size_t offset) {
+    std::uint16_t value = 0;
+    for (std::size_t index = 0; index < 2; ++index) {
+        value |= static_cast<std::uint16_t>(
+            std::to_integer<std::uint16_t>(page[offset + index]) << (index * 8U));
+    }
+    return value;
+}
+
 std::uint64_t readUint64(
     const minidb::Pager::Page& page,
     std::size_t offset) {
@@ -205,6 +216,29 @@ void testRootGrowthLookupDuplicateAndRanges() {
 
     minidb::test::require(tree.insert(20, original), "First persistent insert failed");
     const auto leafRoot = tree.rootPageId();
+    const auto& leafBytes = pager.getPage(leafRoot);
+    const auto entryOffset = minidb::persistent_bplus_leaf_layout::entryOffset(0);
+    minidb::test::require(
+        std::equal(
+            minidb::persistent_bplus_leaf_layout::MAGIC.begin(),
+            minidb::persistent_bplus_leaf_layout::MAGIC.end(),
+            leafBytes.begin()),
+        "Leaf magic was not encoded at offset zero");
+    minidb::test::require(
+        readUint32(leafBytes, minidb::persistent_bplus_leaf_layout::KEY_COUNT_OFFSET) == 1,
+        "Leaf key count was not encoded");
+    minidb::test::require(
+        readUint32(leafBytes, entryOffset) == 20
+            && readUint32(
+                   leafBytes,
+                   entryOffset + minidb::persistent_bplus_leaf_layout::KEY_SIZE)
+                == original.pageId
+            && readUint16(
+                   leafBytes,
+                   entryOffset + minidb::persistent_bplus_leaf_layout::KEY_SIZE
+                       + minidb::persistent_bplus_leaf_layout::RECORD_PAGE_ID_SIZE)
+                == original.slotId,
+        "Leaf entry fields were not encoded at their explicit offsets");
     minidb::test::require(tree.height() == 1, "First insert did not create a leaf root");
     minidb::test::require(tree.find(20) == original, "First persistent RID was not found");
     minidb::test::require(
@@ -226,6 +260,19 @@ void testRootGrowthLookupDuplicateAndRanges() {
         "Maximum uint32 key insert failed");
     minidb::test::require(tree.height() == 2, "Leaf overflow did not create internal root");
     minidb::test::require(tree.rootPageId() != leafRoot, "Root split did not change root page");
+    const auto& internalBytes = pager.getPage(tree.rootPageId());
+    minidb::test::require(
+        std::equal(
+            minidb::persistent_bplus_internal_layout::MAGIC.begin(),
+            minidb::persistent_bplus_internal_layout::MAGIC.end(),
+            internalBytes.begin()),
+        "Internal magic was not encoded at offset zero");
+    minidb::test::require(
+        readUint32(
+            internalBytes,
+            minidb::persistent_bplus_internal_layout::CHILD_COUNT_OFFSET)
+            == 2,
+        "Internal child count was not encoded");
 
     for (const auto key : {30U, 40U, 50U, 60U, 70U}) {
         static_cast<void>(tree.insert(key, makeRid(key, recordPageId)));
