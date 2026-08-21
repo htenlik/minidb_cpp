@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(minidb_core
+    src/bplus_tree.cpp
     src/database_format.cpp
     src/pager.cpp
     src/record_page.cpp
