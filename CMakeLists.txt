@@ -3,7 +3,10 @@ project(minidb LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-add_library(minidb_core src/pager.cpp)
+add_library(minidb_core
+    src/pager.cpp
+    src/row.cpp
+)
 target_include_directories(minidb_core PUBLIC include)
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
