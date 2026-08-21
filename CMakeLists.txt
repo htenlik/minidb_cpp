@@ -19,3 +19,7 @@ add_test(NAME pager_test COMMAND pager_test)
 add_executable(row_test tests/row_test.cpp)
 target_link_libraries(row_test PRIVATE minidb_core)
 add_test(NAME row_test COMMAND row_test)
+
+add_executable(database_format_test tests/database_format_test.cpp)
+target_link_libraries(database_format_test PRIVATE minidb_core)
+add_test(NAME database_format_test COMMAND database_format_test)

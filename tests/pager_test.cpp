@@ -5,7 +5,8 @@
 #include <iostream>
 #include <string>
 int main() {
-    const std::string path = "pager_test.db";
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "minidb_cpp_pager_test.db").string();
     std::filesystem::remove(path);
     {
         minidb::Pager pager(path);
