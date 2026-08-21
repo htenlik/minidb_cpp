@@ -1,23 +1,13 @@
 #pragma once
 
-#include "minidb/record_id.hpp"
+#include "minidb/index_types.hpp"
 
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
 
 namespace minidb {
-
-using IndexKey = std::uint32_t;
-
-struct IndexEntry {
-    IndexKey key{};
-    RecordId recordId{};
-
-    bool operator==(const IndexEntry&) const = default;
-};
 
 class BPlusTree {
 public:

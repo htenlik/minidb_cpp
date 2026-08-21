@@ -7,6 +7,7 @@ add_library(minidb_core
     src/bplus_tree.cpp
     src/database_format.cpp
     src/pager.cpp
+    src/persistent_bplus_tree.cpp
     src/record_page.cpp
     src/record_store.cpp
     src/row.cpp
