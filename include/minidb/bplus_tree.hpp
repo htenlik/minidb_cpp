@@ -34,6 +34,7 @@ public:
     BPlusTree& operator=(const BPlusTree&) = delete;
 
     [[nodiscard]] bool insert(IndexKey key, RecordId recordId);
+    [[nodiscard]] bool erase(IndexKey key);
     [[nodiscard]] std::optional<RecordId> find(IndexKey key) const;
     [[nodiscard]] std::vector<IndexEntry> rangeScan(
         IndexKey lowerInclusive,
@@ -76,6 +77,9 @@ private:
     void splitLeaf(Node* leaf);
     void splitInternal(Node* internalNode);
     void insertRightSibling(Node* left, std::unique_ptr<Node> right);
+    void rebalanceLeaf(Node* leaf);
+    void rebalanceInternal(Node* internalNode);
+    void finishInternalRemoval(Node* internalNode);
 };
 
 } // namespace minidb

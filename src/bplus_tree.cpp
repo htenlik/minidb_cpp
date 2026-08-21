@@ -67,6 +67,37 @@ bool BPlusTree::insert(IndexKey key, RecordId recordId) {
     return true;
 }
 
+bool BPlusTree::erase(IndexKey key) {
+    Node* leaf = findLeaf(key);
+    if (!leaf) {
+        return false;
+    }
+
+    const auto position = std::lower_bound(leaf->keys.begin(), leaf->keys.end(), key);
+    if (position == leaf->keys.end() || *position != key) {
+        return false;
+    }
+
+    const auto index = static_cast<std::size_t>(position - leaf->keys.begin());
+    leaf->keys.erase(position);
+    leaf->values.erase(leaf->values.begin() + static_cast<std::ptrdiff_t>(index));
+    --size_;
+
+    if (leaf == root_.get()) {
+        if (leaf->keys.empty()) {
+            root_.reset();
+        }
+        return true;
+    }
+
+    if (leaf->keys.size() >= leafMinKeys_) {
+        refreshAncestors(leaf);
+    } else {
+        rebalanceLeaf(leaf);
+    }
+    return true;
+}
+
 std::optional<RecordId> BPlusTree::find(IndexKey key) const {
     const Node* leaf = findLeaf(key);
     if (!leaf) {
@@ -270,6 +301,140 @@ void BPlusTree::insertRightSibling(Node* left, std::unique_ptr<Node> right) {
         splitInternal(parent);
     } else {
         refreshAncestors(parent);
+    }
+}
+
+void BPlusTree::rebalanceLeaf(Node* leaf) {
+    Node* parent = leaf->parent;
+    const auto index = childIndex(*parent, leaf);
+    Node* left = index == 0 ? nullptr : parent->children[index - 1].get();
+    Node* right = index + 1 == parent->children.size()
+        ? nullptr
+        : parent->children[index + 1].get();
+
+    if (left && left->keys.size() > leafMinKeys_) {
+        leaf->keys.insert(leaf->keys.begin(), left->keys.back());
+        leaf->values.insert(leaf->values.begin(), left->values.back());
+        left->keys.pop_back();
+        left->values.pop_back();
+        rebuildKeys(*parent);
+        refreshAncestors(parent);
+        return;
+    }
+
+    if (right && right->keys.size() > leafMinKeys_) {
+        leaf->keys.push_back(right->keys.front());
+        leaf->values.push_back(right->values.front());
+        right->keys.erase(right->keys.begin());
+        right->values.erase(right->values.begin());
+        rebuildKeys(*parent);
+        refreshAncestors(parent);
+        return;
+    }
+
+    if (left) {
+        left->keys.insert(left->keys.end(), leaf->keys.begin(), leaf->keys.end());
+        left->values.insert(left->values.end(), leaf->values.begin(), leaf->values.end());
+        left->next = leaf->next;
+        if (leaf->next) {
+            leaf->next->previous = left;
+        }
+        parent->children.erase(
+            parent->children.begin() + static_cast<std::ptrdiff_t>(index));
+    } else if (right) {
+        leaf->keys.insert(leaf->keys.end(), right->keys.begin(), right->keys.end());
+        leaf->values.insert(leaf->values.end(), right->values.begin(), right->values.end());
+        leaf->next = right->next;
+        if (right->next) {
+            right->next->previous = leaf;
+        }
+        parent->children.erase(
+            parent->children.begin() + static_cast<std::ptrdiff_t>(index + 1));
+    } else {
+        throw std::logic_error("Underfull B+ tree leaf has no sibling.");
+    }
+
+    finishInternalRemoval(parent);
+}
+
+void BPlusTree::rebalanceInternal(Node* internalNode) {
+    Node* parent = internalNode->parent;
+    const auto index = childIndex(*parent, internalNode);
+    Node* left = index == 0 ? nullptr : parent->children[index - 1].get();
+    Node* right = index + 1 == parent->children.size()
+        ? nullptr
+        : parent->children[index + 1].get();
+    const auto minimumChildren = internalMinKeys_ + 1;
+
+    if (left && left->children.size() > minimumChildren) {
+        auto child = std::move(left->children.back());
+        left->children.pop_back();
+        child->parent = internalNode;
+        internalNode->children.insert(internalNode->children.begin(), std::move(child));
+        rebuildKeys(*left);
+        rebuildKeys(*internalNode);
+        rebuildKeys(*parent);
+        refreshAncestors(parent);
+        return;
+    }
+
+    if (right && right->children.size() > minimumChildren) {
+        auto child = std::move(right->children.front());
+        right->children.erase(right->children.begin());
+        child->parent = internalNode;
+        internalNode->children.push_back(std::move(child));
+        rebuildKeys(*right);
+        rebuildKeys(*internalNode);
+        rebuildKeys(*parent);
+        refreshAncestors(parent);
+        return;
+    }
+
+    if (left) {
+        left->children.reserve(left->children.size() + internalNode->children.size());
+        for (auto& child : internalNode->children) {
+            child->parent = left;
+            left->children.push_back(std::move(child));
+        }
+        parent->children.erase(
+            parent->children.begin() + static_cast<std::ptrdiff_t>(index));
+        rebuildKeys(*left);
+    } else if (right) {
+        internalNode->children.reserve(
+            internalNode->children.size() + right->children.size());
+        for (auto& child : right->children) {
+            child->parent = internalNode;
+            internalNode->children.push_back(std::move(child));
+        }
+        parent->children.erase(
+            parent->children.begin() + static_cast<std::ptrdiff_t>(index + 1));
+        rebuildKeys(*internalNode);
+    } else {
+        throw std::logic_error("Underfull B+ tree internal node has no sibling.");
+    }
+
+    finishInternalRemoval(parent);
+}
+
+void BPlusTree::finishInternalRemoval(Node* internalNode) {
+    if (internalNode->children.empty()) {
+        throw std::logic_error("B+ tree internal node lost all children.");
+    }
+
+    rebuildKeys(*internalNode);
+    if (internalNode == root_.get()) {
+        if (internalNode->children.size() == 1) {
+            auto newRoot = std::move(internalNode->children.front());
+            newRoot->parent = nullptr;
+            root_ = std::move(newRoot);
+        }
+        return;
+    }
+
+    if (internalNode->keys.size() >= internalMinKeys_) {
+        refreshAncestors(internalNode);
+    } else {
+        rebalanceInternal(internalNode);
     }
 }
 
