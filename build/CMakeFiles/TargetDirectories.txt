@@ -1,0 +1,6 @@
+/Users/huseyintenlik/minidb_cpp/build/CMakeFiles/minidb_core.dir
+/Users/huseyintenlik/minidb_cpp/build/CMakeFiles/minidb.dir
+/Users/huseyintenlik/minidb_cpp/build/CMakeFiles/pager_test.dir
+/Users/huseyintenlik/minidb_cpp/build/CMakeFiles/test.dir
+/Users/huseyintenlik/minidb_cpp/build/CMakeFiles/edit_cache.dir
+/Users/huseyintenlik/minidb_cpp/build/CMakeFiles/rebuild_cache.dir

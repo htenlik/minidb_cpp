@@ -1,0 +1,2 @@
+/usr/bin/ar qc libminidb_core.a CMakeFiles/minidb_core.dir/src/pager.cpp.o
+/usr/bin/ranlib libminidb_core.a
