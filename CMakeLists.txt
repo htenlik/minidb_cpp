@@ -48,3 +48,7 @@ add_test(NAME bplus_tree_test COMMAND bplus_tree_test)
 add_executable(persistent_bplus_tree_test tests/persistent_bplus_tree_test.cpp)
 target_link_libraries(persistent_bplus_tree_test PRIVATE minidb_core)
 add_test(NAME persistent_bplus_tree_test COMMAND persistent_bplus_tree_test)
+
+add_executable(persistent_bplus_tree_delete_test tests/persistent_bplus_tree_delete_test.cpp)
+target_link_libraries(persistent_bplus_tree_delete_test PRIVATE minidb_core)
+add_test(NAME persistent_bplus_tree_delete_test COMMAND persistent_bplus_tree_delete_test)
