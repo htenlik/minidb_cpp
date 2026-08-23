@@ -15,12 +15,13 @@ written to disk. The index stores RIDs only and does not read or persist complet
 The caller identifies an index with its stable `IndexMetaPageId`:
 
 ```text
-Future catalog -> IndexMetaPageId -> current RootPageId -> tree nodes
+Catalog Table Definition -> IndexMetaPageId -> current RootPageId -> tree nodes
 ```
 
 A root PageId can change when the root splits, while the metadata page does not. Tests
-retain `IndexMetaPageId` externally across reopen; a future catalog will own that mapping.
-The database metadata page's catalog-root field is not reused. Its free-list-root field
+retain `IndexMetaPageId` externally across reopen; Milestone 5B Table Definitions now
+own that mapping for primary indexes. The database metadata page's catalog-root field
+identifies the Catalog, never an index root. Its free-list-root field
 belongs to the global PageAllocator, never to a particular index.
 
 ## Index Metadata Page: version 1
@@ -221,9 +222,10 @@ Corruption is rejected; no automatic repair is attempted.
 
 ## Deliberate current limits
 
-RecordStore still uses Pager's append-only allocation primitive; migrating it to the
-global allocator is intentionally deferred. Catalog integration, concurrency,
-transactions, WAL, and recovery are not implemented.
+RecordStore still uses Pager's append-only allocation primitive; migrating that legacy
+heap to the global allocator is intentionally deferred. The Milestone 5B Catalog stores
+stable index metadata identities, but concurrency, transactions, WAL, and recovery are
+not implemented.
 
 Persistence is guaranteed only after a successful flush or clean Pager close. A split,
 merge, or root shrink can modify several nodes plus index and database metadata, and

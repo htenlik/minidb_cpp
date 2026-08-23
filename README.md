@@ -38,10 +38,11 @@ Record Store <-> Pager
 5. **Persistent B+ tree insertion/read (Milestone 4B.1)** ✅
 6. **Persistent B+ tree deletion/reclamation (Milestone 4B.2)** ✅
 7. **Variable-length tuple heap / slotted pages (Milestone 5A)** ✅
-8. Schema, catalog, and table layer (Milestone 5B — next)
-9. SQL lexer/parser and query execution
-10. TCP server/client protocol
-11. Benchmarks, tests, architecture documentation
+8. **Schema, catalog, and table layer (Milestone 5B)** ✅
+9. SQL lexer/parser (next)
+10. Query execution
+11. TCP server/client protocol
+12. Benchmarks, tests, architecture documentation
 
 **Milestone 2.5 — versioned database metadata page** ✅
 
@@ -81,7 +82,7 @@ those bytes would not reconstruct valid strings in another process.
 
 The 294-byte row layout and the database file format version are separate concerns. The
 file header identifies the surrounding database format; row encoding describes how an
-individual row is converted to bytes within a future record-storage layer.
+individual legacy row is converted to bytes within its fixed RecordPage layer.
 
 ## Record storage
 
@@ -89,7 +90,8 @@ The record store persists rows in fixed-slot RecordPages linked through page IDs
 record is addressed by a stable `RecordId { pageId, slotId }`; scans visit linked pages
 in order and occupied slots in increasing order. Deletes do not compact or move other
 records, and freed slots can be reused by later inserts. Record-heap head page IDs remain
-explicit caller-owned values until a future catalog milestone.
+explicit caller-owned values; the Milestone 5B Catalog uses the newer TupleStore rather
+than retrofitting catalog ownership onto this legacy heap format.
 
 The exact RecordPage version 1 header, occupancy bitmap, capacity calculation, and RID
 semantics are documented in [docs/storage-format.md](docs/storage-format.md).
@@ -116,6 +118,15 @@ reopen support, and disk-structure validation. See
 [docs/bplus-tree-storage.md](docs/bplus-tree-storage.md) for the exact byte layouts.
 The global allocation/free-list format is documented in
 [docs/page-allocation.md](docs/page-allocation.md).
+
+## Relational storage layer
+
+Milestone 5B adds immutable schemas, canonical versioned tuple encoding, a persistent
+catalog rooted through database metadata, and schema-aware tables that coordinate a
+TupleStore with an optional `UINT32` primary-key B+ tree. See
+[docs/schema-and-tuples.md](docs/schema-and-tuples.md),
+[docs/catalog.md](docs/catalog.md), and [docs/table-layer.md](docs/table-layer.md).
+SQL parsing and query execution remain later milestones.
 
 ## Build
 

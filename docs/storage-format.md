@@ -33,15 +33,17 @@ is reserved. Newly created databases zero every reserved byte.
 | 8 | 4 | `uint32`, little-endian | Database format version | `1` |
 | 12 | 4 | `uint32`, little-endian | Page size | `4096` |
 | 16 | 4 | `uint32`, little-endian | Header size | `64` |
-| 20 | 4 | `PageId`, little-endian | Catalog root page | `INVALID_PAGE_ID` initially |
+| 20 | 4 | `PageId`, little-endian | Catalog metadata root page | Catalog Metadata or `INVALID_PAGE_ID` |
 | 24 | 4 | `PageId`, little-endian | Free-list root page | Free Page head or `INVALID_PAGE_ID` |
 | 28 | 36 | Zero-filled | Reserved header fields | `0` |
 | 64 | 4032 | Zero-filled | Reserved metadata-page space | `0` |
 
-The catalog root remains a future-use placeholder. The free-list root is the persisted
-head of the reusable page allocator introduced in Milestone 4B.2; new databases still
-initialize it to `INVALID_PAGE_ID`. Its page format and validation rules are documented
-in [page-allocation.md](page-allocation.md).
+The catalog root remains `INVALID_PAGE_ID` until the logical Catalog is explicitly
+bootstrapped; existing version-1 databases need no migration. Its metadata and table-
+definition formats are documented in [catalog.md](catalog.md). The free-list root is the
+persisted head of the reusable page allocator introduced in Milestone 4B.2; new
+databases initialize it to `INVALID_PAGE_ID`. Its format is documented in
+[page-allocation.md](page-allocation.md).
 
 ## Creation and validation
 
@@ -135,7 +137,7 @@ count, occupancy count, and unused occupancy bits. Corruption is rejected withou
 ## RecordStore heap chain
 
 A RecordStore is a singly linked sequence of RecordPages. Its head page ID is supplied
-explicitly when reopening because no catalog exists yet:
+explicitly when reopening because this legacy fixed-row heap is not catalog-managed:
 
 ```text
 head -> RecordPage -> RecordPage -> ... -> INVALID_PAGE_ID
@@ -164,3 +166,11 @@ Persistent B+ tree metadata, leaf, and internal pages use independent versioned 
 formats. They do not reuse the database catalog-root placeholder. Their exact layouts,
 capacities, links, and validation rules are documented in
 [bplus-tree-storage.md](bplus-tree-storage.md).
+
+## Logical schemas, tuples, catalog, and tables
+
+Logical tuple and schema encodings have independent versions and are documented in
+[schema-and-tuples.md](schema-and-tuples.md). The Catalog Metadata Page and catalog
+Table Definition tuple formats are documented in [catalog.md](catalog.md). Their
+composition with TupleStore and the persistent primary index is described in
+[table-layer.md](table-layer.md).

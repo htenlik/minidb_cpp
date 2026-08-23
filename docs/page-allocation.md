@@ -10,7 +10,7 @@ storage structures -> PageAllocator -> free list or Pager append -> database fil
 `Pager` remains responsible for fixed-size page I/O, caching, dirty tracking, physical
 append allocation, and protecting metadata page 0. `PageAllocator` owns free-list
 interpretation, validation, reclamation, and reuse. It is independent of B+ tree page
-types and can later serve record, catalog, and other storage structures.
+types and now serves tuple heaps, persistent indexes, and catalog metadata.
 
 ## Free-list head
 
