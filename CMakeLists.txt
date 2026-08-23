@@ -13,6 +13,7 @@ add_library(minidb_core
     src/record_store.cpp
     src/row.cpp
     src/slotted_page.cpp
+    src/tuple_store.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
 add_executable(minidb src/main.cpp)
