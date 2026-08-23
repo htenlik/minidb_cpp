@@ -2,6 +2,7 @@
 
 #include "minidb/pager.hpp"
 #include "minidb/record_id.hpp"
+#include "minidb/tuple_bytes.hpp"
 
 #include <array>
 #include <cstddef>
@@ -11,8 +12,6 @@
 #include <vector>
 
 namespace minidb {
-
-using TupleBytes = std::vector<std::byte>;
 
 namespace slotted_page_layout {
 

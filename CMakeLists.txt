@@ -12,7 +12,9 @@ add_library(minidb_core
     src/record_page.cpp
     src/record_store.cpp
     src/row.cpp
+    src/schema.cpp
     src/slotted_page.cpp
+    src/tuple_codec.cpp
     src/tuple_store.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
@@ -54,6 +56,10 @@ add_test(NAME tuple_store_test COMMAND tuple_store_test)
 add_executable(tuple_store_random_test tests/tuple_store_random_test.cpp)
 target_link_libraries(tuple_store_random_test PRIVATE minidb_core)
 add_test(NAME tuple_store_random_test COMMAND tuple_store_random_test)
+
+add_executable(schema_tuple_test tests/schema_tuple_test.cpp)
+target_link_libraries(schema_tuple_test PRIVATE minidb_core)
+add_test(NAME schema_tuple_test COMMAND schema_tuple_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
