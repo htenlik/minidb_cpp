@@ -37,9 +37,9 @@ Record Store <-> Pager
 4. **In-memory B+ tree primary index (Milestone 4A)** ✅
 5. **Persistent B+ tree insertion/read (Milestone 4B.1)** ✅
 6. **Persistent B+ tree deletion/reclamation (Milestone 4B.2)** ✅
-7. SQL lexer
-8. SQL parser
-9. Query executor
+7. **Variable-length tuple heap / slotted pages (Milestone 5A)** ✅
+8. Schema, catalog, and table layer (Milestone 5B — next)
+9. SQL lexer/parser and query execution
 10. TCP server/client protocol
 11. Benchmarks, tests, architecture documentation
 
@@ -93,6 +93,12 @@ explicit caller-owned values until a future catalog milestone.
 
 The exact RecordPage version 1 header, occupancy bitmap, capacity calculation, and RID
 semantics are documented in [docs/storage-format.md](docs/storage-format.md).
+
+Milestone 5A adds a separate variable-length `TupleStore`. It persists opaque byte
+sequences in compacting slotted pages, preserves `(PageId, SlotId)` identifiers while
+payload bytes move, and reclaims empty pages through the global allocator. The legacy
+fixed-row format remains supported unchanged. See
+[docs/slotted-pages.md](docs/slotted-pages.md) for the exact layouts and heap semantics.
 
 ## Primary index
 

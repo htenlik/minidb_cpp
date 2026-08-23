@@ -146,9 +146,17 @@ initializes, and links a new RecordPage. Full scans return live `(RecordId, Row)
 linked-page order and then increasing slot-ID order. RecordStore validates the chain and
 rejects dangling links, invalid page types, and cycles.
 
-The fixed-slot region is intentionally specific to the current fixed-size Row. Supporting
-variable-length tuples will require a new RecordPage layout version, likely with a slot
-directory of offsets and lengths. The `(pageId, slotId)` RID shape can remain unchanged.
+The fixed-slot region remains the immutable legacy Row format. Variable-length tuples
+use a separate SlottedPage page type and TupleStore rather than changing RecordPage v1.
+Both layers share the `(pageId, slotId)` RID shape.
+
+## Variable-length tuple heap
+
+SlottedPage and Tuple Heap Metadata pages have independent versioned formats. They store
+opaque byte sequences, use stable slot-directory positions as SlotIds, compact tuple
+payloads without changing RIDs, and allocate/reclaim pages through PageAllocator. Their
+exact byte layouts and validation rules are documented in
+[slotted-pages.md](slotted-pages.md).
 
 ## Persistent index pages
 
