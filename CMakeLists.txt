@@ -89,6 +89,14 @@ add_executable(sql_lexer_test tests/sql_lexer_test.cpp)
 target_link_libraries(sql_lexer_test PRIVATE minidb_sql)
 add_test(NAME sql_lexer_test COMMAND sql_lexer_test)
 
+add_executable(sql_parser_test tests/sql_parser_test.cpp)
+target_link_libraries(sql_parser_test PRIVATE minidb_sql)
+add_test(NAME sql_parser_test COMMAND sql_parser_test)
+
+add_executable(sql_parser_robustness_test tests/sql_parser_robustness_test.cpp)
+target_link_libraries(sql_parser_robustness_test PRIVATE minidb_sql)
+add_test(NAME sql_parser_robustness_test COMMAND sql_parser_robustness_test)
+
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
 add_test(NAME bplus_tree_test COMMAND bplus_tree_test)
