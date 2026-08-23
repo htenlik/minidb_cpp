@@ -39,8 +39,8 @@ Record Store <-> Pager
 6. **Persistent B+ tree deletion/reclamation (Milestone 4B.2)** ✅
 7. **Variable-length tuple heap / slotted pages (Milestone 5A)** ✅
 8. **Schema, catalog, and table layer (Milestone 5B)** ✅
-9. SQL lexer/parser (next)
-10. Query execution
+9. **SQL lexer/parser/AST (Milestone 6)** ✅
+10. Query execution (next)
 11. TCP server/client protocol
 12. Benchmarks, tests, architecture documentation
 
@@ -126,7 +126,14 @@ catalog rooted through database metadata, and schema-aware tables that coordinat
 TupleStore with an optional `UINT32` primary-key B+ tree. See
 [docs/schema-and-tuples.md](docs/schema-and-tuples.md),
 [docs/catalog.md](docs/catalog.md), and [docs/table-layer.md](docs/table-layer.md).
-SQL parsing and query execution remain later milestones.
+Query execution remains a later milestone.
+
+## SQL front end
+
+Milestone 6 adds a separate database-independent `minidb_sql` library with a hand-written
+lexer, structured source diagnostics, move-only AST, and recursive-descent parser for
+CREATE TABLE, INSERT, SELECT, UPDATE, and DELETE. It performs no Catalog lookup and no
+execution. See [docs/sql-parser.md](docs/sql-parser.md) for the exact dialect and grammar.
 
 ## Build
 
