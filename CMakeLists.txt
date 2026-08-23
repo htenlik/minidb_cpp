@@ -21,6 +21,13 @@ add_library(minidb_core
     src/tuple_store.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
+
+add_library(minidb_sql
+    src/sql_error.cpp
+    src/sql_lexer.cpp
+)
+target_include_directories(minidb_sql PUBLIC include)
+
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
 enable_testing()
@@ -75,6 +82,10 @@ add_test(NAME table_test COMMAND table_test)
 add_executable(table_random_test tests/table_random_test.cpp)
 target_link_libraries(table_random_test PRIVATE minidb_core)
 add_test(NAME table_random_test COMMAND table_random_test)
+
+add_executable(sql_lexer_test tests/sql_lexer_test.cpp)
+target_link_libraries(sql_lexer_test PRIVATE minidb_sql)
+add_test(NAME sql_lexer_test COMMAND sql_lexer_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
