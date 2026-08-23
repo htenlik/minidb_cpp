@@ -34,12 +34,14 @@ is reserved. Newly created databases zero every reserved byte.
 | 12 | 4 | `uint32`, little-endian | Page size | `4096` |
 | 16 | 4 | `uint32`, little-endian | Header size | `64` |
 | 20 | 4 | `PageId`, little-endian | Catalog root page | `INVALID_PAGE_ID` initially |
-| 24 | 4 | `PageId`, little-endian | Free-list root page | `INVALID_PAGE_ID` initially |
+| 24 | 4 | `PageId`, little-endian | Free-list root page | Free Page head or `INVALID_PAGE_ID` |
 | 28 | 36 | Zero-filled | Reserved header fields | `0` |
 | 64 | 4032 | Zero-filled | Reserved metadata-page space | `0` |
 
-The root fields are placeholders for later storage milestones. Version 1 defines their
-location and initial null value but does not yet implement a catalog or free list.
+The catalog root remains a future-use placeholder. The free-list root is the persisted
+head of the reusable page allocator introduced in Milestone 4B.2; new databases still
+initialize it to `INVALID_PAGE_ID`. Its page format and validation rules are documented
+in [page-allocation.md](page-allocation.md).
 
 ## Creation and validation
 

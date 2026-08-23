@@ -1,6 +1,6 @@
 # Persistent B+ tree storage format
 
-Milestone 4B.1 implements a page-native unique index:
+Milestones 4B.1–4B.2 implement a page-native unique index:
 
 ```text
 IndexKey (uint32) -> RecordId { PageId, SlotId }
@@ -20,7 +20,8 @@ Future catalog -> IndexMetaPageId -> current RootPageId -> tree nodes
 
 A root PageId can change when the root splits, while the metadata page does not. Tests
 retain `IndexMetaPageId` externally across reopen; a future catalog will own that mapping.
-The database metadata page's catalog-root and free-list-root fields are not reused.
+The database metadata page's catalog-root field is not reused. Its free-list-root field
+belongs to the global PageAllocator, never to a particular index.
 
 ## Index Metadata Page: version 1
 
@@ -40,8 +41,8 @@ Magic: ASCII `MDBIDXMD`. Creation zeroes the complete page.
 
 An empty index has `rootPageId = INVALID_PAGE_ID` and `entryCount = 0`; it allocates no
 empty root node. A nonempty index must have a legal root PageId and a nonzero count.
-Tree size is updated once after a successful unique insertion. Duplicate insertion does
-not alter the count.
+Tree size is updated once after a successful unique insertion or erase. Duplicate
+insertion and missing-key erase do not alter the count.
 
 ## Leaf Page: version 1
 
@@ -131,12 +132,16 @@ physical maximum. Production-default creation uses `406/507`; tests can persist 
 such as `3/3`, `4/4`, or `5/4` to force frequent splits with small datasets. Reopening an
 index reloads and validates the same limits.
 
-The validator derives non-root insertion occupancy as:
+The validator and deletion algorithm derive non-root occupancy as:
 
 ```text
-leaf minimum keys     = ceil(logical leaf maximum / 2)
-internal minimum keys = floor(logical internal maximum / 2)
+leaf minimum keys         = ceil(logical leaf maximum / 2)
+internal minimum children = ceil((logical internal maximum + 1) / 2)
+internal minimum keys     = minimum children - 1
 ```
+
+A leaf root may contain one entry. An internal root must have at least two children;
+when only one remains, that child replaces the root. The empty tree has no root page.
 
 ## Search, scans, and insertion
 
@@ -162,6 +167,35 @@ Every complete page rewrite zeroes unused bytes and calls `Pager::markDirty`. St
 insertion explicitly dirties the old node, new sibling, repaired neighboring leaf,
 parents, new root, and index metadata whenever each is modified.
 
+## Deletion and rebalancing
+
+`erase(key)` descends with the same operation-local `(parent PageId, child index)` path
+used for insertion. A missing key returns false without modifying pages. A successful
+erase removes only the key/RID index entry and decrements metadata size exactly once; it
+does not erase the referenced RecordStore row.
+
+If a non-root leaf underflows, deletion deterministically borrows from the left sibling,
+then the right sibling, when either is above minimum occupancy. Otherwise it merges into
+the left sibling when available, or absorbs the right sibling. Merges repair both leaf
+links and the adjacent leaf's reverse pointer before reclaiming the eliminated page.
+
+Internal underflow uses the same left-borrow, right-borrow, left-merge, right-merge
+policy over child PageIds. Separator arrays are not rotated as B-tree payload keys.
+Instead, every affected internal node derives each separator again as:
+
+```text
+keys[i] = minimum key reachable through children[i + 1]
+```
+
+This also repairs ancestors when deletion changes a subtree minimum without causing an
+underflow. Parent underflow repair recurses toward the root. An internal root left with
+one child is reclaimed and that child becomes the metadata root. Deleting the last entry
+reclaims the leaf root and restores `rootPageId = INVALID_PAGE_ID, entryCount = 0`.
+
+All index metadata and node allocation, including the first leaf and split siblings,
+uses the global PageAllocator. Eliminated leaf/internal/root pages are rewritten as Free
+Pages and become reusable; see [page-allocation.md](page-allocation.md).
+
 ## Reopen and validation
 
 `PersistentBPlusTree::open(pager, indexMetaPageId)` reads and validates metadata and the
@@ -179,17 +213,20 @@ The full validator walks PageIds without mutation and checks:
 - exact right-subtree-minimum separators and disjoint child ranges;
 - metadata entry count equals reachable leaf entries; and
 - forward/backward leaf chains exactly match tree-order leaves with no cycle, omission,
-  or duplicate.
+  or duplicate;
+- deletion-era minimum occupancy and root special cases; and
+- no metadata or tree-node PageId is also reachable from the global free list.
 
 Corruption is rejected; no automatic repair is attempted.
 
-## Deliberate Milestone 4B.1 limits
+## Deliberate current limits
 
-Persistent deletion, redistribution, merging, root shrinking, node reclamation, free-list
-management, catalog integration, concurrency, transactions, WAL, and recovery are not
-implemented. Supported operations do not make tree pages unreachable.
+RecordStore still uses Pager's append-only allocation primitive; migrating it to the
+global allocator is intentionally deferred. Catalog integration, concurrency,
+transactions, WAL, and recovery are not implemented.
 
-Persistence is guaranteed only after a successful flush or clean Pager close. A split
-can dirty several related pages, and there is no WAL or atomic multi-page commit. A crash
-between physical writes can therefore leave an inconsistent tree. Write ordering alone
-is not claimed as crash consistency; recovery belongs to a later transaction/WAL design.
+Persistence is guaranteed only after a successful flush or clean Pager close. A split,
+merge, or root shrink can modify several nodes plus index and database metadata, and
+there is no WAL or atomic multi-page commit. A crash between physical writes can leave
+an inconsistent tree or free list. Write ordering alone is not claimed as crash
+consistency; recovery belongs to a later transaction/WAL design.

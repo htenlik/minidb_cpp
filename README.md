@@ -36,7 +36,7 @@ Record Store <-> Pager
 3. **Persistent RID-based record storage** ✅
 4. **In-memory B+ tree primary index (Milestone 4A)** ✅
 5. **Persistent B+ tree insertion/read (Milestone 4B.1)** ✅
-6. Persistent B+ tree deletion/reclamation (Milestone 4B.2 — next)
+6. **Persistent B+ tree deletion/reclamation (Milestone 4B.2)** ✅
 7. SQL lexer
 8. SQL parser
 9. Query executor
@@ -103,11 +103,13 @@ validation. Tree nodes are deliberately not persisted or assigned Pager page IDs
 See [docs/bplus-tree.md](docs/bplus-tree.md) for its invariants and the Milestone 4B
 persistence boundary.
 
-Milestone 4B.1 adds a separate page-native persistent B+ tree with a stable index
+Milestones 4B.1–4B.2 add a separate page-native persistent B+ tree with a stable index
 metadata page identity, explicitly encoded leaf/internal pages, insertion and splitting,
-lookup, linked-leaf scans, reopen support, and disk-structure validation. Persistent
-deletion and page reclamation remain Milestone 4B.2. See
+lookup, linked-leaf scans, deletion and rebalancing, root shrinking, reusable free pages,
+reopen support, and disk-structure validation. See
 [docs/bplus-tree-storage.md](docs/bplus-tree-storage.md) for the exact byte layouts.
+The global allocation/free-list format is documented in
+[docs/page-allocation.md](docs/page-allocation.md).
 
 ## Build
 
