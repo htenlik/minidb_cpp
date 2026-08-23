@@ -27,6 +27,7 @@ public:
     void markDirty(PageId pageId);
     void flush(PageId pageId);
     void flushAll();
+    void updateFreeListRootPageId(PageId pageId);
 
     [[nodiscard]] PageId pageCount() const noexcept { return pageCount_; }
     [[nodiscard]] const database_format::DatabaseHeader& databaseHeader() const noexcept {
@@ -48,6 +49,7 @@ private:
     void openOrCreate();
     void initializeDatabase();
     void loadAndValidateDatabaseHeader();
+    void persistDatabaseHeader(const database_format::DatabaseHeader& header);
     void loadPageFromDisk(PageId pageId, Frame& frame);
     static void requireDataPage(PageId pageId);
 };

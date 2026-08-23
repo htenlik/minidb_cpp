@@ -56,21 +56,9 @@ void Pager::openOrCreate() {
 }
 
 void Pager::initializeDatabase() {
-    Page metadataPage{};
     databaseHeader_ = database_format::makeCurrentDatabaseHeader();
-    database_format::serializeDatabaseHeader(databaseHeader_, metadataPage);
-
-    file_.clear();
-    file_.seekp(0, std::ios::beg);
-    file_.write(
-        reinterpret_cast<const char*>(metadataPage.data()),
-        static_cast<std::streamsize>(metadataPage.size()));
-    file_.flush();
-    if (!file_) {
-        throw std::runtime_error("Failed to initialize database metadata page.");
-    }
-
     pageCount_ = 1;
+    persistDatabaseHeader(databaseHeader_);
 }
 
 void Pager::loadAndValidateDatabaseHeader() {
@@ -85,6 +73,21 @@ void Pager::loadAndValidateDatabaseHeader() {
     }
 
     databaseHeader_ = database_format::deserializeDatabaseHeader(metadataPage);
+}
+
+void Pager::persistDatabaseHeader(const database_format::DatabaseHeader& header) {
+    Page metadataPage{};
+    database_format::serializeDatabaseHeader(header, metadataPage);
+
+    file_.clear();
+    file_.seekp(0, std::ios::beg);
+    file_.write(
+        reinterpret_cast<const char*>(metadataPage.data()),
+        static_cast<std::streamsize>(metadataPage.size()));
+    file_.flush();
+    if (!file_) {
+        throw std::runtime_error("Failed to persist database metadata page.");
+    }
 }
 
 void Pager::loadPageFromDisk(PageId pageId, Frame& frame) {
@@ -167,6 +170,18 @@ void Pager::flushAll() {
     for (const auto& entry : cache_) {
         flush(entry.first);
     }
+}
+
+void Pager::updateFreeListRootPageId(PageId pageId) {
+    if (pageId != INVALID_PAGE_ID
+        && (pageId == database_format::METADATA_PAGE_ID || pageId >= pageCount_)) {
+        throw std::invalid_argument("Free-list root must identify an existing data page.");
+    }
+
+    auto updatedHeader = databaseHeader_;
+    updatedHeader.freeListRootPageId = pageId;
+    persistDatabaseHeader(updatedHeader);
+    databaseHeader_ = updatedHeader;
 }
 
 } // namespace minidb

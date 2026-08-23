@@ -6,6 +6,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(minidb_core
     src/bplus_tree.cpp
     src/database_format.cpp
+    src/page_allocator.cpp
     src/pager.cpp
     src/persistent_bplus_tree.cpp
     src/record_page.cpp
@@ -27,6 +28,10 @@ add_test(NAME row_test COMMAND row_test)
 add_executable(database_format_test tests/database_format_test.cpp)
 target_link_libraries(database_format_test PRIVATE minidb_core)
 add_test(NAME database_format_test COMMAND database_format_test)
+
+add_executable(page_allocator_test tests/page_allocator_test.cpp)
+target_link_libraries(page_allocator_test PRIVATE minidb_core)
+add_test(NAME page_allocator_test COMMAND page_allocator_test)
 
 add_executable(record_page_test tests/record_page_test.cpp)
 target_link_libraries(record_page_test PRIVATE minidb_core)
