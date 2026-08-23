@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(minidb_core
     src/bplus_tree.cpp
+    src/catalog.cpp
     src/database_format.cpp
     src/page_allocator.cpp
     src/pager.cpp
@@ -14,6 +15,8 @@ add_library(minidb_core
     src/row.cpp
     src/schema.cpp
     src/slotted_page.cpp
+    src/table.cpp
+    src/table_definition.cpp
     src/tuple_codec.cpp
     src/tuple_store.cpp
 )

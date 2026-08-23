@@ -27,6 +27,7 @@ public:
     void markDirty(PageId pageId);
     void flush(PageId pageId);
     void flushAll();
+    void updateCatalogRootPageId(PageId pageId);
     void updateFreeListRootPageId(PageId pageId);
 
     [[nodiscard]] PageId pageCount() const noexcept { return pageCount_; }

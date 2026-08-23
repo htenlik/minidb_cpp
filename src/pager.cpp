@@ -172,6 +172,18 @@ void Pager::flushAll() {
     }
 }
 
+void Pager::updateCatalogRootPageId(PageId pageId) {
+    if (pageId != INVALID_PAGE_ID
+        && (pageId == database_format::METADATA_PAGE_ID || pageId >= pageCount_)) {
+        throw std::invalid_argument("Catalog root must identify an existing data page.");
+    }
+
+    auto updatedHeader = databaseHeader_;
+    updatedHeader.catalogRootPageId = pageId;
+    persistDatabaseHeader(updatedHeader);
+    databaseHeader_ = updatedHeader;
+}
+
 void Pager::updateFreeListRootPageId(PageId pageId) {
     if (pageId != INVALID_PAGE_ID
         && (pageId == database_format::METADATA_PAGE_ID || pageId >= pageCount_)) {
