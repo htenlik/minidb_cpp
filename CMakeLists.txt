@@ -64,6 +64,18 @@ add_executable(schema_tuple_test tests/schema_tuple_test.cpp)
 target_link_libraries(schema_tuple_test PRIVATE minidb_core)
 add_test(NAME schema_tuple_test COMMAND schema_tuple_test)
 
+add_executable(catalog_test tests/catalog_test.cpp)
+target_link_libraries(catalog_test PRIVATE minidb_core)
+add_test(NAME catalog_test COMMAND catalog_test)
+
+add_executable(table_test tests/table_test.cpp)
+target_link_libraries(table_test PRIVATE minidb_core)
+add_test(NAME table_test COMMAND table_test)
+
+add_executable(table_random_test tests/table_random_test.cpp)
+target_link_libraries(table_random_test PRIVATE minidb_core)
+add_test(NAME table_random_test COMMAND table_random_test)
+
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
 add_test(NAME bplus_tree_test COMMAND bplus_tree_test)
