@@ -23,8 +23,10 @@ add_library(minidb_core
 target_include_directories(minidb_core PUBLIC include)
 
 add_library(minidb_sql
+    src/sql_ast.cpp
     src/sql_error.cpp
     src/sql_lexer.cpp
+    src/sql_parser.cpp
 )
 target_include_directories(minidb_sql PUBLIC include)
 
