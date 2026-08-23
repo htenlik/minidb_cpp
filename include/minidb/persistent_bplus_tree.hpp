@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/index_types.hpp"
+#include "minidb/page_allocator.hpp"
 #include "minidb/pager.hpp"
 
 #include <array>
@@ -155,11 +156,13 @@ public:
     [[nodiscard]] std::size_t height() const;
 
     [[nodiscard]] bool insert(IndexKey key, RecordId recordId);
+    [[nodiscard]] bool erase(IndexKey key);
     [[nodiscard]] std::optional<RecordId> find(IndexKey key) const;
     [[nodiscard]] std::vector<IndexEntry> rangeScan(
         IndexKey lowerInclusive,
         IndexKey upperInclusive) const;
     [[nodiscard]] std::vector<IndexEntry> scanAll() const;
+    [[nodiscard]] std::vector<PageId> reachableNodePageIds() const;
 
     void validate() const;
 
@@ -171,10 +174,11 @@ private:
     struct SplitResult;
 
     Pager& pager_;
+    PageAllocator allocator_;
     PageId metadataPageId_;
 
     PersistentBPlusTree(Pager& pager, PageId metadataPageId)
-        : pager_(pager), metadataPageId_(metadataPageId) {}
+        : pager_(pager), allocator_(pager), metadataPageId_(metadataPageId) {}
 
     [[nodiscard]] Metadata readMetadata() const;
     void writeMetadata(const Metadata& metadata);
@@ -202,6 +206,24 @@ private:
         LeafNode leaf,
         const Metadata& metadata);
     [[nodiscard]] SplitResult splitInternal(PageId pageId, InternalNode internalNode);
+
+    [[nodiscard]] static std::size_t minimumLeafKeys(const Metadata& metadata) noexcept;
+    [[nodiscard]] static std::size_t minimumInternalChildren(
+        const Metadata& metadata) noexcept;
+    void rebuildInternalKeys(InternalNode& internalNode, const Metadata& metadata) const;
+    void refreshAncestorSeparators(
+        const std::vector<PathFrame>& path,
+        const Metadata& metadata);
+    void rebalanceLeafAfterErase(
+        PageId pageId,
+        LeafNode leaf,
+        std::vector<PathFrame> path,
+        Metadata& metadata);
+    void repairInternalAfterChildRemoval(
+        PageId pageId,
+        InternalNode internalNode,
+        std::vector<PathFrame> path,
+        Metadata& metadata);
 };
 
 } // namespace minidb

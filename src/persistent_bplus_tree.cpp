@@ -110,7 +110,8 @@ PersistentBPlusTree PersistentBPlusTree::create(
     std::uint32_t leafMaxKeys,
     std::uint32_t internalMaxKeys) {
     validateLogicalCapacities(leafMaxKeys, internalMaxKeys);
-    const auto metadataPageId = pager.allocatePage();
+    PageAllocator allocator(pager);
+    const auto metadataPageId = allocator.allocatePage();
     PersistentBPlusTree tree(pager, metadataPageId);
     tree.writeMetadata(Metadata{
         INVALID_PAGE_ID,
@@ -510,13 +511,13 @@ IndexKey PersistentBPlusTree::subtreeMinimum(
 }
 
 PageId PersistentBPlusTree::allocateLeaf(const LeafNode& leaf) {
-    const auto pageId = pager_.allocatePage();
+    const auto pageId = allocator_.allocatePage();
     writeLeaf(pageId, leaf);
     return pageId;
 }
 
 PageId PersistentBPlusTree::allocateInternal(const InternalNode& internalNode) {
-    const auto pageId = pager_.allocatePage();
+    const auto pageId = allocator_.allocatePage();
     writeInternal(pageId, internalNode);
     return pageId;
 }
@@ -652,6 +653,287 @@ bool PersistentBPlusTree::insert(IndexKey key, RecordId recordId) {
     return true;
 }
 
+std::size_t PersistentBPlusTree::minimumLeafKeys(const Metadata& metadata) noexcept {
+    return (static_cast<std::size_t>(metadata.leafMaxKeys) + 1) / 2;
+}
+
+std::size_t PersistentBPlusTree::minimumInternalChildren(
+    const Metadata& metadata) noexcept {
+    return (static_cast<std::size_t>(metadata.internalMaxKeys) + 2) / 2;
+}
+
+void PersistentBPlusTree::rebuildInternalKeys(
+    InternalNode& internalNode,
+    const Metadata& metadata) const {
+    if (internalNode.children.empty()) {
+        throw std::logic_error("Persistent B+ tree internal node has no children.");
+    }
+    internalNode.keys.clear();
+    internalNode.keys.reserve(internalNode.children.size() - 1);
+    for (std::size_t index = 1; index < internalNode.children.size(); ++index) {
+        const auto separator = subtreeMinimum(internalNode.children[index], metadata);
+        if (!internalNode.keys.empty() && internalNode.keys.back() >= separator) {
+            throw std::runtime_error("Persistent B+ tree child ranges are not strictly ordered.");
+        }
+        internalNode.keys.push_back(separator);
+    }
+}
+
+void PersistentBPlusTree::refreshAncestorSeparators(
+    const std::vector<PathFrame>& path,
+    const Metadata& metadata) {
+    for (auto position = path.rbegin(); position != path.rend(); ++position) {
+        auto ancestor = readInternal(position->pageId, metadata.internalMaxKeys);
+        if (position->childIndex >= ancestor.children.size()) {
+            throw std::runtime_error("Persistent B+ tree traversal path became inconsistent.");
+        }
+        const auto previousKeys = ancestor.keys;
+        rebuildInternalKeys(ancestor, metadata);
+        if (ancestor.keys != previousKeys) {
+            writeInternal(position->pageId, ancestor);
+        }
+    }
+}
+
+void PersistentBPlusTree::repairInternalAfterChildRemoval(
+    PageId pageId,
+    InternalNode internalNode,
+    std::vector<PathFrame> path,
+    Metadata& metadata) {
+    if (internalNode.children.empty()) {
+        throw std::logic_error("Persistent B+ tree internal node lost every child.");
+    }
+    if (internalNode.children.size() == 1) {
+        internalNode.keys.clear();
+    } else {
+        rebuildInternalKeys(internalNode, metadata);
+    }
+
+    if (pageId == metadata.rootPageId) {
+        if (internalNode.children.size() == 1) {
+            metadata.rootPageId = internalNode.children.front();
+            allocator_.releasePage(pageId);
+        } else {
+            writeInternal(pageId, internalNode);
+        }
+        return;
+    }
+
+    if (internalNode.children.size() >= minimumInternalChildren(metadata)) {
+        writeInternal(pageId, internalNode);
+        refreshAncestorSeparators(path, metadata);
+        return;
+    }
+    if (path.empty()) {
+        throw std::logic_error("Persistent B+ tree internal underflow has no parent path.");
+    }
+
+    const auto parentFrame = path.back();
+    path.pop_back();
+    auto parent = readInternal(parentFrame.pageId, metadata.internalMaxKeys);
+    if (parentFrame.childIndex >= parent.children.size()
+        || parent.children[parentFrame.childIndex] != pageId) {
+        throw std::runtime_error("Persistent B+ tree traversal path became inconsistent.");
+    }
+
+    const auto minimumChildren = minimumInternalChildren(metadata);
+    if (parentFrame.childIndex > 0) {
+        const auto leftPageId = parent.children[parentFrame.childIndex - 1];
+        auto left = readInternal(leftPageId, metadata.internalMaxKeys);
+        if (left.children.size() > minimumChildren) {
+            internalNode.children.insert(internalNode.children.begin(), left.children.back());
+            left.children.pop_back();
+            rebuildInternalKeys(left, metadata);
+            rebuildInternalKeys(internalNode, metadata);
+            writeInternal(leftPageId, left);
+            writeInternal(pageId, internalNode);
+            rebuildInternalKeys(parent, metadata);
+            writeInternal(parentFrame.pageId, parent);
+            refreshAncestorSeparators(path, metadata);
+            return;
+        }
+    }
+
+    if (parentFrame.childIndex + 1 < parent.children.size()) {
+        const auto rightPageId = parent.children[parentFrame.childIndex + 1];
+        auto right = readInternal(rightPageId, metadata.internalMaxKeys);
+        if (right.children.size() > minimumChildren) {
+            internalNode.children.push_back(right.children.front());
+            right.children.erase(right.children.begin());
+            rebuildInternalKeys(internalNode, metadata);
+            rebuildInternalKeys(right, metadata);
+            writeInternal(pageId, internalNode);
+            writeInternal(rightPageId, right);
+            rebuildInternalKeys(parent, metadata);
+            writeInternal(parentFrame.pageId, parent);
+            refreshAncestorSeparators(path, metadata);
+            return;
+        }
+    }
+
+    if (parentFrame.childIndex > 0) {
+        const auto leftPageId = parent.children[parentFrame.childIndex - 1];
+        auto left = readInternal(leftPageId, metadata.internalMaxKeys);
+        left.children.insert(
+            left.children.end(), internalNode.children.begin(), internalNode.children.end());
+        rebuildInternalKeys(left, metadata);
+        writeInternal(leftPageId, left);
+        parent.children.erase(
+            parent.children.begin() + static_cast<std::ptrdiff_t>(parentFrame.childIndex));
+        allocator_.releasePage(pageId);
+        repairInternalAfterChildRemoval(
+            parentFrame.pageId, std::move(parent), std::move(path), metadata);
+        return;
+    }
+
+    if (parent.children.size() < 2) {
+        throw std::logic_error("Persistent B+ tree internal underflow has no sibling.");
+    }
+    const auto rightPageId = parent.children[1];
+    auto right = readInternal(rightPageId, metadata.internalMaxKeys);
+    internalNode.children.insert(
+        internalNode.children.end(), right.children.begin(), right.children.end());
+    rebuildInternalKeys(internalNode, metadata);
+    writeInternal(pageId, internalNode);
+    parent.children.erase(parent.children.begin() + 1);
+    allocator_.releasePage(rightPageId);
+    repairInternalAfterChildRemoval(
+        parentFrame.pageId, std::move(parent), std::move(path), metadata);
+}
+
+void PersistentBPlusTree::rebalanceLeafAfterErase(
+    PageId pageId,
+    LeafNode leaf,
+    std::vector<PathFrame> path,
+    Metadata& metadata) {
+    if (path.empty()) {
+        throw std::logic_error("Persistent B+ tree leaf underflow has no parent path.");
+    }
+    const auto parentFrame = path.back();
+    path.pop_back();
+    auto parent = readInternal(parentFrame.pageId, metadata.internalMaxKeys);
+    if (parentFrame.childIndex >= parent.children.size()
+        || parent.children[parentFrame.childIndex] != pageId) {
+        throw std::runtime_error("Persistent B+ tree traversal path became inconsistent.");
+    }
+
+    const auto minimumKeys = minimumLeafKeys(metadata);
+    if (parentFrame.childIndex > 0) {
+        const auto leftPageId = parent.children[parentFrame.childIndex - 1];
+        auto left = readLeaf(leftPageId, metadata.leafMaxKeys);
+        if (left.entries.size() > minimumKeys) {
+            leaf.entries.insert(leaf.entries.begin(), left.entries.back());
+            left.entries.pop_back();
+            writeLeaf(leftPageId, left);
+            writeLeaf(pageId, leaf);
+            rebuildInternalKeys(parent, metadata);
+            writeInternal(parentFrame.pageId, parent);
+            refreshAncestorSeparators(path, metadata);
+            return;
+        }
+    }
+
+    if (parentFrame.childIndex + 1 < parent.children.size()) {
+        const auto rightPageId = parent.children[parentFrame.childIndex + 1];
+        auto right = readLeaf(rightPageId, metadata.leafMaxKeys);
+        if (right.entries.size() > minimumKeys) {
+            leaf.entries.push_back(right.entries.front());
+            right.entries.erase(right.entries.begin());
+            writeLeaf(pageId, leaf);
+            writeLeaf(rightPageId, right);
+            rebuildInternalKeys(parent, metadata);
+            writeInternal(parentFrame.pageId, parent);
+            refreshAncestorSeparators(path, metadata);
+            return;
+        }
+    }
+
+    if (parentFrame.childIndex > 0) {
+        const auto leftPageId = parent.children[parentFrame.childIndex - 1];
+        auto left = readLeaf(leftPageId, metadata.leafMaxKeys);
+        left.entries.insert(left.entries.end(), leaf.entries.begin(), leaf.entries.end());
+        left.nextPageId = leaf.nextPageId;
+        if (leaf.nextPageId != INVALID_PAGE_ID) {
+            auto next = readLeaf(leaf.nextPageId, metadata.leafMaxKeys);
+            if (next.previousPageId != pageId) {
+                throw std::runtime_error("Persistent B+ tree leaf sibling links disagree.");
+            }
+            next.previousPageId = leftPageId;
+            writeLeaf(leaf.nextPageId, next);
+        }
+        writeLeaf(leftPageId, left);
+        parent.children.erase(
+            parent.children.begin() + static_cast<std::ptrdiff_t>(parentFrame.childIndex));
+        allocator_.releasePage(pageId);
+        repairInternalAfterChildRemoval(
+            parentFrame.pageId, std::move(parent), std::move(path), metadata);
+        return;
+    }
+
+    if (parent.children.size() < 2) {
+        throw std::logic_error("Persistent B+ tree leaf underflow has no sibling.");
+    }
+    const auto rightPageId = parent.children[1];
+    auto right = readLeaf(rightPageId, metadata.leafMaxKeys);
+    leaf.entries.insert(leaf.entries.end(), right.entries.begin(), right.entries.end());
+    leaf.nextPageId = right.nextPageId;
+    if (right.nextPageId != INVALID_PAGE_ID) {
+        auto next = readLeaf(right.nextPageId, metadata.leafMaxKeys);
+        if (next.previousPageId != rightPageId) {
+            throw std::runtime_error("Persistent B+ tree leaf sibling links disagree.");
+        }
+        next.previousPageId = pageId;
+        writeLeaf(right.nextPageId, next);
+    }
+    writeLeaf(pageId, leaf);
+    parent.children.erase(parent.children.begin() + 1);
+    allocator_.releasePage(rightPageId);
+    repairInternalAfterChildRemoval(
+        parentFrame.pageId, std::move(parent), std::move(path), metadata);
+}
+
+bool PersistentBPlusTree::erase(IndexKey key) {
+    auto metadata = readMetadata();
+    if (metadata.rootPageId == INVALID_PAGE_ID) {
+        return false;
+    }
+
+    std::vector<PathFrame> path;
+    const auto leafPageId = findLeafPage(key, metadata, &path);
+    auto leaf = readLeaf(leafPageId, metadata.leafMaxKeys);
+    const auto position = std::lower_bound(
+        leaf.entries.begin(),
+        leaf.entries.end(),
+        key,
+        [](const IndexEntry& entry, IndexKey candidate) { return entry.key < candidate; });
+    if (position == leaf.entries.end() || position->key != key) {
+        return false;
+    }
+    leaf.entries.erase(position);
+
+    if (leafPageId == metadata.rootPageId) {
+        if (leaf.entries.empty()) {
+            metadata.rootPageId = INVALID_PAGE_ID;
+            allocator_.releasePage(leafPageId);
+        } else {
+            writeLeaf(leafPageId, leaf);
+        }
+    } else if (leaf.entries.size() >= minimumLeafKeys(metadata)) {
+        writeLeaf(leafPageId, leaf);
+        refreshAncestorSeparators(path, metadata);
+    } else {
+        rebalanceLeafAfterErase(
+            leafPageId, std::move(leaf), std::move(path), metadata);
+    }
+
+    if (metadata.entryCount == 0) {
+        throw std::logic_error("Persistent B+ tree metadata size underflowed.");
+    }
+    --metadata.entryCount;
+    writeMetadata(metadata);
+    return true;
+}
+
 std::optional<RecordId> PersistentBPlusTree::find(IndexKey key) const {
     const auto metadata = readMetadata();
     if (metadata.rootPageId == INVALID_PAGE_ID) {
@@ -745,8 +1027,41 @@ std::vector<IndexEntry> PersistentBPlusTree::scanAll() const {
     return entries;
 }
 
+std::vector<PageId> PersistentBPlusTree::reachableNodePageIds() const {
+    const auto metadata = readMetadata();
+    std::vector<PageId> result;
+    if (metadata.rootPageId == INVALID_PAGE_ID) {
+        return result;
+    }
+
+    std::vector<PageId> pending{metadata.rootPageId};
+    std::unordered_set<PageId> visited;
+    while (!pending.empty()) {
+        const auto pageId = pending.back();
+        pending.pop_back();
+        if (!visited.insert(pageId).second) {
+            throw std::runtime_error(
+                "Persistent B+ tree graph contains a cycle or duplicate child page.");
+        }
+        result.push_back(pageId);
+        if (!isLeafPage(pageId)) {
+            const auto internalNode = readInternal(pageId, metadata.internalMaxKeys);
+            pending.insert(
+                pending.end(), internalNode.children.rbegin(), internalNode.children.rend());
+        } else {
+            static_cast<void>(readLeaf(pageId, metadata.leafMaxKeys));
+        }
+    }
+    return result;
+}
+
 void PersistentBPlusTree::validate() const {
     const auto metadata = readMetadata();
+    const auto freePages = allocator_.freePageIds();
+    const std::unordered_set<PageId> freePageSet(freePages.begin(), freePages.end());
+    if (freePageSet.contains(metadataPageId_)) {
+        throw std::runtime_error("Persistent B+ tree metadata page is also marked free.");
+    }
     if (metadata.rootPageId == INVALID_PAGE_ID) {
         return;
     }
@@ -762,6 +1077,9 @@ void PersistentBPlusTree::validate() const {
     std::optional<std::size_t> leafDepth;
     std::function<Bounds(PageId, std::size_t, bool)> validateNode;
     validateNode = [&](PageId pageId, std::size_t depth, bool isRoot) -> Bounds {
+        if (freePageSet.contains(pageId)) {
+            throw std::runtime_error("Persistent B+ tree node page is also marked free.");
+        }
         if (!visited.insert(pageId).second) {
             throw std::runtime_error(
                 "Persistent B+ tree graph contains a cycle or duplicate child page.");
