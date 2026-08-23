@@ -39,9 +39,21 @@ add_executable(record_page_test tests/record_page_test.cpp)
 target_link_libraries(record_page_test PRIVATE minidb_core)
 add_test(NAME record_page_test COMMAND record_page_test)
 
+add_executable(slotted_page_test tests/slotted_page_test.cpp)
+target_link_libraries(slotted_page_test PRIVATE minidb_core)
+add_test(NAME slotted_page_test COMMAND slotted_page_test)
+
 add_executable(record_store_test tests/record_store_test.cpp)
 target_link_libraries(record_store_test PRIVATE minidb_core)
 add_test(NAME record_store_test COMMAND record_store_test)
+
+add_executable(tuple_store_test tests/tuple_store_test.cpp)
+target_link_libraries(tuple_store_test PRIVATE minidb_core)
+add_test(NAME tuple_store_test COMMAND tuple_store_test)
+
+add_executable(tuple_store_random_test tests/tuple_store_random_test.cpp)
+target_link_libraries(tuple_store_random_test PRIVATE minidb_core)
+add_test(NAME tuple_store_random_test COMMAND tuple_store_random_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
