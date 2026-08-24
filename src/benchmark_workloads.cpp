@@ -74,13 +74,15 @@ BenchmarkResult finish(
     StorageMetrics storageBefore,
     StorageMetrics storageAfter,
     double averageRowsExamined = 0.0,
-    double averageIndexLookups = 0.0) {
+    double averageIndexLookups = 0.0,
+    BufferPoolStats buffer = {}) {
     BenchmarkResult result;
     result.benchmark = std::move(name);
     result.seed = config.seed;
     result.configuration = config;
     result.timing = summarizeTimings(latencies, totalLatency(latencies));
     result.pager = pager;
+    result.buffer = buffer;
     result.storageBefore = storageBefore;
     result.storageAfter = storageAfter;
     result.averageRowsExamined = averageRowsExamined;
@@ -184,6 +186,116 @@ BenchmarkResult runPager(const BenchmarkConfig& config, std::string name) {
     auto result = finish(
         name, config, std::move(latencies), accumulated, storageBefore, storageAfter);
     pager.reset();
+    cleanupDatabase(config);
+    return result;
+}
+
+StorageMetrics bufferStorageMetrics(
+    const DiskManager& diskManager,
+    const BufferPoolManager& bufferPool) {
+    return StorageMetrics{
+        diskManager.pageCount(),
+        static_cast<std::uint64_t>(diskManager.pageCount()) * DiskManager::PAGE_SIZE,
+        0,
+        bufferPool.residentPageCount(),
+    };
+}
+
+BenchmarkResult runBuffer(const BenchmarkConfig& config, const std::string& name) {
+    removeDatabase(config);
+    {
+        DiskManager setup(config.databasePath);
+        for (std::uint64_t index = 0; index < config.pages; ++index) {
+            const auto pageId = setup.appendPage();
+            DiskManager::Page page{};
+            page[0] = static_cast<std::byte>(pageId & 0xFFU);
+            page[1] = static_cast<std::byte>((pageId * 7U) & 0xFFU);
+            setup.writePage(pageId, page);
+        }
+    }
+
+    auto disk = std::make_unique<DiskManager>(config.databasePath);
+    auto pool = std::make_unique<BufferPoolManager>(
+        *disk,
+        static_cast<std::size_t>(config.bufferFrames),
+        static_cast<std::size_t>(config.lruK));
+    const auto configuredSet = workingSet(config.workingSet, config.pages);
+    const auto hotSet = config.workingSet == 0
+        ? std::max<std::uint64_t>(1, std::min<std::uint64_t>(
+            config.pages, std::max<std::uint64_t>(1, config.bufferFrames / 2U)))
+        : configuredSet;
+
+    if (config.cacheMode == CacheMode::Hot
+        && (name == "buffer_hotset" || name == "buffer_scan_resistance")) {
+        for (std::uint64_t index = 0; index < config.warmupOperations; ++index) {
+            auto guard = pool->fetchPageRead(static_cast<PageId>((index % hotSet) + 1U));
+            if (!guard.has_value()) throw std::runtime_error("buffer warmup lacked a frame");
+        }
+    }
+    const auto storageBefore = bufferStorageMetrics(*disk, *pool);
+    pool->resetStats();
+
+    BufferPoolStats accumulated{};
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    std::mt19937_64 random(config.seed);
+    std::uint64_t checksum = 0;
+    std::uint64_t scanCursor = hotSet < config.pages ? hotSet : 0;
+
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        if (config.cacheMode == CacheMode::Reopen && operation != 0
+            && operation % config.reopenInterval == 0) {
+            accumulated = accumulateBufferStats(accumulated, pool->stats());
+            pool.reset();
+            disk.reset();
+            disk = std::make_unique<DiskManager>(config.databasePath);
+            pool = std::make_unique<BufferPoolManager>(
+                *disk,
+                static_cast<std::size_t>(config.bufferFrames),
+                static_cast<std::size_t>(config.lruK));
+            pool->resetStats();
+        }
+
+        std::uint64_t pageIndex = operation % config.pages;
+        if (name == "buffer_random") {
+            pageIndex = random() % configuredSet;
+        } else if (name == "buffer_hotset") {
+            pageIndex = random() % hotSet;
+        } else if (name == "buffer_scan_resistance") {
+            if (operation % 5U == 4U) {
+                pageIndex = scanCursor;
+                scanCursor = hotSet < config.pages
+                    ? hotSet + ((scanCursor - hotSet + 1U) % (config.pages - hotSet))
+                    : (scanCursor + 1U) % config.pages;
+            } else {
+                pageIndex = random() % hotSet;
+            }
+        }
+        const auto pageId = static_cast<PageId>(pageIndex + 1U);
+        measure(latencies, [&] {
+            auto guard = pool->fetchPageRead(pageId);
+            if (!guard.has_value()) throw std::runtime_error("buffer benchmark lacked a frame");
+            checksum += std::to_integer<std::uint8_t>(guard->data()[0]);
+        });
+    }
+    accumulated = accumulateBufferStats(accumulated, pool->stats());
+    pool->validate();
+    if (checksum == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error("impossible buffer benchmark checksum");
+    }
+    const auto storageAfter = bufferStorageMetrics(*disk, *pool);
+    auto result = finish(
+        name,
+        config,
+        std::move(latencies),
+        {},
+        storageBefore,
+        storageAfter,
+        0.0,
+        0.0,
+        accumulated);
+    pool.reset();
+    disk.reset();
     cleanupDatabase(config);
     return result;
 }
@@ -763,6 +875,7 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
 
 std::string canonicalName(const std::string& name) {
     if (name == "pager") return "pager_random";
+    if (name == "buffer") return "buffer_random";
     if (name == "bplus") return "bplus_find_hit";
     if (name == "tuple") return "tuple_lookup";
     if (name == "sql") return "sql_pk_lookup";
@@ -774,6 +887,7 @@ std::string canonicalName(const std::string& name) {
 BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     name = canonicalName(name);
     if (name.starts_with("pager_")) return runPager(config, std::move(name));
+    if (name.starts_with("buffer_")) return runBuffer(config, name);
     if (name.starts_with("bplus_")) return runBplus(config, name);
     if (name.starts_with("tuple_")) return runTuple(config, name);
     if (name.starts_with("tcp_")) return runTcp(config, name);
@@ -782,7 +896,7 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
 
 std::vector<std::string> suiteNames() {
     return {
-        "pager_sequential", "pager_random", "bplus_find_hit", "tuple_lookup",
+        "pager_sequential", "pager_random", "buffer_random", "bplus_find_hit", "tuple_lookup",
         "sql_pk_lookup", "sql_heap_scan", "sql_mixed", "tcp_pk_lookup",
     };
 }
@@ -800,6 +914,7 @@ std::vector<BenchmarkResult> runConfiguredBenchmarks(const BenchmarkConfig& conf
             effective.pages = std::min<std::uint64_t>(effective.pages, 24);
             effective.warmupOperations = std::min<std::uint64_t>(effective.warmupOperations, 8);
             effective.reopenInterval = std::min<std::uint64_t>(effective.reopenInterval, 12);
+            effective.bufferFrames = std::min<std::uint64_t>(effective.bufferFrames, 8);
             if (effective.workingSet != 0) {
                 effective.workingSet = std::min(effective.workingSet, effective.rows);
             }

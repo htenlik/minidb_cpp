@@ -27,7 +27,8 @@ int main() {
         }
         minidb::test::require(
             names == std::set<std::string>{
-                "pager_sequential", "pager_random", "bplus_find_hit", "tuple_lookup",
+                "pager_sequential", "pager_random", "buffer_random", "bplus_find_hit",
+                "tuple_lookup",
                 "sql_pk_lookup", "sql_heap_scan", "sql_mixed", "tcp_pk_lookup",
             },
             "quick-suite workload membership changed");

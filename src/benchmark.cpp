@@ -47,13 +47,16 @@ void validateConfig(const BenchmarkConfig& config) {
         throw std::invalid_argument("specify exactly one of --benchmark or --suite");
     }
     if (config.rows == 0 || config.operations == 0 || config.pages == 0
-        || config.repetitions == 0 || config.reopenInterval == 0) {
+        || config.repetitions == 0 || config.reopenInterval == 0
+        || config.bufferFrames == 0 || config.lruK == 0) {
         throw std::invalid_argument(
-            "rows, operations, pages, repetitions, and reopen interval must be positive");
+            "rows, operations, pages, repetitions, reopen interval, buffer frames, and K "
+            "must be positive");
     }
     if (config.rows > MAX_CONFIG_COUNT || config.operations > MAX_CONFIG_COUNT
         || config.pages > MAX_CONFIG_COUNT || config.warmupOperations > MAX_CONFIG_COUNT
-        || config.workingSet > MAX_CONFIG_COUNT || config.repetitions > 100) {
+        || config.workingSet > MAX_CONFIG_COUNT || config.bufferFrames > MAX_CONFIG_COUNT
+        || config.lruK > MAX_CONFIG_COUNT || config.repetitions > 100) {
         throw std::invalid_argument("benchmark configuration exceeds safety limits");
     }
     if (!config.suite.empty() && config.suite != "quick" && config.suite != "baseline") {
@@ -94,6 +97,26 @@ void writeStorageJson(std::ostringstream& output, const StorageMetrics& storage)
            << ",\"resident_pages\":" << storage.residentPages << '}';
 }
 
+void writeBufferJson(std::ostringstream& output, const BufferPoolStats& buffer) {
+    const auto hitRatio = buffer.pageRequests == 0 ? 0.0
+        : static_cast<double>(buffer.cacheHits) / static_cast<double>(buffer.pageRequests);
+    output << "{\"page_requests\":" << buffer.pageRequests
+           << ",\"cache_hits\":" << buffer.cacheHits
+           << ",\"cache_misses\":" << buffer.cacheMisses
+           << ",\"hit_ratio\":" << hitRatio
+           << ",\"physical_reads\":" << buffer.physicalPageReads
+           << ",\"physical_writes\":" << buffer.physicalPageWrites
+           << ",\"evictions\":" << buffer.evictions
+           << ",\"dirty_evictions\":" << buffer.dirtyEvictions
+           << ",\"pin_operations\":" << buffer.pinOperations
+           << ",\"unpin_operations\":" << buffer.unpinOperations
+           << ",\"appended_pages\":" << buffer.appendedPages
+           << ",\"resident_pages\":" << buffer.residentPages
+           << ",\"pinned_frames\":" << buffer.pinnedFrames
+           << ",\"evictable_frames\":" << buffer.evictableFrames
+           << ",\"capacity\":" << buffer.capacity << '}';
+}
+
 } // namespace
 
 ParseResult parseArguments(std::span<const std::string_view> arguments) {
@@ -122,6 +145,11 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
         } else if (argument == "--reopen-interval") {
             result.config.reopenInterval = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
+        } else if (argument == "--buffer-frames") {
+            result.config.bufferFrames = parseUnsigned(
+                requireValue(arguments, index, argument), argument);
+        } else if (argument == "--lru-k") {
+            result.config.lruK = parseUnsigned(requireValue(arguments, index, argument), argument);
         } else if (argument == "--seed") {
             result.config.seed = parseUnsigned(requireValue(arguments, index, argument), argument);
         } else if (argument == "--repetitions") {
@@ -162,6 +190,8 @@ std::string usageText() {
         "  --warmup N            untimed warmup operations (default 100)\n"
         "  --mode hot|reopen     retain or periodically recreate database owner\n"
         "  --reopen-interval N   operations between reopen events (default 250)\n"
+        "  --buffer-frames N     bounded buffer frame capacity (default 64)\n"
+        "  --lru-k N             LRU-K history length (default 2)\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
         "  --seed N              deterministic seed (default 12345)\n"
         "  --repetitions N       repeat each workload (default 1)\n"
@@ -174,6 +204,8 @@ std::string usageText() {
 std::vector<std::string> supportedBenchmarkNames() {
     return {
         "pager", "pager_sequential", "pager_random", "pager_hot",
+        "buffer", "buffer_sequential", "buffer_random", "buffer_hotset",
+        "buffer_scan_resistance",
         "bplus", "bplus_insert_sequential", "bplus_insert_random",
         "bplus_find_hit", "bplus_find_miss", "bplus_range", "bplus_mixed",
         "tuple", "tuple_insert", "tuple_lookup", "tuple_update", "tuple_erase",
@@ -234,6 +266,27 @@ PagerStats accumulatePagerStats(PagerStats accumulated, const PagerStats& next) 
     return accumulated;
 }
 
+BufferPoolStats accumulateBufferStats(
+    BufferPoolStats accumulated,
+    const BufferPoolStats& next) {
+    accumulated.pageRequests += next.pageRequests;
+    accumulated.cacheHits += next.cacheHits;
+    accumulated.cacheMisses += next.cacheMisses;
+    accumulated.physicalPageReads += next.physicalPageReads;
+    accumulated.physicalPageWrites += next.physicalPageWrites;
+    accumulated.evictions += next.evictions;
+    accumulated.dirtyEvictions += next.dirtyEvictions;
+    accumulated.pinOperations += next.pinOperations;
+    accumulated.unpinOperations += next.unpinOperations;
+    accumulated.appendedPages += next.appendedPages;
+    accumulated.residentPages = std::max(accumulated.residentPages, next.residentPages);
+    accumulated.pinnedFrames = std::max(accumulated.pinnedFrames, next.pinnedFrames);
+    accumulated.evictableFrames = std::max(
+        accumulated.evictableFrames, next.evictableFrames);
+    accumulated.capacity = std::max(accumulated.capacity, next.capacity);
+    return accumulated;
+}
+
 std::string escapeJson(std::string_view value) {
     std::ostringstream output;
     output << std::hex << std::uppercase;
@@ -275,6 +328,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"warmup_operations\":" << config.warmupOperations
                << ",\"reopen_interval\":" << config.reopenInterval
                << ",\"repetitions\":" << config.repetitions
+               << ",\"buffer_frames\":" << config.bufferFrames
+               << ",\"lru_k\":" << config.lruK
                << ",\"cache_mode\":\""
                << (config.cacheMode == CacheMode::Hot ? "hot" : "reopen")
                << "\",\"tuple_sizes\":\"" << escapeJson(config.tupleSizes) << "\"}"
@@ -289,6 +344,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"max_ns\":" << result.timing.maximumNanoseconds << '}'
                << ",\"pager\":";
         writePagerJson(output, result.pager);
+        output << ",\"buffer\":";
+        writeBufferJson(output, result.buffer);
         output << ",\"storage\":{\"before\":";
         writeStorageJson(output, result.storageBefore);
         output << ",\"after\":";
@@ -339,6 +396,15 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.pager.physicalPageWrites << '/' << result.pager.residentPages << '\n'
            << "pager dirty marks/flush calls/appended pages: " << result.pager.dirtyMarks
            << '/' << result.pager.flushCalls << '/' << result.pager.appendedPages << '\n'
+           << "buffer requests/hits/misses/hit ratio: " << result.buffer.pageRequests << '/'
+           << result.buffer.cacheHits << '/' << result.buffer.cacheMisses << '/'
+           << (result.buffer.pageRequests == 0 ? 0.0
+               : static_cast<double>(result.buffer.cacheHits)
+                   / static_cast<double>(result.buffer.pageRequests)) << '\n'
+           << "buffer reads/writes/evictions/dirty evictions/resident/capacity: "
+           << result.buffer.physicalPageReads << '/' << result.buffer.physicalPageWrites
+           << '/' << result.buffer.evictions << '/' << result.buffer.dirtyEvictions << '/'
+           << result.buffer.residentPages << '/' << result.buffer.capacity << '\n'
            << "storage before pages/bytes/free/resident: "
            << result.storageBefore.databasePages << '/' << result.storageBefore.databaseBytes
            << '/' << result.storageBefore.freePages << '/'

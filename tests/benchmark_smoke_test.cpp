@@ -9,7 +9,7 @@
 int main() {
     try {
         const std::vector<std::string> families{
-            "pager", "bplus", "tuple", "sql", "tcp", "mixed",
+            "pager", "buffer", "bplus", "tuple", "sql", "tcp", "mixed",
         };
         for (const auto& family : families) {
             minidb::bench::BenchmarkConfig config;
@@ -20,6 +20,7 @@ int main() {
             config.workingSet = 4;
             config.warmupOperations = 2;
             config.reopenInterval = 3;
+            config.bufferFrames = 3;
             config.seed = 20260901;
             config.databasePath = (std::filesystem::temp_directory_path()
                 / ("minidb_benchmark_smoke_" + family + ".db")).string();

@@ -48,13 +48,33 @@ void testPercentilesAndAccumulation() {
             && total.flushCalls == 77 && total.appendedPages == 88
             && total.residentPages == 9,
         "Pager statistics accumulation was incorrect");
+
+    minidb::BufferPoolStats bufferFirst{};
+    bufferFirst.pageRequests = 2;
+    bufferFirst.cacheHits = 1;
+    bufferFirst.evictions = 3;
+    bufferFirst.residentPages = 4;
+    bufferFirst.capacity = 8;
+    minidb::BufferPoolStats bufferSecond{};
+    bufferSecond.pageRequests = 5;
+    bufferSecond.cacheHits = 4;
+    bufferSecond.evictions = 6;
+    bufferSecond.residentPages = 2;
+    bufferSecond.capacity = 8;
+    const auto bufferTotal = accumulateBufferStats(bufferFirst, bufferSecond);
+    minidb::test::require(
+        bufferTotal.pageRequests == 7 && bufferTotal.cacheHits == 5
+            && bufferTotal.evictions == 9 && bufferTotal.residentPages == 4
+            && bufferTotal.capacity == 8,
+        "BufferPool statistics accumulation was incorrect");
 }
 
 void testConfigurationParsing() {
     const std::vector<std::string_view> arguments{
         "--benchmark", "pager_random", "--rows", "17", "--operations", "23",
         "--pages", "19", "--working-set", "7", "--warmup", "3",
-        "--reopen-interval", "5", "--seed", "99", "--repetitions", "2",
+        "--reopen-interval", "5", "--buffer-frames", "11", "--lru-k", "3",
+        "--seed", "99", "--repetitions", "2",
         "--db", "bench.db", "--json", "out.json", "--tuple-sizes", "medium",
         "--mode", "reopen", "--retain-db",
     };
@@ -64,6 +84,7 @@ void testConfigurationParsing() {
             && config.operations == 23 && config.pages == 19
             && config.workingSet == 7 && config.warmupOperations == 3
             && config.reopenInterval == 5 && config.seed == 99
+            && config.bufferFrames == 11 && config.lruK == 3
             && config.repetitions == 2 && config.databasePath == "bench.db"
             && config.jsonPath == "out.json" && config.tupleSizes == "medium"
             && config.cacheMode == CacheMode::Reopen && config.keepDatabase,
@@ -74,6 +95,12 @@ void testConfigurationParsing() {
     reject([] { static_cast<void>(parseArguments(
         std::vector<std::string_view>{"--benchmark", "pager", "--operations", "0"})); },
         "zero operation count was accepted");
+    reject([] { static_cast<void>(parseArguments(
+        std::vector<std::string_view>{"--benchmark", "buffer", "--buffer-frames", "0"})); },
+        "zero buffer capacity was accepted");
+    reject([] { static_cast<void>(parseArguments(
+        std::vector<std::string_view>{"--benchmark", "buffer", "--lru-k", "0"})); },
+        "zero LRU-K K was accepted");
     reject([] { static_cast<void>(parseArguments(
         std::vector<std::string_view>{"--benchmark", "missing"})); },
         "unknown benchmark was accepted");
@@ -100,6 +127,9 @@ void testJson() {
     result.configuration.repetitions = 3;
     result.timing = summarizeTimings({10}, 10);
     result.pager = minidb::PagerStats{1, 2, 3, 4, 5, 6, 7, 8, 9};
+    result.buffer.pageRequests = 10;
+    result.buffer.cacheHits = 7;
+    result.buffer.capacity = 4;
     result.storageBefore = StorageMetrics{10, 40'960, 2, 3};
     result.storageAfter = StorageMetrics{12, 49'152, 1, 7};
     result.environment = currentEnvironment();
@@ -111,6 +141,8 @@ void testJson() {
             && json.find("\"reopen_interval\":17") != std::string::npos
             && json.find("\"repetitions\":3") != std::string::npos
             && json.find("\"dirty_marks\":6") != std::string::npos
+            && json.find("\"hit_ratio\":0.7") != std::string::npos
+            && json.find("\"capacity\":4") != std::string::npos
             && json.find("\"before\":{\"database_pages\":10") != std::string::npos
             && json.find("\"after\":{\"database_pages\":12") != std::string::npos
             && json.find("\"validation_passed\":true") != std::string::npos

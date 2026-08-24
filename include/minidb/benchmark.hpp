@@ -1,5 +1,6 @@
 #pragma once
 
+#include "minidb/buffer_pool_manager.hpp"
 #include "minidb/pager.hpp"
 
 #include <cstddef>
@@ -25,6 +26,8 @@ struct BenchmarkConfig {
     std::uint64_t workingSet = 0;
     std::uint64_t warmupOperations = 100;
     std::uint64_t reopenInterval = 250;
+    std::uint64_t bufferFrames = 64;
+    std::uint64_t lruK = 2;
     std::uint64_t seed = 12'345;
     std::uint32_t repetitions = 1;
     std::string databasePath = "minidb_benchmark.db";
@@ -77,6 +80,7 @@ struct BenchmarkResult {
     BenchmarkConfig configuration;
     TimingMetrics timing;
     PagerStats pager;
+    BufferPoolStats buffer;
     StorageMetrics storageBefore;
     StorageMetrics storageAfter;
     double averageRowsExamined = 0.0;
@@ -97,6 +101,9 @@ struct BenchmarkResult {
     const std::vector<std::uint64_t>& latenciesNanoseconds,
     std::uint64_t totalNanoseconds);
 [[nodiscard]] PagerStats accumulatePagerStats(PagerStats accumulated, const PagerStats& next);
+[[nodiscard]] BufferPoolStats accumulateBufferStats(
+    BufferPoolStats accumulated,
+    const BufferPoolStats& next);
 [[nodiscard]] std::string escapeJson(std::string_view value);
 [[nodiscard]] std::string resultsToJson(const std::vector<BenchmarkResult>& results);
 [[nodiscard]] std::string formatHuman(const BenchmarkResult& result);
