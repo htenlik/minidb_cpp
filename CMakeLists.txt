@@ -242,6 +242,10 @@ add_executable(benchmark_smoke_test tests/benchmark_smoke_test.cpp)
 target_link_libraries(benchmark_smoke_test PRIVATE minidb_benchmark)
 add_test(NAME benchmark_smoke_test COMMAND benchmark_smoke_test)
 
+add_executable(wal_benchmark_test tests/wal_benchmark_test.cpp)
+target_link_libraries(wal_benchmark_test PRIVATE minidb_benchmark)
+add_test(NAME wal_benchmark_test COMMAND wal_benchmark_test)
+
 add_executable(benchmark_quick_suite_test tests/benchmark_quick_suite_test.cpp)
 target_link_libraries(benchmark_quick_suite_test PRIVATE minidb_benchmark)
 add_test(NAME benchmark_quick_suite_test COMMAND benchmark_quick_suite_test)

@@ -9,7 +9,7 @@
 int main() {
     try {
         const std::vector<std::string> families{
-            "pager", "buffer", "bplus", "tuple", "sql", "tcp", "mixed",
+            "pager", "buffer", "bplus", "tuple", "sql", "tcp", "mixed", "wal",
         };
         for (const auto& family : families) {
             minidb::bench::BenchmarkConfig config;
@@ -25,14 +25,19 @@ int main() {
             config.databasePath = (std::filesystem::temp_directory_path()
                 / ("minidb_benchmark_smoke_" + family + ".db")).string();
             const auto results = minidb::bench::runConfiguredBenchmarks(config);
-            const auto expectedBackend = family == "pager" ? "legacy_pager" : "buffer_pool";
+            const auto expectedBackend = family == "pager" ? "legacy_pager"
+                : family == "wal" ? "wal" : "buffer_pool";
             minidb::test::require(
                 results.size() == 1 && results[0].validationPassed
                     && results[0].storageBackend == expectedBackend
                     && results[0].timing.operationCount == config.operations
-                    && results[0].storageAfter.databasePages > 0
-                    && results[0].storageAfter.databaseBytes
-                        == results[0].storageAfter.databasePages * minidb::Pager::PAGE_SIZE,
+                    && (family == "wal"
+                        ? results[0].wal.walRecords == config.operations
+                            && results[0].wal.manager.fsyncCalls == 1
+                        : results[0].storageAfter.databasePages > 0
+                            && results[0].storageAfter.databaseBytes
+                                == results[0].storageAfter.databasePages
+                                    * minidb::Pager::PAGE_SIZE),
                 "benchmark family smoke result was incomplete");
         }
         std::cout << "benchmark family smoke tests passed\n";

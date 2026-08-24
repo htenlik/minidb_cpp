@@ -74,6 +74,8 @@ void testConfigurationParsing() {
         "--benchmark", "pager_random", "--rows", "17", "--operations", "23",
         "--pages", "19", "--working-set", "7", "--warmup", "3",
         "--reopen-interval", "5", "--buffer-frames", "11", "--lru-k", "3",
+        "--wal-payload-bytes", "512", "--wal-batch-size", "10",
+        "--wal-buffer-bytes", "4096",
         "--seed", "99", "--repetitions", "2",
         "--db", "bench.db", "--json", "out.json", "--tuple-sizes", "medium",
         "--mode", "reopen", "--retain-db",
@@ -85,6 +87,8 @@ void testConfigurationParsing() {
             && config.workingSet == 7 && config.warmupOperations == 3
             && config.reopenInterval == 5 && config.seed == 99
             && config.bufferFrames == 11 && config.lruK == 3
+            && config.walPayloadBytes == 512 && config.walBatchSize == 10
+            && config.walBufferBytes == 4096
             && config.repetitions == 2 && config.databasePath == "bench.db"
             && config.jsonPath == "out.json" && config.tupleSizes == "medium"
             && config.cacheMode == CacheMode::Reopen && config.keepDatabase,
@@ -131,6 +135,17 @@ void testJson() {
     result.buffer.pageRequests = 10;
     result.buffer.cacheHits = 7;
     result.buffer.capacity = 4;
+    result.buffer.walFlushRequests = 2;
+    result.wal.walRecords = 1;
+    result.wal.walPayloadBytes = 128;
+    result.wal.payloadBytesPerSecond = 64.0;
+    result.wal.manager.bytesWritten = 176;
+    result.wal.manager.fsyncCalls = 1;
+    result.wal.manager.bufferFlushes = 1;
+    result.wal.manager.lastAppendedLsn = 64;
+    result.wal.manager.durableLsn = 64;
+    result.wal.appendTiming = summarizeTimings({11}, 11);
+    result.wal.flushTiming = summarizeTimings({22}, 22);
     result.storageBefore = StorageMetrics{10, 40'960, 2, 3};
     result.storageAfter = StorageMetrics{12, 49'152, 1, 7};
     result.environment = currentEnvironment();
@@ -146,6 +161,10 @@ void testJson() {
             && json.find("\"dirty_marks\":6") != std::string::npos
             && json.find("\"hit_ratio\":0.7") != std::string::npos
             && json.find("\"capacity\":4") != std::string::npos
+            && json.find("\"wal_flush_requests\":2") != std::string::npos
+            && json.find("\"wal_records\":1") != std::string::npos
+            && json.find("\"wal_payload_bytes\":128") != std::string::npos
+            && json.find("\"wal_fsync_calls\":1") != std::string::npos
             && json.find("\"before\":{\"database_pages\":10") != std::string::npos
             && json.find("\"after\":{\"database_pages\":12") != std::string::npos
             && json.find("\"validation_passed\":true") != std::string::npos

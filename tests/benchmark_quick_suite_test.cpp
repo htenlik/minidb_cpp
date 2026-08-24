@@ -21,8 +21,8 @@ int main() {
         std::set<std::string> names;
         for (const auto& result : results) {
             const auto expectedBackend = result.benchmark.starts_with("pager_")
-                ? "legacy_pager"
-                : "buffer_pool";
+                ? "legacy_pager" : result.benchmark.starts_with("wal_")
+                    ? "wal" : "buffer_pool";
             minidb::test::require(
                 result.validationPassed && result.timing.operationCount == 6
                     && result.storageBackend == expectedBackend,
@@ -34,6 +34,7 @@ int main() {
                 "pager_sequential", "pager_random", "buffer_random", "bplus_find_hit",
                 "tuple_lookup",
                 "sql_pk_lookup", "sql_heap_scan", "sql_mixed", "tcp_pk_lookup",
+                "wal_append_buffered",
             },
             "quick-suite workload membership changed");
         const auto json = minidb::bench::resultsToJson(results);

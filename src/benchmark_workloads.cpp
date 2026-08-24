@@ -2,6 +2,7 @@
 
 #include "minidb/catalog.hpp"
 #include "minidb/database_server.hpp"
+#include "minidb/log_manager.hpp"
 #include "minidb/minidb_client.hpp"
 #include "minidb/page_allocator.hpp"
 #include "minidb/persistent_bplus_tree.hpp"
@@ -49,6 +50,8 @@ void removeDatabase(const BenchmarkConfig& config) {
     std::error_code error;
     std::filesystem::remove(config.databasePath, error);
     if (error) throw std::runtime_error("could not remove prior benchmark database");
+    std::filesystem::remove(walPathForDatabase(config.databasePath), error);
+    if (error) throw std::runtime_error("could not remove prior benchmark WAL");
 }
 
 void cleanupDatabase(const BenchmarkConfig& config) {
@@ -141,6 +144,74 @@ const sql::SelectResult& selectResult(const sql::QueryResult& result) {
         throw std::runtime_error("benchmark SELECT returned a command result");
     }
     return std::get<sql::SelectResult>(result);
+}
+
+BenchmarkResult runWal(const BenchmarkConfig& config, const std::string& name) {
+    removeDatabase(config);
+    auto manager = std::make_unique<LogManager>(
+        walPathForDatabase(config.databasePath),
+        static_cast<std::size_t>(config.walBufferBytes));
+    manager->resetStats();
+
+    std::vector<std::uint64_t> operationLatencies;
+    std::vector<std::uint64_t> appendLatencies;
+    std::vector<std::uint64_t> flushLatencies;
+    operationLatencies.reserve(static_cast<std::size_t>(config.operations));
+    appendLatencies.reserve(static_cast<std::size_t>(config.operations));
+    Lsn previous = INVALID_LSN;
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        LogRecord record;
+        record.type = LogRecordType::PageUpdate;
+        record.transactionId = 1;
+        record.prevLsn = previous;
+        record.payload.assign(
+            static_cast<std::size_t>(config.walPayloadBytes),
+            static_cast<std::byte>((config.seed + operation) & 0xFFU));
+        measure(appendLatencies, [&] { previous = manager->append(std::move(record)); });
+        auto operationLatency = appendLatencies.back();
+        const bool force = name == "wal_append_flush_each"
+            || (name == "wal_batch_flush" && (operation + 1U) % config.walBatchSize == 0);
+        if (force) {
+            measure(flushLatencies, [&] { manager->flushUpTo(previous); });
+            operationLatency += flushLatencies.back();
+        }
+        operationLatencies.push_back(operationLatency);
+    }
+    if (manager->durableLsn() != manager->lastAppendedLsn()) {
+        measure(flushLatencies, [&] { manager->flushAll(); });
+        operationLatencies.back() += flushLatencies.back();
+    }
+
+    manager->validate();
+    const auto scanned = manager->scan();
+    const auto expectedBytes = wal_file_layout::HEADER_SIZE
+        + config.operations * (wal_record_layout::HEADER_SIZE + config.walPayloadBytes);
+    if (scanned.records.size() != config.operations
+        || manager->durableLsn() != manager->lastAppendedLsn()
+        || scanned.fileBytes != expectedBytes) {
+        throw std::runtime_error("WAL benchmark validation failed");
+    }
+    const auto operationTotal = totalLatency(operationLatencies);
+    const auto payloadBytes = config.operations * config.walPayloadBytes;
+    const auto seconds = static_cast<double>(operationTotal) / 1'000'000'000.0;
+    BenchmarkResult result;
+    result.benchmark = name;
+    result.storageBackend = "wal";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(operationLatencies, operationTotal);
+    result.wal.walRecords = config.operations;
+    result.wal.walPayloadBytes = payloadBytes;
+    result.wal.payloadBytesPerSecond = seconds == 0.0
+        ? 0.0 : static_cast<double>(payloadBytes) / seconds;
+    result.wal.manager = manager->stats();
+    result.wal.appendTiming = summarizeTimings(appendLatencies, totalLatency(appendLatencies));
+    result.wal.flushTiming = summarizeTimings(flushLatencies, totalLatency(flushLatencies));
+    result.environment = currentEnvironment();
+    result.validationPassed = true;
+    manager.reset();
+    cleanupDatabase(config);
+    return result;
 }
 
 BenchmarkResult runPager(const BenchmarkConfig& config, std::string name) {
@@ -954,11 +1025,13 @@ std::string canonicalName(const std::string& name) {
     if (name == "sql") return "sql_pk_lookup";
     if (name == "tcp") return "tcp_pk_lookup";
     if (name == "mixed") return "sql_mixed";
+    if (name == "wal") return "wal_append_buffered";
     return name;
 }
 
 BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     name = canonicalName(name);
+    if (name.starts_with("wal_")) return runWal(config, name);
     if (name.starts_with("pager_")) return runPager(config, std::move(name));
     if (name.starts_with("buffer_")) return runBuffer(config, name);
     if (name.starts_with("bplus_")) return runBplus(config, name);
@@ -971,6 +1044,7 @@ std::vector<std::string> suiteNames() {
     return {
         "pager_sequential", "pager_random", "buffer_random", "bplus_find_hit", "tuple_lookup",
         "sql_pk_lookup", "sql_heap_scan", "sql_mixed", "tcp_pk_lookup",
+        "wal_append_buffered",
     };
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/buffer_pool_manager.hpp"
+#include "minidb/log_manager.hpp"
 #include "minidb/pager.hpp"
 
 #include <cstddef>
@@ -28,6 +29,9 @@ struct BenchmarkConfig {
     std::uint64_t reopenInterval = 250;
     std::uint64_t bufferFrames = 64;
     std::uint64_t lruK = 2;
+    std::uint64_t walPayloadBytes = 128;
+    std::uint64_t walBatchSize = 10;
+    std::uint64_t walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
     std::uint64_t seed = 12'345;
     std::uint32_t repetitions = 1;
     std::string databasePath = "minidb_benchmark.db";
@@ -73,6 +77,15 @@ struct EnvironmentMetadata {
     std::uint64_t hardwareConcurrency = 0;
 };
 
+struct WalBenchmarkMetrics {
+    std::uint64_t walRecords = 0;
+    std::uint64_t walPayloadBytes = 0;
+    double payloadBytesPerSecond = 0.0;
+    LogManagerStats manager;
+    TimingMetrics appendTiming;
+    TimingMetrics flushTiming;
+};
+
 struct BenchmarkResult {
     std::string benchmark;
     std::string storageBackend;
@@ -82,6 +95,7 @@ struct BenchmarkResult {
     TimingMetrics timing;
     PagerStats pager;
     BufferPoolStats buffer;
+    WalBenchmarkMetrics wal;
     StorageMetrics storageBefore;
     StorageMetrics storageAfter;
     double averageRowsExamined = 0.0;

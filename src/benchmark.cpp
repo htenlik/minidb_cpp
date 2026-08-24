@@ -48,16 +48,21 @@ void validateConfig(const BenchmarkConfig& config) {
     }
     if (config.rows == 0 || config.operations == 0 || config.pages == 0
         || config.repetitions == 0 || config.reopenInterval == 0
-        || config.bufferFrames == 0 || config.lruK == 0) {
+        || config.bufferFrames == 0 || config.lruK == 0 || config.walPayloadBytes == 0
+        || config.walBatchSize == 0 || config.walBufferBytes == 0) {
         throw std::invalid_argument(
             "rows, operations, pages, repetitions, reopen interval, buffer frames, and K "
-            "must be positive");
+            "and WAL payload, batch, and buffer sizes must be positive");
     }
     if (config.rows > MAX_CONFIG_COUNT || config.operations > MAX_CONFIG_COUNT
         || config.pages > MAX_CONFIG_COUNT || config.warmupOperations > MAX_CONFIG_COUNT
         || config.workingSet > MAX_CONFIG_COUNT || config.bufferFrames > MAX_CONFIG_COUNT
-        || config.lruK > MAX_CONFIG_COUNT || config.repetitions > 100) {
+        || config.lruK > MAX_CONFIG_COUNT || config.walBatchSize > MAX_CONFIG_COUNT
+        || config.walBufferBytes > MAX_CONFIG_COUNT || config.repetitions > 100) {
         throw std::invalid_argument("benchmark configuration exceeds safety limits");
+    }
+    if (config.walPayloadBytes > wal_record_layout::MAX_PAYLOAD_SIZE) {
+        throw std::invalid_argument("WAL payload exceeds the maximum record payload");
     }
     if (!config.suite.empty() && config.suite != "quick" && config.suite != "baseline") {
         throw std::invalid_argument("suite must be 'quick' or 'baseline'");
@@ -111,6 +116,7 @@ void writeBufferJson(std::ostringstream& output, const BufferPoolStats& buffer) 
            << ",\"pin_operations\":" << buffer.pinOperations
            << ",\"unpin_operations\":" << buffer.unpinOperations
            << ",\"appended_pages\":" << buffer.appendedPages
+           << ",\"wal_flush_requests\":" << buffer.walFlushRequests
            << ",\"resident_pages\":" << buffer.residentPages
            << ",\"pinned_frames\":" << buffer.pinnedFrames
            << ",\"evictable_frames\":" << buffer.evictableFrames
@@ -150,6 +156,15 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
                 requireValue(arguments, index, argument), argument);
         } else if (argument == "--lru-k") {
             result.config.lruK = parseUnsigned(requireValue(arguments, index, argument), argument);
+        } else if (argument == "--wal-payload-bytes") {
+            result.config.walPayloadBytes = parseUnsigned(
+                requireValue(arguments, index, argument), argument);
+        } else if (argument == "--wal-batch-size") {
+            result.config.walBatchSize = parseUnsigned(
+                requireValue(arguments, index, argument), argument);
+        } else if (argument == "--wal-buffer-bytes") {
+            result.config.walBufferBytes = parseUnsigned(
+                requireValue(arguments, index, argument), argument);
         } else if (argument == "--seed") {
             result.config.seed = parseUnsigned(requireValue(arguments, index, argument), argument);
         } else if (argument == "--repetitions") {
@@ -192,6 +207,9 @@ std::string usageText() {
         "  --reopen-interval N   operations between reopen events (default 250)\n"
         "  --buffer-frames N     bounded buffer frame capacity (default 64)\n"
         "  --lru-k N             LRU-K history length (default 2)\n"
+        "  --wal-payload-bytes N WAL payload bytes per record (default 128)\n"
+        "  --wal-batch-size N    records per synchronous batch flush (default 10)\n"
+        "  --wal-buffer-bytes N  in-memory WAL buffer capacity (default 65536)\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
         "  --seed N              deterministic seed (default 12345)\n"
         "  --repetitions N       repeat each workload (default 1)\n"
@@ -214,6 +232,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "sql_delete", "sql_mixed", "sql_pk_vs_heap",
         "tcp", "tcp_pk_lookup", "tcp_heap_scan", "tcp_insert", "tcp_mixed",
         "mixed", "mixed_read_heavy", "mixed_write_heavy",
+        "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
     };
 }
 
@@ -279,6 +298,7 @@ BufferPoolStats accumulateBufferStats(
     accumulated.pinOperations += next.pinOperations;
     accumulated.unpinOperations += next.unpinOperations;
     accumulated.appendedPages += next.appendedPages;
+    accumulated.walFlushRequests += next.walFlushRequests;
     accumulated.residentPages = std::max(accumulated.residentPages, next.residentPages);
     accumulated.pinnedFrames = std::max(accumulated.pinnedFrames, next.pinnedFrames);
     accumulated.evictableFrames = std::max(
@@ -331,6 +351,9 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"repetitions\":" << config.repetitions
                << ",\"buffer_frames\":" << config.bufferFrames
                << ",\"lru_k\":" << config.lruK
+               << ",\"wal_payload_bytes\":" << config.walPayloadBytes
+               << ",\"wal_batch_size\":" << config.walBatchSize
+               << ",\"wal_buffer_bytes\":" << config.walBufferBytes
                << ",\"cache_mode\":\""
                << (config.cacheMode == CacheMode::Hot ? "hot" : "reopen")
                << "\",\"tuple_sizes\":\"" << escapeJson(config.tupleSizes) << "\"}"
@@ -347,6 +370,22 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
         writePagerJson(output, result.pager);
         output << ",\"buffer\":";
         writeBufferJson(output, result.buffer);
+        output << ",\"wal\":{\"wal_records\":" << result.wal.walRecords
+               << ",\"wal_payload_bytes\":" << result.wal.walPayloadBytes
+               << ",\"payload_bytes_per_second\":"
+               << result.wal.payloadBytesPerSecond
+               << ",\"wal_bytes_written\":" << result.wal.manager.bytesWritten
+               << ",\"wal_fsync_calls\":" << result.wal.manager.fsyncCalls
+               << ",\"wal_buffer_flushes\":" << result.wal.manager.bufferFlushes
+               << ",\"wal_physical_writes\":" << result.wal.manager.physicalWrites
+               << ",\"wal_flush_up_to_calls\":" << result.wal.manager.flushUpToCalls
+               << ",\"last_appended_lsn\":" << result.wal.manager.lastAppendedLsn
+               << ",\"durable_lsn\":" << result.wal.manager.durableLsn
+               << ",\"append_p95_ns\":" << result.wal.appendTiming.p95Nanoseconds
+               << ",\"append_p99_ns\":" << result.wal.appendTiming.p99Nanoseconds
+               << ",\"flush_count\":" << result.wal.flushTiming.operationCount
+               << ",\"flush_p95_ns\":" << result.wal.flushTiming.p95Nanoseconds
+               << ",\"flush_p99_ns\":" << result.wal.flushTiming.p99Nanoseconds << '}';
         output << ",\"storage\":{\"before\":";
         writeStorageJson(output, result.storageBefore);
         output << ",\"after\":";
@@ -407,6 +446,16 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.buffer.physicalPageReads << '/' << result.buffer.physicalPageWrites
            << '/' << result.buffer.evictions << '/' << result.buffer.dirtyEvictions << '/'
            << result.buffer.residentPages << '/' << result.buffer.capacity << '\n'
+           << "wal records/payload bytes/written bytes/fsyncs/buffer flushes: "
+           << result.wal.walRecords << '/' << result.wal.walPayloadBytes << '/'
+           << result.wal.manager.bytesWritten << '/' << result.wal.manager.fsyncCalls << '/'
+           << result.wal.manager.bufferFlushes << '\n'
+           << "wal payload bytes/s, append p95/p99 ns, flush p95/p99 ns: "
+           << result.wal.payloadBytesPerSecond << '/'
+           << result.wal.appendTiming.p95Nanoseconds << '/'
+           << result.wal.appendTiming.p99Nanoseconds << '/'
+           << result.wal.flushTiming.p95Nanoseconds << '/'
+           << result.wal.flushTiming.p99Nanoseconds << '\n'
            << "storage before pages/bytes/free/resident: "
            << result.storageBefore.databasePages << '/' << result.storageBefore.databaseBytes
            << '/' << result.storageBefore.freePages << '/'
@@ -437,7 +486,7 @@ EnvironmentMetadata currentEnvironment() {
     const std::string buildType = std::string(MINIDB_BUILD_TYPE).empty()
         ? "unspecified" : MINIDB_BUILD_TYPE;
     return EnvironmentMetadata{
-        "v0.1.0 frozen MVP + Milestone 10B buffer-backed engine",
+        "v0.1.0 frozen MVP + Milestone 11A WAL foundation",
         MINIDB_GIT_COMMIT,
         __VERSION__,
         buildType,
