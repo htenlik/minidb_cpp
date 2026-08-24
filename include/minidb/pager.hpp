@@ -1,11 +1,10 @@
 #pragma once
 
-#include "minidb/database_format.hpp"
+#include "minidb/disk_manager.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -28,8 +27,8 @@ struct PagerStats {
 
 class Pager {
 public:
-    static constexpr std::size_t PAGE_SIZE = database_format::PAGE_SIZE;
-    using Page = std::array<std::byte, PAGE_SIZE>;
+    static constexpr std::size_t PAGE_SIZE = DiskManager::PAGE_SIZE;
+    using Page = DiskManager::Page;
 
     explicit Pager(const std::string& path);
     ~Pager();
@@ -49,9 +48,9 @@ public:
     void resetStats() noexcept;
     [[nodiscard]] std::size_t residentPageCount() const noexcept { return cache_.size(); }
 
-    [[nodiscard]] PageId pageCount() const noexcept { return pageCount_; }
+    [[nodiscard]] PageId pageCount() const noexcept { return diskManager_.pageCount(); }
     [[nodiscard]] const database_format::DatabaseHeader& databaseHeader() const noexcept {
-        return databaseHeader_;
+        return diskManager_.databaseHeader();
     }
 
 private:
@@ -60,18 +59,10 @@ private:
         bool dirty = false;
     };
 
-    std::string path_;
-    std::fstream file_;
-    PageId pageCount_ = 0;
-    database_format::DatabaseHeader databaseHeader_{};
+    DiskManager diskManager_;
     std::unordered_map<PageId, std::unique_ptr<Frame>> cache_;
     PagerStats stats_{};
 
-    void openOrCreate();
-    void initializeDatabase();
-    void loadAndValidateDatabaseHeader();
-    void persistDatabaseHeader(const database_format::DatabaseHeader& header);
-    void loadPageFromDisk(PageId pageId, Frame& frame);
     static void requireDataPage(PageId pageId);
 };
 
