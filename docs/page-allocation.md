@@ -1,21 +1,21 @@
 # Persistent page allocation
 
-Milestone 4B.2 introduces a database-wide reusable `PageAllocator` above the physical
-`Pager`:
+Milestone 4B.2 introduced a database-wide reusable `PageAllocator`; Milestone 10B routes
+its production access through guarded buffer frames:
 
 ```text
-storage structures -> PageAllocator -> free list or Pager append -> database file
+storage -> PageAllocator -> BufferPoolManager -> DiskManager -> database file
 ```
 
-`Pager` remains responsible for fixed-size page I/O, caching, dirty tracking, physical
-append allocation, and protecting metadata page 0. `PageAllocator` owns free-list
+BufferPoolManager owns caching, pins, dirty tracking, and guarded append allocation;
+DiskManager owns fixed-size I/O and protected page-0 metadata. `PageAllocator` owns free-list
 interpretation, validation, reclamation, and reuse. It is independent of B+ tree page
 types and now serves tuple heaps, persistent indexes, and catalog metadata.
 
 ## Free-list head
 
 Database metadata version 1 already reserves a four-byte `freeListRootPageId` at page-0
-offset 24. `INVALID_PAGE_ID` means the list is empty. Pager exposes a narrow
+offset 24. `INVALID_PAGE_ID` means the list is empty. DiskManager exposes a narrow
 `updateFreeListRootPageId` operation that validates the new reference and explicitly
 serializes and flushes page 0; normal `getPage(0)`, dirty, and flush operations remain
 forbidden.
@@ -47,11 +47,13 @@ metadata page because it has its own magic/type and its former payload is erased
 
 `allocatePage()` pops and validates the free-list head when one exists, updates the
 persisted head, clears the selected page, marks it dirty, and returns its PageId for the
-caller to initialize. When the list is empty it delegates to Pager's append primitive.
+caller to initialize. When the list is empty it delegates to the buffer pool's guarded
+append primitive. Each free-list page is read under one operation-scoped guard.
 The allocator validates the complete list at construction; a normal pop is then O(1).
 
 `releasePage(pageId)` rejects page 0, `INVALID_PAGE_ID`, nonexistent pages, and any page
-already reachable from the free list. It rewrites the page as a Free Page whose `next`
+already reachable from the free list. After acquiring its write guard it also requires
+that its own pin is the only pin. It rewrites the page as a Free Page whose `next`
 is the old head, marks it dirty, and persists the new head. The defensive duplicate
 check traverses the list, so release is O(F) for F free pages. This explicit correctness
 tradeoff can be revisited if allocation metadata later provides constant-time ownership
@@ -68,7 +70,7 @@ unsupported version, wrong header size, nonzero reserved bytes, illegal next lin
 cycles, and duplicate visits. Persistent B+ tree validation additionally checks that
 its metadata and reachable node PageIds are disjoint from the free-list set.
 
-The free list and tree survive successful explicit flushes and clean Pager close/reopen
+The free list and tree survive successful explicit buffer/DiskManager flushes and clean close/reopen
 cycles. They are not crash-atomic: reclamation and tree rebalancing can dirty multiple
 pages and both metadata structures. Without WAL/recovery, a process or machine failure
 between writes may leave inconsistent state. No transactional durability is claimed.

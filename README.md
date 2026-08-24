@@ -30,7 +30,10 @@ TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Exec
                                                    PageAllocator
                                                         |
                                                         v
-                                                      Pager
+                                             BufferPoolManager / LRU-K
+                                                        |
+                                                        v
+                                                   DiskManager
                                                         |
                                                         v
                                                    database.db
@@ -53,16 +56,18 @@ The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
 
 9. **Benchmarking and storage-observability baseline** ✅
 10A. **DiskManager, bounded buffer pool, page guards, and LRU-K** ✅
-10B. **Engine-wide buffer-pool migration** — next
-11. **WAL and recovery foundation** — planned
+10B. **Engine-wide buffer-pool migration** ✅
+11. **WAL and recovery foundation** — next
 12. **Transactions and concurrency** — planned
 13. **Experimental and paper-driven work** — later
 
-Milestone 10A adds a separately tested bounded BufferPoolManager without migrating the
-production storage path or changing persistent formats. The current TupleStore, index,
-Catalog, SQL, and TCP layers still use the legacy Pager. See
+Milestone 10B routes the active TupleStore, persistent index, Catalog/Table, SQL, and TCP
+paths through move-only page guards, the bounded BufferPoolManager, and DiskManager.
+The legacy unbounded Pager remains for v0.1.x compatibility, fixed RecordStore tests,
+and explicitly labeled low-level benchmarks. Persistent formats did not change. See
 [docs/disk-manager.md](docs/disk-manager.md),
 [docs/buffer-pool.md](docs/buffer-pool.md),
+[docs/storage-architecture.md](docs/storage-architecture.md),
 [docs/benchmarking.md](docs/benchmarking.md), and
 [benchmarks/README.md](benchmarks/README.md).
 
@@ -180,7 +185,7 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/minidb demo.db
-./build/minidb_server demo.db --port 7432
+./build/minidb_server demo.db --port 7432 --buffer-frames 128 --lru-k 2
 ./build/minidb_client --port 7432 --execute "SELECT * FROM users;"
 ```
 

@@ -164,9 +164,9 @@ internal key in either child. If propagation passes the old root, a new internal
 allocated and the metadata page's root PageId is updated. `IndexMetaPageId` does not
 change.
 
-Every complete page rewrite zeroes unused bytes and calls `Pager::markDirty`. Structural
-insertion explicitly dirties the old node, new sibling, repaired neighboring leaf,
-parents, new root, and index metadata whenever each is modified.
+Every complete page rewrite zeroes unused bytes through a WritePageGuard, which marks
+the frame dirty. Structural insertion writes the old node, new sibling, repaired
+neighboring leaf, parents, new root, and index metadata in bounded guard scopes.
 
 ## Deletion and rebalancing
 
@@ -199,9 +199,10 @@ Pages and become reusable; see [page-allocation.md](page-allocation.md).
 
 ## Reopen and validation
 
-`PersistentBPlusTree::open(pager, indexMetaPageId)` reads and validates metadata and the
-root node without reconstructing a whole-tree mirror. Pager pages remain the source of
-truth. Normal lookup/insertion decodes only its traversal path and split participants.
+`PersistentBPlusTree::open(bufferPool, diskManager, allocator, indexMetaPageId)` reads
+and validates metadata and the root node without reconstructing a whole-tree mirror.
+Buffer-backed pages remain the source of truth. Traversal retains PageIds and child
+indexes, not guards; each node is decoded to a bounded operation-local value.
 
 The full validator walks PageIds without mutation and checks:
 
@@ -222,12 +223,12 @@ Corruption is rejected; no automatic repair is attempted.
 
 ## Deliberate current limits
 
-RecordStore still uses Pager's append-only allocation primitive; migrating that legacy
-heap to the global allocator is intentionally deferred. The Milestone 5B Catalog stores
+The educational fixed RecordStore still uses legacy Pager's append-only allocation
+primitive. The Milestone 5B Catalog stores
 stable index metadata identities, but concurrency, transactions, WAL, and recovery are
 not implemented.
 
-Persistence is guaranteed only after a successful flush or clean Pager close. A split,
+Persistence is guaranteed only after a successful buffer/DiskManager flush or clean close. A split,
 merge, or root shrink can modify several nodes plus index and database metadata, and
 there is no WAL or atomic multi-page commit. A crash between physical writes can leave
 an inconsistent tree or free list. Write ordering alone is not claimed as crash

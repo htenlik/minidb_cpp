@@ -1,8 +1,10 @@
 # Bounded buffer pool and LRU-K
 
-Milestone 10A introduces a single-threaded, fixed-capacity BufferPoolManager beside the
-legacy production Pager. It is tested directly but is not yet used by TupleStore,
-PersistentBPlusTree, Catalog, Table, SQL, or TCP. Engine migration is Milestone 10B.
+Milestone 10A introduced the single-threaded fixed-capacity BufferPoolManager and guards.
+Milestone 10B makes them the active backend for PageAllocator, TupleStore,
+PersistentBPlusTree, Catalog, Table, SQL, and TCP. The legacy Pager remains an explicitly
+historical, unbounded v0.1.x cache used by fixed RecordStore regressions and low-level
+comparison benchmarks.
 
 ## Pages, frames, and ownership
 
@@ -78,8 +80,58 @@ page request and cache miss but not as a pin.
 
 `newPageWrite()` first secures a free/evictable frame, then appends a zero-filled page
 through DiskManager. It never allocates page 0 and never appends if all frames are
-pinned. It is intentionally append-only; PageAllocator free-list integration waits for
-10B. The returned write guard owns the first pin and the frame is dirty.
+pinned. It is intentionally append-only; the 10B PageAllocator first consumes the
+persistent free list and falls back to this path only when that list is empty. The
+returned write guard owns the first pin and the frame is dirty.
+
+## Engine migration and typed page views
+
+Active storage objects retain only manager references and stable persistent identities
+such as heap/index metadata PageIds. Each operation acquires a guard, constructs a
+non-owning typed view or decodes a bounded logical node, copies the required result or
+PageIds, then drops the guard. A typed view never owns a pin and must never outlive the
+guard whose span created it. No active object stores `Page&`, `Page*`, or a long-lived
+span into frame memory.
+
+Read-only metadata, tuple lookup/scan, B+ lookup/range scan, and validators use read
+guards. Mutations use write guards, whose acquisition supplies dirty semantics. B+ tree
+descent records only `{parentPageId, childIndex}` frames; splits and merges use bounded
+one-page logical copies and phase writes by PageId. Recursive validation decodes a node,
+drops its guard, and only then visits copied child PageIds.
+
+PageAllocator validates and walks the persisted LIFO free list one read guard at a time.
+On release it acquires its own write guard and requires the page's pin count to be exactly
+one; an externally pinned page raises `PinnedPageRelease` and is not linked as free. A
+reused resident page is zeroed and dirtied before its next typed format is initialized,
+so correctness never depends on eviction.
+
+`NoFrameAvailable` is converted at the storage boundary to `StorageError` rather than
+dereferencing an empty optional or falling back to Pager. With the supported single-
+threaded ownership discipline it diagnoses either an undersized pool or a pin-lifetime
+bug. Other focused categories are corrupt page, invalid page, and pinned-page release;
+existing public exception behavior was otherwise preserved.
+
+### Engine Migration Pin Budget
+
+The implementation deliberately phases operations so the intended maximum is one pinned
+frame at a time. The table is an implementation audit, not a future concurrency promise:
+
+| Operation | Intended simultaneous pins | Discipline |
+| --- | ---: | --- |
+| TupleStore get / scan | 1 | copy tuple(s) and next PageId before advancing |
+| TupleStore insert | 1 | read first-fit candidate, drop, reacquire/write/recheck |
+| TupleStore unlink/reclaim | 1 | current, neighbors, metadata, release in separate scopes |
+| B+ find / range scan | 1 | decode current node/leaf, copy next PageId, advance |
+| B+ insert without split | 1 | logical path contains IDs/child indexes, not guards |
+| B+ leaf/internal split | 1 | local bounded node copies; pages written in phases |
+| B+ delete / borrow / merge | 1 | decode siblings/parent separately; release after all guards drop |
+| Catalog lookup | 1 | catalog metadata and TupleStore accesses are sequential |
+| Table insert/update/delete | 1 | heap and index calls are sequential logical coordination |
+
+The complete SQL/storage workflow is guaranteed and tested with three frames and also
+passes the current directed two-frame workflow. Individual one-page operations work with
+one frame, but one frame is not advertised as the full-engine minimum. Selected tests
+assert `pinnedFrames == 0` after storage, validation, SQL, and TCP operation boundaries.
 
 ## LRU-K policy
 
@@ -181,8 +233,9 @@ their unbounded and bounded memory configurations are not apples-to-apples engin
   --pages 10000 --operations 50000 --working-set 32 --buffer-frames 64 --lru-k 2
 ```
 
-The BufferPoolManager is single-threaded. No mutex, latch, wait queue, or blocking pin
-protocol exists in 10A.
+The BufferPoolManager and migrated engine remain single-threaded. No mutex, latch, wait
+queue, or blocking pin protocol exists in 10B. Guards express access mode and lifetime,
+not synchronization.
 
 ## Reference
 

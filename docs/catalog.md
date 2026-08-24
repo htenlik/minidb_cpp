@@ -1,6 +1,6 @@
 # Persistent catalog
 
-Milestone 5B activates database metadata's intended `catalogRootPageId`. Pager exposes
+Milestone 5B activates database metadata's intended `catalogRootPageId`. DiskManager exposes
 only a narrow validated `updateCatalogRootPageId` operation; page 0 remains unavailable
 through normal page APIs.
 
@@ -70,7 +70,7 @@ metadata PageIds.
 ## Bootstrap and APIs
 
 Existing format-version-1 databases legitimately contain
-`catalogRootPageId = INVALID_PAGE_ID`. `Catalog::openOrCreate` leaves Pager startup
+`catalogRootPageId = INVALID_PAGE_ID`. `Catalog::openOrCreate` leaves DiskManager startup
 unchanged and bootstraps only when explicitly requested:
 
 1. allocate Catalog Metadata through PageAllocator;

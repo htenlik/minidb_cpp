@@ -4,6 +4,10 @@ This document describes database format version 1. All persistent multi-byte int
 are unsigned and encoded in little-endian byte order. C++ object representations are
 never written directly to disk.
 
+Milestone 10B changes only the in-memory access path (guards, bounded buffer pool, and
+DiskManager). Every magic, version, offset, width, byte order, and encoded value described
+here remains byte-identical.
+
 ## Physical page layout
 
 MiniDB++ database files are a sequence of 4096-byte pages:

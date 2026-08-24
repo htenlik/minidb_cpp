@@ -1,11 +1,12 @@
 # Benchmarking and storage observability
 
-Milestone 9 establishes a repeatable measurement baseline after the `v0.1.0` MVP and
-before the bounded buffer pool. It adds counters and workloads, not performance claims.
+Milestone 9 established the repeatable post-`v0.1.0` baseline; 10A added standalone
+buffer workloads; 10B migrates active persistent B+ tree, TupleStore, SQL, TCP, and mixed
+workloads to the bounded pool. The harness reports measurements, not performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
 
-## Current Pager model
+## Storage backends
 
 > The v0.1.x Pager retains accessed pages in an unbounded in-memory cache for the
 > lifetime of the Pager.
@@ -13,8 +14,12 @@ configuration, and seed.
 This cache has no capacity limit, replacement policy, pin/unpin protocol, eviction,
 dirty-victim flushing, or page guards. It is therefore not a database buffer pool.
 Touching distinct pages causes `residentPages` to grow until the Pager is destroyed.
-Milestone 10A retains these workloads and adds separately labeled standalone bounded
-BufferPoolManager workloads. Full-engine comparison waits for the 10B migration.
+Only `pager_*` workloads use this historical backend. They are labeled
+`storage_backend = "legacy_pager"`.
+
+Standalone `buffer_*` and active B+ tree, TupleStore, SQL, TCP, and mixed workloads use
+BufferPoolManager + DiskManager and are labeled `storage_backend = "buffer_pool"`.
+Their resident set is capped by `--buffer-frames`, and `--lru-k` controls replacement.
 
 Instrumentation excludes the database metadata page read performed by Pager startup.
 It does not change allocation, loading, dirtying, or flushing behavior. `PagerStats`
@@ -36,9 +41,9 @@ uses 64-bit counters with these exact meanings:
 does not clear resident frames; the returned `residentPages` gauge still reflects them.
 `Pager::residentPageCount()` exposes the same current gauge independently.
 
-Storage reporting uses existing Pager and PageAllocator APIs. Results contain database
-page count, file bytes, free-page count, and resident-frame count immediately before and
-after the measured workload, plus human-readable file growth.
+Buffer-backed storage reporting uses DiskManager, BufferPoolManager, and PageAllocator;
+legacy workloads use Pager. Results contain database page count, file bytes, free-page
+count, and resident-frame count immediately before and after the measured workload.
 
 ## Methodology
 
@@ -50,7 +55,7 @@ cmake --build build-release
 ```
 
 Each repetition removes the configured benchmark database, creates deterministic setup
-data, optionally warms relevant hot reads, resets Pager counters, measures operations,
+data, optionally warms relevant hot reads, resets backend counters, measures operations,
 and validates state outside the timed region. The database is removed afterward unless
 `--retain-db` is supplied. Insertion workloads deliberately time insertion into an
 otherwise empty structure; lookup/update/delete/scan workloads populate first without
@@ -73,17 +78,18 @@ tuple index. The size modes are `small` (1–64 bytes), `medium` (129–512), `l
 
 ### Hot and reopen modes
 
-`--mode hot` retains one owner/Pager. Relevant point-read workloads can perform
+`--mode hot` retains one backend owner. Relevant point-read workloads can perform
 `--warmup N` untimed operations before counters reset. `--mode reopen` flushes through
-normal owners where applicable, destroys and recreates the Pager/database owner every
+normal owners where applicable, destroys and recreates the Pager or DiskManager/buffer
+pool/component owner every
 `--reopen-interval N` measured operations, and aggregates counters across segments.
 
 Reopen clears MiniDB++'s cache. It is **not** a cold-disk benchmark: the operating
 system may retain file pages. The harness never drops OS caches or requires privileges.
 
 `--working-set N` limits the key/page population sampled by supported lookup workloads;
-zero means the whole available dataset. This is retained for future replacement-policy
-comparisons.
+zero means the whole available dataset. Choose both a hot-set run where the sampled
+pages fit within frame capacity and a memory-bound run where they do not.
 
 ## Workload definitions
 
@@ -125,9 +131,9 @@ scan reads, 2% inserts, 2% updates, and 1% deletes (95/5 read/write).
 15% deletes (50/50). A seeded live-key model keeps targets meaningful.
 
 TCP workloads use one loopback client at a time. Their latency includes wire framing,
-socket transfer, server execution, and the server's current `Pager::flushAll()` after
-each successful statement. They must not be compared to local SQL without accounting
-for those semantics.
+socket transfer, server execution, and the server's `BufferPoolManager::flushAll()` plus
+DiskManager flush after each successful statement. They must not be compared to local
+SQL without accounting for those semantics.
 
 All workloads validate their relevant storage/tree/catalog/model after measurement.
 
@@ -165,7 +171,7 @@ See [the benchmark command reference](../benchmarks/README.md) for every option.
 
 The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 
-- `benchmark`, `seed`, and one-based `repetition`;
+- `benchmark`, explicit `storage_backend`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
   repetitions, buffer frames, LRU-K K, mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
@@ -196,7 +202,20 @@ machine/build configurations.
   cleanliness; reconfigure after changing commits for an exact identifier.
 - No automatic cross-run comparison or timing-regression threshold is included.
 
-The next storage milestone should keep these metric definitions stable where possible
-when migrating engine components. The legacy unbounded Pager and standalone bounded pool
-are not equivalent memory configurations. See [buffer-pool.md](buffer-pool.md) for exact
-LRU-K, guard, flush, metric, and scan-resistance definitions.
+The legacy unbounded Pager and bounded pool are not equivalent memory configurations.
+See [buffer-pool.md](buffer-pool.md) for exact LRU-K, guard, flush, metric, and
+scan-resistance definitions.
+
+## Controlled pre/post and replacement-policy comparisons
+
+Capture machine-specific JSON under ignored `benchmarks/results/`. A 10B comparison
+uses the same Release compiler/build, database sizes, operation counts, workload
+definitions, seed, cache mode, and machine for the pre-migration commit and migrated
+commit. Report throughput and p95/p99 alongside resident/capacity, hits/misses, physical
+I/O, and evictions. The old unbounded cache and bounded pool answer different memory
+constraints, so neither should be described as universally faster.
+
+For a meaningful replacement-policy experiment, run one full-engine read-heavy workload
+twice with identical data, operations, seed, frame capacity, and working set, changing
+only K=1 versus K=2. A single run demonstrates behavior but is not statistically
+significant. Reopen mode still cannot control the operating-system page cache.

@@ -11,7 +11,7 @@ storage engine concurrently.
 `DatabaseServer` owns objects in dependency order:
 
 ```text
-Pager -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
+DiskManager -> BufferPoolManager -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
 ```
 
 It opens or creates the database, uses the existing catalog bootstrap, then listens.
@@ -26,8 +26,14 @@ collision-free tests, and `TcpServer::port()` reports the selected port.
 
 ```bash
 ./build/minidb_server demo.db
-./build/minidb_server demo.db --host 127.0.0.1 --port 7432
+./build/minidb_server demo.db --host 127.0.0.1 --port 7432 \
+    --buffer-frames 128 --lru-k 2
 ```
+
+`--buffer-frames` and `--lru-k` must both be positive. Defaults are 128 frames and
+K=2. The complete supported workflow is regression-tested with three frames and also
+passes the current two-frame stress workflow; one frame remains useful for individual
+page operations but is not the guaranteed full-engine configuration.
 
 Startup prints the database path, bound address/actual port, and protocol version.
 Binding another address is an explicit operator choice.
@@ -79,11 +85,13 @@ The final query reports `PrimaryKeyLookup` and one index lookup.
 
 ## Persistence and reconnects
 
-After every successfully executed statement, the server calls `Pager::flushAll()` before
-sending the success response. Thus a successful response means dirty pages were written
-through the current C++ file stream, and clean close/reopen tests are deterministic. This
-is not crash-safe durability: there is no `fsync`, WAL, transaction atomicity, or recovery,
-and a multi-page change can be interrupted.
+After every successfully executed statement, the server materializes/encodes the result,
+calls `BufferPoolManager::flushAll()` and then `DiskManager::flush()`, and only then sends
+the success response. Operation guards have already left scope at this boundary. Thus a
+successful response means dirty resident pages were written through the current C++ file
+stream, and clean close/reopen tests are deterministic. This is not crash-safe durability:
+there is no `fsync`, WAL, transaction atomicity, or recovery, and dirty eviction may
+persist parts of a multi-page change in any order.
 
 A client connection can carry many sequential requests. A normal SQL error does not end
 the session. Clients may disconnect and reconnect with a new HELLO exchange; later clients

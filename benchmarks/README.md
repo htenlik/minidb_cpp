@@ -19,8 +19,8 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--warmup N` | 100 | Untimed hot-mode warmup operations |
 | `--mode hot|reopen` | hot | Retain owner or recreate it periodically |
 | `--reopen-interval N` | 250 | Operations per reopen segment |
-| `--buffer-frames N` | 64 | Standalone bounded buffer capacity |
-| `--lru-k N` | 2 | LRU-K history length (`K >= 1`) |
+| `--buffer-frames N` | 64 | Bounded capacity for buffer and active engine workloads |
+| `--lru-k N` | 2 | LRU-K history length for buffer and active engine workloads (`K >= 1`) |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |
 | `--seed N` | 12345 | Deterministic workload seed |
 | `--repetitions N` | 1 | Fresh-database repetitions per workload |
@@ -32,3 +32,8 @@ All positive counts are validated and capped at ten million; repetitions are cap
 100. Benchmark and database result artifacts are ignored by Git. See
 [docs/benchmarking.md](../docs/benchmarking.md) for definitions, measured regions,
 workload distributions, output schema, and interpretation caveats.
+
+JSON identifies each result with `storage_backend`: `buffer_pool` for active B+ tree,
+TupleStore, SQL, TCP, mixed, and standalone buffer workloads; `legacy_pager` only for
+the historical low-level Pager family. The same configuration object records frame
+capacity and K for controlled comparisons.
