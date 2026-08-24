@@ -27,7 +27,7 @@ uses 64-bit counters with these exact meanings:
 | `physicalPageReads` | Completed 4096-byte data-page reads from the database file |
 | `physicalPageWrites` | Completed 4096-byte dirty data-page writes |
 | `dirtyMarks` | Successful calls to `markDirty()`, including repeated marks |
-| `flushCalls` | Successful `flush(PageId)` invocations, including clean/nonresident pages |
+| `flushCalls` | Valid `flush(PageId)` invocations reaching flush logic, including clean/nonresident pages and an invocation whose later file write fails |
 | `appendedPages` | Pages appended by `allocatePage()`; allocator reuse is not an append |
 | `residentPages` | Current frame count; during aggregation, the maximum across reopen segments |
 

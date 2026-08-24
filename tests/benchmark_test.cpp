@@ -96,13 +96,23 @@ void testJson() {
     result.configuration.benchmark = "demo";
     result.configuration.rows = 1;
     result.configuration.operations = 1;
+    result.configuration.reopenInterval = 17;
+    result.configuration.repetitions = 3;
     result.timing = summarizeTimings({10}, 10);
+    result.pager = minidb::PagerStats{1, 2, 3, 4, 5, 6, 7, 8, 9};
+    result.storageBefore = StorageMetrics{10, 40'960, 2, 3};
+    result.storageAfter = StorageMetrics{12, 49'152, 1, 7};
     result.environment = currentEnvironment();
     result.validationPassed = true;
     const auto json = resultsToJson({result});
     minidb::test::require(
         json.find("\"schema_version\":1") != std::string::npos
             && json.find("demo\\nname") != std::string::npos
+            && json.find("\"reopen_interval\":17") != std::string::npos
+            && json.find("\"repetitions\":3") != std::string::npos
+            && json.find("\"dirty_marks\":6") != std::string::npos
+            && json.find("\"before\":{\"database_pages\":10") != std::string::npos
+            && json.find("\"after\":{\"database_pages\":12") != std::string::npos
             && json.find("\"validation_passed\":true") != std::string::npos
             && json.back() == '\n',
         "benchmark JSON schema/output changed");
