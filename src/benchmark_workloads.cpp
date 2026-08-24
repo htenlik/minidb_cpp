@@ -220,10 +220,13 @@ BenchmarkResult runBuffer(const BenchmarkConfig& config, const std::string& name
         static_cast<std::size_t>(config.bufferFrames),
         static_cast<std::size_t>(config.lruK));
     const auto configuredSet = workingSet(config.workingSet, config.pages);
-    const auto hotSet = config.workingSet == 0
+    const auto requestedHotSet = config.workingSet == 0
         ? std::max<std::uint64_t>(1, std::min<std::uint64_t>(
             config.pages, std::max<std::uint64_t>(1, config.bufferFrames / 2U)))
         : configuredSet;
+    const auto hotSet = name == "buffer_scan_resistance" && config.pages > 1
+        ? std::min<std::uint64_t>(requestedHotSet, config.pages - 1U)
+        : requestedHotSet;
 
     if (config.cacheMode == CacheMode::Hot
         && (name == "buffer_hotset" || name == "buffer_scan_resistance")) {
