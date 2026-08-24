@@ -1,0 +1,808 @@
+#include "minidb/benchmark.hpp"
+
+#include "minidb/catalog.hpp"
+#include "minidb/database_server.hpp"
+#include "minidb/minidb_client.hpp"
+#include "minidb/page_allocator.hpp"
+#include "minidb/persistent_bplus_tree.hpp"
+#include "minidb/sql_executor.hpp"
+#include "minidb/table.hpp"
+#include "minidb/tuple_store.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <optional>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <unordered_set>
+#include <utility>
+#include <variant>
+
+namespace minidb::bench {
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+template <typename Operation>
+void measure(std::vector<std::uint64_t>& latencies, Operation&& operation) {
+    const auto start = Clock::now();
+    operation();
+    const auto stop = Clock::now();
+    latencies.push_back(static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start).count()));
+}
+
+std::uint64_t totalLatency(const std::vector<std::uint64_t>& latencies) {
+    return std::accumulate(latencies.begin(), latencies.end(), std::uint64_t{0});
+}
+
+void removeDatabase(const BenchmarkConfig& config) {
+    std::error_code error;
+    std::filesystem::remove(config.databasePath, error);
+    if (error) throw std::runtime_error("could not remove prior benchmark database");
+}
+
+void cleanupDatabase(const BenchmarkConfig& config) {
+    if (!config.keepDatabase) removeDatabase(config);
+}
+
+StorageMetrics storageMetrics(Pager& pager) {
+    PageAllocator allocator(pager);
+    const auto freePages = allocator.freePageIds().size();
+    return StorageMetrics{
+        pager.pageCount(),
+        static_cast<std::uint64_t>(pager.pageCount()) * Pager::PAGE_SIZE,
+        freePages,
+        pager.residentPageCount(),
+    };
+}
+
+BenchmarkResult finish(
+    std::string name,
+    const BenchmarkConfig& config,
+    std::vector<std::uint64_t> latencies,
+    PagerStats pager,
+    StorageMetrics storage,
+    double averageRowsExamined = 0.0,
+    double averageIndexLookups = 0.0) {
+    BenchmarkResult result;
+    result.benchmark = std::move(name);
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(latencies, totalLatency(latencies));
+    result.pager = pager;
+    result.storage = storage;
+    result.averageRowsExamined = averageRowsExamined;
+    result.averageIndexLookups = averageIndexLookups;
+    result.environment = currentEnvironment();
+    result.validationPassed = true;
+    return result;
+}
+
+std::uint64_t workingSet(std::uint64_t configured, std::uint64_t available) {
+    return configured == 0 ? available : std::min(configured, available);
+}
+
+RecordId syntheticRecordId(std::uint64_t value) {
+    constexpr std::uint64_t slotsPerPage = INVALID_SLOT_ID;
+    return RecordId{
+        static_cast<PageId>((value / slotsPerPage) + 1U),
+        static_cast<SlotId>(value % slotsPerPage),
+    };
+}
+
+TupleBytes tuplePayload(
+    std::uint64_t seed,
+    std::uint64_t index,
+    std::string_view distribution,
+    std::uint64_t variation = 0) {
+    std::uint64_t size = 0;
+    const auto mixedClass = (seed + index + variation) % 4U;
+    const auto selected = distribution == "mixed"
+        ? mixedClass
+        : distribution == "small" ? 0U : distribution == "medium" ? 1U : 2U;
+    if (selected == 0) size = 1U + ((seed + index * 17U + variation) % 64U);
+    else if (selected == 1) size = 129U + ((seed + index * 31U + variation) % 384U);
+    else if (selected == 2) size = 513U + ((seed + index * 47U + variation) % 988U);
+    else size = 17U + ((seed + index * 23U + variation) % 112U);
+    TupleBytes bytes(static_cast<std::size_t>(size));
+    for (std::size_t offset = 0; offset < bytes.size(); ++offset) {
+        bytes[offset] = static_cast<std::byte>((seed + index + variation + offset) & 0xFFU);
+    }
+    return bytes;
+}
+
+const sql::SelectResult& selectResult(const sql::QueryResult& result) {
+    if (!std::holds_alternative<sql::SelectResult>(result)) {
+        throw std::runtime_error("benchmark SELECT returned a command result");
+    }
+    return std::get<sql::SelectResult>(result);
+}
+
+BenchmarkResult runPager(const BenchmarkConfig& config, std::string name) {
+    removeDatabase(config);
+    {
+        Pager setup(config.databasePath);
+        for (std::uint64_t index = 0; index < config.pages; ++index) {
+            const auto pageId = setup.allocatePage();
+            auto& page = setup.getPage(pageId);
+            page[0] = static_cast<std::byte>(pageId & 0xFFU);
+            setup.markDirty(pageId);
+        }
+        setup.flushAll();
+    }
+
+    std::mt19937_64 random(config.seed);
+    auto pager = std::make_unique<Pager>(config.databasePath);
+    const auto setSize = workingSet(config.workingSet, config.pages);
+    if (name == "pager_hot") {
+        for (std::uint64_t index = 0; index < setSize; ++index) {
+            static_cast<void>(pager->getPage(static_cast<PageId>(index + 1U)));
+        }
+    }
+    pager->resetStats();
+
+    PagerStats accumulated{};
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    std::uint64_t checksum = 0;
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        if (config.cacheMode == CacheMode::Reopen && operation != 0
+            && operation % config.reopenInterval == 0) {
+            accumulated = accumulatePagerStats(accumulated, pager->stats());
+            pager = std::make_unique<Pager>(config.databasePath);
+            pager->resetStats();
+        }
+        std::uint64_t index = operation % setSize;
+        if (name == "pager_random") index = random() % setSize;
+        const auto pageId = static_cast<PageId>(index + 1U);
+        measure(latencies, [&] { checksum += std::to_integer<std::uint8_t>(pager->getPage(pageId)[0]); });
+    }
+    accumulated = accumulatePagerStats(accumulated, pager->stats());
+    if (checksum == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error("impossible pager benchmark checksum");
+    }
+    for (std::uint64_t index = 0; index < std::min<std::uint64_t>(config.pages, 8); ++index) {
+        const auto pageId = static_cast<PageId>(index + 1U);
+        if (pager->getPage(pageId)[0] != static_cast<std::byte>(pageId & 0xFFU)) {
+            throw std::runtime_error("pager benchmark validation failed");
+        }
+    }
+    const auto storage = storageMetrics(*pager);
+    auto result = finish(name, config, std::move(latencies), accumulated, storage);
+    pager.reset();
+    cleanupDatabase(config);
+    return result;
+}
+
+struct TreeContext {
+    std::unique_ptr<Pager> pager;
+    std::optional<PersistentBPlusTree> tree;
+    PageId metadataPageId = INVALID_PAGE_ID;
+};
+
+TreeContext createTree(const BenchmarkConfig& config) {
+    TreeContext context;
+    context.pager = std::make_unique<Pager>(config.databasePath);
+    context.tree.emplace(PersistentBPlusTree::create(*context.pager));
+    context.metadataPageId = context.tree->metadataPageId();
+    return context;
+}
+
+void reopenTree(TreeContext& context, const BenchmarkConfig& config) {
+    context.tree.reset();
+    context.pager.reset();
+    context.pager = std::make_unique<Pager>(config.databasePath);
+    context.tree.emplace(PersistentBPlusTree::open(*context.pager, context.metadataPageId));
+}
+
+void populateTree(TreeContext& context, std::uint64_t rows, std::uint64_t seed, bool randomOrder) {
+    std::vector<IndexKey> keys(static_cast<std::size_t>(rows));
+    std::iota(keys.begin(), keys.end(), IndexKey{0});
+    if (randomOrder) {
+        std::mt19937_64 random(seed);
+        std::shuffle(keys.begin(), keys.end(), random);
+    }
+    for (const auto key : keys) {
+        if (!context.tree->insert(key, syntheticRecordId(key))) {
+            throw std::runtime_error("B+ benchmark setup inserted a duplicate key");
+        }
+    }
+    context.pager->flushAll();
+}
+
+BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name) {
+    removeDatabase(config);
+    auto context = createTree(config);
+    std::mt19937_64 random(config.seed);
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    PagerStats accumulated{};
+
+    if (name == "bplus_insert_sequential" || name == "bplus_insert_random") {
+        std::vector<IndexKey> keys(static_cast<std::size_t>(config.operations));
+        std::iota(keys.begin(), keys.end(), IndexKey{0});
+        if (name == "bplus_insert_random") std::shuffle(keys.begin(), keys.end(), random);
+        context.pager->resetStats();
+        for (const auto key : keys) {
+            measure(latencies, [&] {
+                if (!context.tree->insert(key, syntheticRecordId(key))) {
+                    throw std::runtime_error("B+ insertion benchmark saw duplicate key");
+                }
+            });
+        }
+    } else {
+        populateTree(context, config.rows, config.seed, true);
+        if (config.cacheMode == CacheMode::Reopen) reopenTree(context, config);
+        const auto setSize = workingSet(config.workingSet, config.rows);
+        for (std::uint64_t index = 0;
+             config.cacheMode == CacheMode::Hot && index < config.warmupOperations; ++index) {
+            static_cast<void>(context.tree->find(static_cast<IndexKey>(index % setSize)));
+        }
+        context.pager->resetStats();
+        std::vector<IndexKey> liveKeys(static_cast<std::size_t>(config.rows));
+        std::iota(liveKeys.begin(), liveKeys.end(), IndexKey{0});
+        IndexKey nextKey = static_cast<IndexKey>(config.rows);
+        for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+            if (config.cacheMode == CacheMode::Reopen && operation != 0
+                && operation % config.reopenInterval == 0) {
+                accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+                reopenTree(context, config);
+                context.pager->resetStats();
+            }
+            if (name == "bplus_find_hit") {
+                const auto key = static_cast<IndexKey>(random() % setSize);
+                measure(latencies, [&] {
+                    if (!context.tree->find(key).has_value()) {
+                        throw std::runtime_error("B+ successful lookup missed");
+                    }
+                });
+            } else if (name == "bplus_find_miss") {
+                const auto key = static_cast<IndexKey>(config.rows + 1U + (random() % setSize));
+                measure(latencies, [&] {
+                    if (context.tree->find(key).has_value()) {
+                        throw std::runtime_error("B+ unsuccessful lookup found a key");
+                    }
+                });
+            } else if (name == "bplus_range") {
+                const auto lower = static_cast<IndexKey>(random() % setSize);
+                const auto upper = static_cast<IndexKey>(std::min<std::uint64_t>(
+                    config.rows - 1U, static_cast<std::uint64_t>(lower) + 31U));
+                measure(latencies, [&] {
+                    const auto entries = context.tree->rangeScan(lower, upper);
+                    if (entries.empty()) throw std::runtime_error("B+ range scan was empty");
+                });
+            } else {
+                const auto choice = random() % 100U;
+                if (choice < 60U && !liveKeys.empty()) {
+                    const auto key = liveKeys[random() % liveKeys.size()];
+                    measure(latencies, [&] {
+                        if (!context.tree->find(key).has_value()) {
+                            throw std::runtime_error("B+ mixed lookup missed live key");
+                        }
+                    });
+                } else if (choice < 80U || liveKeys.empty()) {
+                    const auto key = nextKey++;
+                    measure(latencies, [&] {
+                        if (!context.tree->insert(key, syntheticRecordId(key))) {
+                            throw std::runtime_error("B+ mixed insert failed");
+                        }
+                    });
+                    liveKeys.push_back(key);
+                } else {
+                    const auto index = static_cast<std::size_t>(random() % liveKeys.size());
+                    const auto key = liveKeys[index];
+                    measure(latencies, [&] {
+                        if (!context.tree->erase(key)) {
+                            throw std::runtime_error("B+ mixed erase failed");
+                        }
+                    });
+                    liveKeys[index] = liveKeys.back();
+                    liveKeys.pop_back();
+                }
+            }
+        }
+    }
+    accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+    context.tree->validate();
+    const auto storage = storageMetrics(*context.pager);
+    auto result = finish(name, config, std::move(latencies), accumulated, storage);
+    context.tree.reset();
+    context.pager.reset();
+    cleanupDatabase(config);
+    return result;
+}
+
+struct TupleContext {
+    std::unique_ptr<Pager> pager;
+    std::optional<TupleStore> store;
+    PageId metadataPageId = INVALID_PAGE_ID;
+};
+
+TupleContext createTupleStore(const BenchmarkConfig& config) {
+    TupleContext context;
+    context.pager = std::make_unique<Pager>(config.databasePath);
+    context.store.emplace(TupleStore::create(*context.pager));
+    context.metadataPageId = context.store->metadataPageId();
+    return context;
+}
+
+void reopenTupleStore(TupleContext& context, const BenchmarkConfig& config) {
+    context.store.reset();
+    context.pager.reset();
+    context.pager = std::make_unique<Pager>(config.databasePath);
+    context.store.emplace(TupleStore::open(*context.pager, context.metadataPageId));
+}
+
+std::vector<RecordId> populateTuples(
+    TupleContext& context,
+    const BenchmarkConfig& config,
+    std::uint64_t count) {
+    std::vector<RecordId> recordIds;
+    recordIds.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t index = 0; index < count; ++index) {
+        const auto tuple = tuplePayload(config.seed, index, config.tupleSizes);
+        recordIds.push_back(context.store->insert(tuple));
+    }
+    context.pager->flushAll();
+    return recordIds;
+}
+
+BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name) {
+    removeDatabase(config);
+    auto context = createTupleStore(config);
+    const auto setupCount = name == "tuple_erase"
+        ? std::max(config.rows, config.operations) : config.rows;
+    std::vector<RecordId> recordIds;
+    if (name != "tuple_insert") recordIds = populateTuples(context, config, setupCount);
+    if (config.cacheMode == CacheMode::Reopen && name != "tuple_insert") {
+        reopenTupleStore(context, config);
+    }
+    const auto setSize = name == "tuple_insert" ? 1U
+        : workingSet(config.workingSet, recordIds.size());
+    for (std::uint64_t index = 0;
+         config.cacheMode == CacheMode::Hot && name == "tuple_lookup"
+             && index < config.warmupOperations; ++index) {
+        static_cast<void>(context.store->get(recordIds[index % setSize]));
+    }
+    context.pager->resetStats();
+    PagerStats accumulated{};
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    std::mt19937_64 random(config.seed);
+    std::vector<std::optional<TupleBytes>> model;
+    if (name == "tuple_fragmentation") {
+        model.reserve(recordIds.size());
+        for (std::size_t index = 0; index < recordIds.size(); ++index) {
+            model.push_back(tuplePayload(config.seed, index, config.tupleSizes));
+        }
+    }
+
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        if (config.cacheMode == CacheMode::Reopen && operation != 0
+            && operation % config.reopenInterval == 0 && name != "tuple_insert") {
+            accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+            reopenTupleStore(context, config);
+            context.pager->resetStats();
+        }
+        if (name == "tuple_insert") {
+            const auto tuple = tuplePayload(config.seed, operation, config.tupleSizes);
+            measure(latencies, [&] { recordIds.push_back(context.store->insert(tuple)); });
+        } else if (name == "tuple_lookup") {
+            const auto index = static_cast<std::size_t>(random() % setSize);
+            measure(latencies, [&] {
+                if (context.store->get(recordIds[index]).empty()) {
+                    throw std::runtime_error("TupleStore lookup returned empty tuple");
+                }
+            });
+        } else if (name == "tuple_update") {
+            const auto index = static_cast<std::size_t>(operation % setSize);
+            const auto original = context.store->get(recordIds[index]);
+            auto replacement = original;
+            replacement[0] = static_cast<std::byte>(operation & 0xFFU);
+            measure(latencies, [&] {
+                if (!context.store->tryUpdate(recordIds[index], replacement)) {
+                    throw std::runtime_error("TupleStore same-size update failed");
+                }
+            });
+        } else if (name == "tuple_erase") {
+            measure(latencies, [&] { context.store->erase(recordIds[operation]); });
+        } else if (name == "tuple_scan") {
+            measure(latencies, [&] {
+                if (context.store->scan().size() != recordIds.size()) {
+                    throw std::runtime_error("TupleStore scan count changed");
+                }
+            });
+        } else {
+            const auto index = static_cast<std::size_t>(operation % model.size());
+            const auto choice = operation % 3U;
+            if (choice == 0 && model[index].has_value()) {
+                measure(latencies, [&] { context.store->erase(recordIds[index]); });
+                model[index].reset();
+            } else if (choice == 1 && !model[index].has_value()) {
+                auto tuple = tuplePayload(config.seed, index, config.tupleSizes, operation + 1U);
+                measure(latencies, [&] { recordIds[index] = context.store->insert(tuple); });
+                model[index] = std::move(tuple);
+            } else if (model[index].has_value()) {
+                auto replacement = *model[index];
+                replacement[0] = static_cast<std::byte>((operation + 7U) & 0xFFU);
+                measure(latencies, [&] {
+                    if (!context.store->tryUpdate(recordIds[index], replacement)) {
+                        throw std::runtime_error("fragmentation update failed");
+                    }
+                });
+                model[index] = std::move(replacement);
+            } else {
+                measure(latencies, [&] { static_cast<void>(context.store->scan()); });
+            }
+        }
+    }
+    accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+    context.store->validate();
+    if (name == "tuple_fragmentation") {
+        for (std::size_t index = 0; index < model.size(); ++index) {
+            if (model[index].has_value()
+                && context.store->get(recordIds[index]) != *model[index]) {
+                throw std::runtime_error("fragmentation model payload mismatch");
+            }
+        }
+    }
+    const auto storage = storageMetrics(*context.pager);
+    auto result = finish(name, config, std::move(latencies), accumulated, storage);
+    context.store.reset();
+    context.pager.reset();
+    cleanupDatabase(config);
+    return result;
+}
+
+struct SqlContext {
+    std::unique_ptr<Pager> pager;
+    std::optional<Catalog> catalog;
+    std::unique_ptr<sql::SqlEngine> engine;
+
+    explicit SqlContext(const BenchmarkConfig& config)
+        : pager(std::make_unique<Pager>(config.databasePath)) {
+        catalog.emplace(Catalog::openOrCreate(*pager));
+        engine = std::make_unique<sql::SqlEngine>(*catalog);
+    }
+};
+
+void reopenSql(SqlContext& context, const BenchmarkConfig& config) {
+    context.engine.reset();
+    context.catalog.reset();
+    context.pager.reset();
+    context.pager = std::make_unique<Pager>(config.databasePath);
+    context.catalog.emplace(Catalog::openOrCreate(*context.pager));
+    context.engine = std::make_unique<sql::SqlEngine>(*context.catalog);
+}
+
+void createUsers(sql::SqlEngine& engine) {
+    static_cast<void>(engine.execute(
+        "CREATE TABLE users (id UINT32 PRIMARY KEY, username VARCHAR(64) NOT NULL, "
+        "score INT64, active BOOLEAN NOT NULL)"));
+}
+
+void insertUser(sql::SqlEngine& engine, std::uint64_t key) {
+    static_cast<void>(engine.execute(
+        "INSERT INTO users VALUES (" + std::to_string(key) + ", 'user"
+        + std::to_string(key) + "', " + std::to_string(key) + ", TRUE)"));
+}
+
+void populateUsers(sql::SqlEngine& engine, std::uint64_t rows) {
+    for (std::uint64_t key = 0; key < rows; ++key) insertUser(engine, key);
+}
+
+std::pair<std::uint64_t, std::uint64_t> executionCounters(const sql::QueryResult& result) {
+    return std::visit([](const auto& value) {
+        return std::pair{value.stats.rowsExamined, value.stats.indexLookups};
+    }, result);
+}
+
+BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
+    removeDatabase(config);
+    SqlContext context(config);
+    createUsers(*context.engine);
+    if (name != "sql_insert") populateUsers(*context.engine, config.rows);
+    context.pager->flushAll();
+    if (config.cacheMode == CacheMode::Reopen) reopenSql(context, config);
+    const auto setSize = workingSet(config.workingSet, config.rows);
+    if (config.cacheMode == CacheMode::Hot
+        && (name == "sql_pk_lookup" || name == "sql_heap_scan")) {
+        for (std::uint64_t index = 0; index < config.warmupOperations; ++index) {
+            const auto key = index % setSize;
+            const auto query = name == "sql_pk_lookup"
+                ? "SELECT username FROM users WHERE id = " + std::to_string(key)
+                : "SELECT id FROM users WHERE username = 'user" + std::to_string(key) + "'";
+            static_cast<void>(context.engine->execute(query));
+        }
+    }
+    context.pager->resetStats();
+    PagerStats accumulated{};
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    std::mt19937_64 random(config.seed);
+    std::vector<std::uint32_t> liveKeys(static_cast<std::size_t>(config.rows));
+    std::iota(liveKeys.begin(), liveKeys.end(), 0U);
+    std::uint64_t nextKey = config.rows;
+    std::uint64_t rowsExamined = 0;
+    std::uint64_t indexLookups = 0;
+
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        if (config.cacheMode == CacheMode::Reopen && operation != 0
+            && operation % config.reopenInterval == 0) {
+            accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+            reopenSql(context, config);
+            context.pager->resetStats();
+        }
+        sql::QueryResult result;
+        if (name == "sql_pk_lookup") {
+            const auto key = random() % setSize;
+            measure(latencies, [&] { result = context.engine->execute(
+                "SELECT username FROM users WHERE id = " + std::to_string(key)); });
+            if (selectResult(result).rows.size() != 1) throw std::runtime_error("SQL PK miss");
+        } else if (name == "sql_heap_scan") {
+            const auto key = random() % setSize;
+            measure(latencies, [&] { result = context.engine->execute(
+                "SELECT id FROM users WHERE username = 'user" + std::to_string(key) + "'"); });
+            if (selectResult(result).rows.size() != 1) throw std::runtime_error("SQL scan miss");
+        } else if (name == "sql_insert") {
+            const auto key = operation;
+            measure(latencies, [&] { result = context.engine->execute(
+                "INSERT INTO users VALUES (" + std::to_string(key) + ", 'user"
+                + std::to_string(key) + "', " + std::to_string(key) + ", TRUE)"); });
+        } else if (name == "sql_update") {
+            const auto key = operation % setSize;
+            measure(latencies, [&] { result = context.engine->execute(
+                "UPDATE users SET score = " + std::to_string(operation + 1U)
+                + " WHERE id = " + std::to_string(key)); });
+        } else if (name == "sql_delete") {
+            const auto key = operation % setSize;
+            measure(latencies, [&] { result = context.engine->execute(
+                "DELETE FROM users WHERE id = " + std::to_string(key)); });
+        } else {
+            unsigned pkRead = 70, scanRead = 80, insertLimit = 90, updateLimit = 95;
+            if (name == "mixed_read_heavy") {
+                pkRead = 90; scanRead = 95; insertLimit = 97; updateLimit = 99;
+            } else if (name == "mixed_write_heavy") {
+                pkRead = 45; scanRead = 50; insertLimit = 70; updateLimit = 85;
+            }
+            const auto choice = static_cast<unsigned>(random() % 100U);
+            if (choice < pkRead && !liveKeys.empty()) {
+                const auto key = liveKeys[random() % liveKeys.size()];
+                measure(latencies, [&] { result = context.engine->execute(
+                    "SELECT username FROM users WHERE id = " + std::to_string(key)); });
+            } else if (choice < scanRead && !liveKeys.empty()) {
+                const auto key = liveKeys[random() % liveKeys.size()];
+                measure(latencies, [&] { result = context.engine->execute(
+                    "SELECT id FROM users WHERE username = 'user" + std::to_string(key) + "'"); });
+            } else if (choice < insertLimit || liveKeys.empty()) {
+                const auto key = nextKey++;
+                measure(latencies, [&] { result = context.engine->execute(
+                    "INSERT INTO users VALUES (" + std::to_string(key) + ", 'user"
+                    + std::to_string(key) + "', " + std::to_string(key) + ", TRUE)"); });
+                liveKeys.push_back(static_cast<std::uint32_t>(key));
+            } else if (choice < updateLimit) {
+                const auto key = liveKeys[random() % liveKeys.size()];
+                measure(latencies, [&] { result = context.engine->execute(
+                    "UPDATE users SET active = FALSE WHERE id = " + std::to_string(key)); });
+            } else {
+                const auto index = static_cast<std::size_t>(random() % liveKeys.size());
+                const auto key = liveKeys[index];
+                measure(latencies, [&] { result = context.engine->execute(
+                    "DELETE FROM users WHERE id = " + std::to_string(key)); });
+                liveKeys[index] = liveKeys.back();
+                liveKeys.pop_back();
+            }
+        }
+        const auto [examined, lookups] = executionCounters(result);
+        rowsExamined += examined;
+        indexLookups += lookups;
+    }
+    accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+    context.catalog->validate();
+    if (name == "sql_insert" && context.catalog->openTable("users").size() != config.operations) {
+        throw std::runtime_error("SQL insert benchmark size validation failed");
+    }
+    if ((name == "sql_mixed" || name == "mixed_read_heavy" || name == "mixed_write_heavy")
+        && context.catalog->openTable("users").size() != liveKeys.size()) {
+        throw std::runtime_error("SQL mixed benchmark model size mismatch");
+    }
+    const auto storage = storageMetrics(*context.pager);
+    auto result = finish(
+        name, config, std::move(latencies), accumulated, storage,
+        static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
+        static_cast<double>(indexLookups) / static_cast<double>(config.operations));
+    context.engine.reset(); context.catalog.reset(); context.pager.reset();
+    cleanupDatabase(config);
+    return result;
+}
+
+BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
+    removeDatabase(config);
+    {
+        Pager pager(config.databasePath);
+        auto catalog = Catalog::openOrCreate(pager);
+        sql::SqlEngine engine(catalog);
+        createUsers(engine);
+        if (name != "tcp_insert") populateUsers(engine, config.rows);
+        pager.flushAll();
+    }
+
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    PagerStats accumulated{};
+    StorageMetrics finalStorage{};
+    std::uint64_t rowsExamined = 0;
+    std::uint64_t indexLookups = 0;
+    std::mt19937_64 random(config.seed);
+    std::vector<std::uint32_t> liveKeys(static_cast<std::size_t>(
+        name == "tcp_insert" ? 0 : config.rows));
+    std::iota(liveKeys.begin(), liveKeys.end(), 0U);
+    std::uint64_t nextKey = name == "tcp_insert" ? 0 : config.rows;
+    std::uint64_t completed = 0;
+    const auto batchSize = config.cacheMode == CacheMode::Reopen
+        ? config.reopenInterval : config.operations;
+
+    while (completed < config.operations) {
+        const auto batchEnd = std::min(config.operations, completed + batchSize);
+        net::DatabaseServer server(
+            config.databasePath, net::ServerConfig{"127.0.0.1", 0, 8});
+        server.start();
+        std::exception_ptr serverError;
+        std::thread serverThread([&] {
+            try { server.serve(1); }
+            catch (...) { serverError = std::current_exception(); }
+        });
+        std::exception_ptr clientError;
+        try {
+            net::MiniDbClient client("127.0.0.1", server.port());
+            client.connect(); client.handshake();
+            if (completed == 0) {
+                for (std::uint64_t warmup = 0;
+                     warmup < config.warmupOperations && !liveKeys.empty(); ++warmup) {
+                    static_cast<void>(client.execute(
+                        "SELECT username FROM users WHERE id = "
+                        + std::to_string(liveKeys[warmup % liveKeys.size()])));
+                }
+            }
+            server.pager().resetStats();
+            for (; completed < batchEnd; ++completed) {
+                sql::QueryResult result;
+                if (name == "tcp_pk_lookup") {
+                    const auto setSize = workingSet(config.workingSet, config.rows);
+                    const auto key = random() % setSize;
+                    measure(latencies, [&] { result = client.execute(
+                        "SELECT username FROM users WHERE id = " + std::to_string(key)); });
+                } else if (name == "tcp_heap_scan") {
+                    const auto setSize = workingSet(config.workingSet, config.rows);
+                    const auto key = random() % setSize;
+                    measure(latencies, [&] { result = client.execute(
+                        "SELECT id FROM users WHERE username = 'user" + std::to_string(key) + "'"); });
+                } else if (name == "tcp_insert") {
+                    const auto key = nextKey++;
+                    measure(latencies, [&] { result = client.execute(
+                        "INSERT INTO users VALUES (" + std::to_string(key) + ", 'user"
+                        + std::to_string(key) + "', " + std::to_string(key) + ", TRUE)"); });
+                    liveKeys.push_back(static_cast<std::uint32_t>(key));
+                } else {
+                    const auto choice = random() % 100U;
+                    if (choice < 70U && !liveKeys.empty()) {
+                        const auto key = liveKeys[random() % liveKeys.size()];
+                        measure(latencies, [&] { result = client.execute(
+                            "SELECT username FROM users WHERE id = " + std::to_string(key)); });
+                    } else if (choice < 80U && !liveKeys.empty()) {
+                        const auto key = liveKeys[random() % liveKeys.size()];
+                        measure(latencies, [&] { result = client.execute(
+                            "SELECT id FROM users WHERE username = 'user" + std::to_string(key) + "'"); });
+                    } else if (choice < 90U || liveKeys.empty()) {
+                        const auto key = nextKey++;
+                        measure(latencies, [&] { result = client.execute(
+                            "INSERT INTO users VALUES (" + std::to_string(key) + ", 'user"
+                            + std::to_string(key) + "', " + std::to_string(key) + ", TRUE)"); });
+                        liveKeys.push_back(static_cast<std::uint32_t>(key));
+                    } else if (choice < 95U) {
+                        const auto key = liveKeys[random() % liveKeys.size()];
+                        measure(latencies, [&] { result = client.execute(
+                            "UPDATE users SET active = FALSE WHERE id = " + std::to_string(key)); });
+                    } else {
+                        const auto index = static_cast<std::size_t>(random() % liveKeys.size());
+                        const auto key = liveKeys[index];
+                        measure(latencies, [&] { result = client.execute(
+                            "DELETE FROM users WHERE id = " + std::to_string(key)); });
+                        liveKeys[index] = liveKeys.back(); liveKeys.pop_back();
+                    }
+                }
+                const auto [examined, lookups] = executionCounters(result);
+                rowsExamined += examined; indexLookups += lookups;
+            }
+            client.close();
+        } catch (...) {
+            clientError = std::current_exception();
+        }
+        serverThread.join();
+        if (serverError) std::rethrow_exception(serverError);
+        if (clientError) std::rethrow_exception(clientError);
+        accumulated = accumulatePagerStats(accumulated, server.pager().stats());
+        server.catalog().validate();
+        finalStorage = storageMetrics(server.pager());
+    }
+
+    auto result = finish(
+        name, config, std::move(latencies), accumulated, finalStorage,
+        static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
+        static_cast<double>(indexLookups) / static_cast<double>(config.operations));
+    cleanupDatabase(config);
+    return result;
+}
+
+std::string canonicalName(const std::string& name) {
+    if (name == "pager") return "pager_random";
+    if (name == "bplus") return "bplus_find_hit";
+    if (name == "tuple") return "tuple_lookup";
+    if (name == "sql") return "sql_pk_lookup";
+    if (name == "tcp") return "tcp_pk_lookup";
+    if (name == "mixed") return "sql_mixed";
+    return name;
+}
+
+BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
+    name = canonicalName(name);
+    if (name.starts_with("pager_")) return runPager(config, std::move(name));
+    if (name.starts_with("bplus_")) return runBplus(config, name);
+    if (name.starts_with("tuple_")) return runTuple(config, name);
+    if (name.starts_with("tcp_")) return runTcp(config, name);
+    return runSql(config, name);
+}
+
+std::vector<std::string> suiteNames() {
+    return {
+        "pager_sequential", "pager_random", "bplus_find_hit", "tuple_lookup",
+        "sql_pk_lookup", "sql_heap_scan", "sql_mixed", "tcp_pk_lookup",
+    };
+}
+
+} // namespace
+
+std::vector<BenchmarkResult> runConfiguredBenchmarks(const BenchmarkConfig& configuration) {
+    std::vector<std::string> names;
+    BenchmarkConfig effective = configuration;
+    if (!configuration.suite.empty()) {
+        names = suiteNames();
+        if (configuration.suite == "quick") {
+            effective.rows = std::min<std::uint64_t>(effective.rows, 32);
+            effective.operations = std::min<std::uint64_t>(effective.operations, 24);
+            effective.pages = std::min<std::uint64_t>(effective.pages, 24);
+            effective.warmupOperations = std::min<std::uint64_t>(effective.warmupOperations, 8);
+            effective.reopenInterval = std::min<std::uint64_t>(effective.reopenInterval, 12);
+            if (effective.workingSet != 0) {
+                effective.workingSet = std::min(effective.workingSet, effective.rows);
+            }
+        }
+    } else if (configuration.benchmark == "sql_pk_vs_heap") {
+        names = {"sql_pk_lookup", "sql_heap_scan"};
+    } else {
+        names = {configuration.benchmark};
+    }
+
+    std::vector<BenchmarkResult> results;
+    results.reserve(names.size() * effective.repetitions);
+    for (std::uint32_t repetition = 1; repetition <= effective.repetitions; ++repetition) {
+        for (const auto& name : names) {
+            auto result = runOne(effective, name);
+            result.repetition = repetition;
+            results.push_back(std::move(result));
+        }
+    }
+    return results;
+}
+
+} // namespace minidb::bench

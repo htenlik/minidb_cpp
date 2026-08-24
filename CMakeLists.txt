@@ -58,6 +58,28 @@ add_library(minidb_network
 target_include_directories(minidb_network PUBLIC include)
 target_link_libraries(minidb_network PUBLIC minidb_wire)
 
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE MINIDB_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT MINIDB_GIT_COMMIT)
+    set(MINIDB_GIT_COMMIT "unknown")
+endif()
+
+add_library(minidb_benchmark
+    src/benchmark.cpp
+    src/benchmark_workloads.cpp
+)
+target_include_directories(minidb_benchmark PUBLIC include)
+target_link_libraries(minidb_benchmark PUBLIC minidb_network)
+target_compile_definitions(minidb_benchmark PRIVATE
+    MINIDB_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+    MINIDB_GIT_COMMIT="${MINIDB_GIT_COMMIT}"
+)
+
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
 
@@ -66,6 +88,9 @@ target_link_libraries(minidb_server PRIVATE minidb_network)
 
 add_executable(minidb_client src/client_main.cpp)
 target_link_libraries(minidb_client PRIVATE minidb_network)
+
+add_executable(minidb_bench src/benchmark_main.cpp)
+target_link_libraries(minidb_bench PRIVATE minidb_benchmark)
 enable_testing()
 add_executable(pager_test tests/pager_test.cpp)
 target_link_libraries(pager_test PRIVATE minidb_core)

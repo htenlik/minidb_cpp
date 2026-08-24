@@ -6,5 +6,9 @@
 # Local database files
 *.db
 
+# Generated benchmark reports
+/benchmarks/results/*.json
+*.benchmark.json
+
 # Platform/editor files
 .DS_Store
