@@ -2,6 +2,7 @@
 
 #include "minidb/buffer_pool_types.hpp"
 #include "minidb/database_format.hpp"
+#include "minidb/wal_types.hpp"
 
 #include <cstddef>
 #include <span>
@@ -26,6 +27,7 @@ public:
     [[nodiscard]] PageId pageId() const noexcept { return pageId_; }
     [[nodiscard]] FrameId frameId() const noexcept { return frameId_; }
     [[nodiscard]] std::span<const std::byte, database_format::PAGE_SIZE> data() const;
+    [[nodiscard]] Lsn pageLsn() const;
 
 private:
     friend class BufferPoolManager;
@@ -33,6 +35,7 @@ private:
 
     BasicPageGuard(BufferPoolManager& manager, FrameId frameId, PageId pageId) noexcept;
     [[nodiscard]] std::span<std::byte, database_format::PAGE_SIZE> mutableData();
+    void setPageLsn(Lsn pageLsn);
 
     BufferPoolManager* manager_ = nullptr;
     FrameId frameId_ = INVALID_FRAME_ID;
@@ -55,6 +58,7 @@ public:
     [[nodiscard]] std::span<const std::byte, database_format::PAGE_SIZE> data() const {
         return guard_.data();
     }
+    [[nodiscard]] Lsn pageLsn() const { return guard_.pageLsn(); }
 
 private:
     friend class BufferPoolManager;
@@ -81,6 +85,8 @@ public:
     [[nodiscard]] std::span<std::byte, database_format::PAGE_SIZE> data() {
         return guard_.mutableData();
     }
+    [[nodiscard]] Lsn pageLsn() const { return guard_.pageLsn(); }
+    void setPageLsn(Lsn pageLsn) { guard_.setPageLsn(pageLsn); }
 
 private:
     friend class BufferPoolManager;

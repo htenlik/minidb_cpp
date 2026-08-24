@@ -3,6 +3,7 @@
 #include "minidb/disk_manager.hpp"
 #include "minidb/lru_k_replacer.hpp"
 #include "minidb/page_guard.hpp"
+#include "minidb/wal_types.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,7 @@ struct BufferFrame {
     std::uint32_t pinCount = 0;
     bool dirty = false;
     bool valid = false;
+    Lsn pageLsn = INVALID_LSN;
 };
 
 struct BufferPoolStats {
@@ -33,6 +35,7 @@ struct BufferPoolStats {
     std::uint64_t pinOperations = 0;
     std::uint64_t unpinOperations = 0;
     std::uint64_t appendedPages = 0;
+    std::uint64_t walFlushRequests = 0;
     std::uint64_t residentPages = 0;
     std::uint64_t pinnedFrames = 0;
     std::uint64_t evictableFrames = 0;
@@ -44,7 +47,11 @@ struct BufferPoolStats {
 // A fixed-capacity, single-threaded page cache. The DiskManager outlives this object.
 class BufferPoolManager {
 public:
-    BufferPoolManager(DiskManager& diskManager, std::size_t frameCount, std::size_t k = 2);
+    BufferPoolManager(
+        DiskManager& diskManager,
+        std::size_t frameCount,
+        std::size_t k = 2,
+        WalFlushProvider* walProvider = nullptr);
     ~BufferPoolManager();
 
     BufferPoolManager(const BufferPoolManager&) = delete;
@@ -66,6 +73,7 @@ public:
     [[nodiscard]] std::optional<FrameId> frameIdForPage(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<std::uint32_t> pinCount(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<bool> isDirty(PageId pageId) const noexcept;
+    [[nodiscard]] std::optional<Lsn> pageLsn(PageId pageId) const noexcept;
 
     void validate() const;
     void validateReplacer() const { replacer_.validate(); }
@@ -78,11 +86,14 @@ private:
     std::unordered_map<PageId, FrameId> pageTable_;
     std::deque<FrameId> freeFrames_;
     LRUKReplacer replacer_;
+    WalFlushProvider* walProvider_;
     BufferPoolStats stats_{};
 
     [[nodiscard]] std::optional<BasicPageGuard> fetchPage(PageId pageId, bool writable);
     [[nodiscard]] std::optional<FrameId> availableFrame() const;
     void flushVictimIfDirty(FrameId frameId);
+    void ensureWalDurable(Lsn pageLsn);
+    void ensureWalDurableBeforePageWrite(const BufferFrame& frame);
     void installPage(FrameId frameId, PageId pageId, DiskManager::Page page, bool dirty);
     void releasePin(FrameId frameId);
     [[nodiscard]] std::span<const std::byte, database_format::PAGE_SIZE> readData(
@@ -91,6 +102,8 @@ private:
     [[nodiscard]] std::span<std::byte, database_format::PAGE_SIZE> mutableData(
         FrameId frameId,
         PageId pageId);
+    [[nodiscard]] Lsn guardPageLsn(FrameId frameId, PageId pageId) const;
+    void setPageLsn(FrameId frameId, PageId pageId, Lsn pageLsn);
     [[nodiscard]] BufferFrame& requireGuardFrame(FrameId frameId, PageId pageId);
     [[nodiscard]] const BufferFrame& requireGuardFrame(FrameId frameId, PageId pageId) const;
 };

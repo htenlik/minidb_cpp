@@ -11,8 +11,12 @@ namespace minidb {
 BufferPoolManager::BufferPoolManager(
     DiskManager& diskManager,
     std::size_t frameCount,
-    std::size_t k)
-    : diskManager_(diskManager), frames_(frameCount), replacer_(frameCount, k) {
+    std::size_t k,
+    WalFlushProvider* walProvider)
+    : diskManager_(diskManager),
+      frames_(frameCount),
+      replacer_(frameCount, k),
+      walProvider_(walProvider) {
     if (frameCount == 0) throw std::invalid_argument("Buffer pool capacity must be positive");
     if (frameCount > std::numeric_limits<FrameId>::max()) {
         throw std::invalid_argument("Buffer pool capacity exceeds FrameId range");
@@ -42,9 +46,28 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
         throw std::logic_error("Selected buffer victim is not evictable");
     }
     if (!frame.dirty) return;
+    ensureWalDurableBeforePageWrite(frame);
     diskManager_.writePage(frame.pageId, frame.data);
     frame.dirty = false;
     ++stats_.physicalPageWrites;
+}
+
+void BufferPoolManager::ensureWalDurable(Lsn pageLsn) {
+    if (!isValidLsn(pageLsn)) return;
+    if (walProvider_ == nullptr) {
+        throw std::logic_error("A page has a valid pageLSN without a WAL provider");
+    }
+    if (!walProvider_->containsLsn(pageLsn)) {
+        throw std::logic_error("A pageLSN no longer identifies a known WAL record");
+    }
+    const auto durable = walProvider_->durableLsn();
+    if (isValidLsn(durable) && durable >= pageLsn) return;
+    ++stats_.walFlushRequests;
+    walProvider_->flushUpTo(pageLsn);
+}
+
+void BufferPoolManager::ensureWalDurableBeforePageWrite(const BufferFrame& frame) {
+    ensureWalDurable(frame.pageLsn);
 }
 
 void BufferPoolManager::installPage(
@@ -77,6 +100,7 @@ void BufferPoolManager::installPage(
     frame.pinCount = 1;
     frame.dirty = dirty;
     frame.valid = true;
+    frame.pageLsn = INVALID_LSN;
     const auto [position, inserted] = pageTable_.emplace(pageId, frameId);
     static_cast<void>(position);
     if (!inserted) throw std::logic_error("Page already exists in buffer page table");
@@ -157,6 +181,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
     if (found == pageTable_.end()) return false;
     auto& frame = frames_[found->second];
     if (frame.dirty) {
+        ensureWalDurableBeforePageWrite(frame);
         diskManager_.writePage(pageId, frame.data);
         frame.dirty = false;
         ++stats_.physicalPageWrites;
@@ -165,6 +190,14 @@ bool BufferPoolManager::flushPage(PageId pageId) {
 }
 
 void BufferPoolManager::flushAll() {
+    Lsn maximumPageLsn = INVALID_LSN;
+    for (const auto& frame : frames_) {
+        if (!frame.valid || !frame.dirty || !isValidLsn(frame.pageLsn)) continue;
+        if (!isValidLsn(maximumPageLsn) || frame.pageLsn > maximumPageLsn) {
+            maximumPageLsn = frame.pageLsn;
+        }
+    }
+    ensureWalDurable(maximumPageLsn);
     for (auto& frame : frames_) {
         if (!frame.valid || !frame.dirty) continue;
         diskManager_.writePage(frame.pageId, frame.data);
@@ -246,6 +279,29 @@ std::optional<bool> BufferPoolManager::isDirty(PageId pageId) const noexcept {
     return frameId.has_value() ? std::optional<bool>(frames_[*frameId].dirty) : std::nullopt;
 }
 
+std::optional<Lsn> BufferPoolManager::pageLsn(PageId pageId) const noexcept {
+    const auto frameId = frameIdForPage(pageId);
+    return frameId.has_value() ? std::optional<Lsn>(frames_[*frameId].pageLsn) : std::nullopt;
+}
+
+Lsn BufferPoolManager::guardPageLsn(FrameId frameId, PageId pageId) const {
+    return requireGuardFrame(frameId, pageId).pageLsn;
+}
+
+void BufferPoolManager::setPageLsn(FrameId frameId, PageId pageId, Lsn pageLsn) {
+    auto& frame = requireGuardFrame(frameId, pageId);
+    if (!isValidLsn(pageLsn)) {
+        throw std::invalid_argument("WritePageGuard cannot assign INVALID_LSN");
+    }
+    if (walProvider_ == nullptr || !walProvider_->containsLsn(pageLsn)) {
+        throw std::invalid_argument("pageLSN must identify a record appended by the WAL provider");
+    }
+    if (isValidLsn(frame.pageLsn) && pageLsn < frame.pageLsn) {
+        throw std::invalid_argument("pageLSN cannot move backward");
+    }
+    frame.pageLsn = pageLsn;
+}
+
 void BufferPoolManager::validate() const {
     replacer_.validate();
     if (pageTable_.size() > frames_.size()) {
@@ -263,6 +319,7 @@ void BufferPoolManager::validate() const {
         const auto& frame = frames_[frameId];
         if (!frame.valid) {
             if (frame.pageId != INVALID_PAGE_ID || frame.pinCount != 0 || frame.dirty
+                || isValidLsn(frame.pageLsn)
                 || !freeSet.contains(frameId) || replacer_.isTracked(frameId)) {
                 throw std::logic_error("Invalid/free buffer frame has live state");
             }
@@ -282,6 +339,10 @@ void BufferPoolManager::validate() const {
         if ((frame.pinCount > 0 && replacer_.isEvictable(frameId))
             || (frame.pinCount == 0 && !replacer_.isEvictable(frameId))) {
             throw std::logic_error("Buffer pin count disagrees with replacer evictability");
+        }
+        if (isValidLsn(frame.pageLsn)
+            && (walProvider_ == nullptr || !walProvider_->containsLsn(frame.pageLsn))) {
+            throw std::logic_error("Buffer frame pageLSN is unknown to its WAL provider");
         }
     }
     for (const auto& [pageId, frameId] : pageTable_) {

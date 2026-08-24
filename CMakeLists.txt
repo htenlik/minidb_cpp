@@ -122,6 +122,10 @@ add_executable(buffer_pool_random_test tests/buffer_pool_random_test.cpp)
 target_link_libraries(buffer_pool_random_test PRIVATE minidb_core)
 add_test(NAME buffer_pool_random_test COMMAND buffer_pool_random_test)
 
+add_executable(buffer_pool_wal_test tests/buffer_pool_wal_test.cpp)
+target_link_libraries(buffer_pool_wal_test PRIVATE minidb_core)
+add_test(NAME buffer_pool_wal_test COMMAND buffer_pool_wal_test)
+
 add_executable(buffer_engine_integration_test tests/buffer_engine_integration_test.cpp)
 target_link_libraries(buffer_engine_integration_test PRIVATE minidb_sql_execution)
 add_test(NAME buffer_engine_integration_test COMMAND buffer_engine_integration_test)

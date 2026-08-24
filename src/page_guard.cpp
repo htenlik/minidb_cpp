@@ -55,4 +55,14 @@ std::span<std::byte, database_format::PAGE_SIZE> BasicPageGuard::mutableData() {
     return manager_->mutableData(frameId_, pageId_);
 }
 
+Lsn BasicPageGuard::pageLsn() const {
+    if (manager_ == nullptr) throw std::logic_error("Page guard no longer owns a pin");
+    return manager_->guardPageLsn(frameId_, pageId_);
+}
+
+void BasicPageGuard::setPageLsn(Lsn pageLsn) {
+    if (manager_ == nullptr) throw std::logic_error("Page guard no longer owns a pin");
+    manager_->setPageLsn(frameId_, pageId_, pageLsn);
+}
+
 } // namespace minidb
