@@ -10,6 +10,7 @@ add_library(minidb_core
     src/database_format.cpp
     src/disk_manager.cpp
     src/lru_k_replacer.cpp
+    src/log_manager.cpp
     src/page_allocator.cpp
     src/page_guard.cpp
     src/pager.cpp
@@ -23,6 +24,7 @@ add_library(minidb_core
     src/table_definition.cpp
     src/tuple_codec.cpp
     src/tuple_store.cpp
+    src/wal.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
 
@@ -127,6 +129,18 @@ add_test(NAME buffer_engine_integration_test COMMAND buffer_engine_integration_t
 add_executable(row_test tests/row_test.cpp)
 target_link_libraries(row_test PRIVATE minidb_core)
 add_test(NAME row_test COMMAND row_test)
+
+add_executable(wal_codec_test tests/wal_codec_test.cpp)
+target_link_libraries(wal_codec_test PRIVATE minidb_core)
+add_test(NAME wal_codec_test COMMAND wal_codec_test)
+
+add_executable(log_manager_test tests/log_manager_test.cpp)
+target_link_libraries(log_manager_test PRIVATE minidb_core)
+add_test(NAME log_manager_test COMMAND log_manager_test)
+
+add_executable(wal_scanner_test tests/wal_scanner_test.cpp)
+target_link_libraries(wal_scanner_test PRIVATE minidb_core)
+add_test(NAME wal_scanner_test COMMAND wal_scanner_test)
 
 add_executable(database_format_test tests/database_format_test.cpp)
 target_link_libraries(database_format_test PRIVATE minidb_core)

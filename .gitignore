@@ -5,6 +5,7 @@
 
 # Local database files
 *.db
+*.wal
 
 # Generated benchmark reports
 /benchmarks/results/*.json

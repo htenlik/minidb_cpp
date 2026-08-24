@@ -28,6 +28,7 @@ public:
     ~TemporaryDatabase() {
         std::error_code error;
         std::filesystem::remove(path_, error);
+        std::filesystem::remove(path_.string() + ".wal", error);
     }
 
     TemporaryDatabase(const TemporaryDatabase&) = delete;
