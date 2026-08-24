@@ -43,6 +43,11 @@ target_include_directories(minidb_sql_execution PUBLIC include)
 target_link_libraries(minidb_sql_execution PUBLIC minidb_sql_semantics)
 
 add_library(minidb_wire
+    src/cli_format.cpp
+    src/database_server.cpp
+    src/minidb_client.cpp
+    src/tcp_server.cpp
+    src/tcp_transport.cpp
     src/wire_protocol.cpp
 )
 target_include_directories(minidb_wire PUBLIC include)
@@ -50,6 +55,12 @@ target_link_libraries(minidb_wire PUBLIC minidb_sql_execution)
 
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
+
+add_executable(minidb_server src/server_main.cpp)
+target_link_libraries(minidb_server PRIVATE minidb_wire)
+
+add_executable(minidb_client src/client_main.cpp)
+target_link_libraries(minidb_client PRIVATE minidb_wire)
 enable_testing()
 add_executable(pager_test tests/pager_test.cpp)
 target_link_libraries(pager_test PRIVATE minidb_core)
@@ -130,6 +141,18 @@ add_test(NAME sql_executor_random_test COMMAND sql_executor_random_test)
 add_executable(wire_protocol_test tests/wire_protocol_test.cpp)
 target_link_libraries(wire_protocol_test PRIVATE minidb_wire)
 add_test(NAME wire_protocol_test COMMAND wire_protocol_test)
+
+add_executable(tcp_transport_test tests/tcp_transport_test.cpp)
+target_link_libraries(tcp_transport_test PRIVATE minidb_wire)
+add_test(NAME tcp_transport_test COMMAND tcp_transport_test)
+
+add_executable(network_protocol_test tests/network_protocol_test.cpp)
+target_link_libraries(network_protocol_test PRIVATE minidb_wire)
+add_test(NAME network_protocol_test COMMAND network_protocol_test)
+
+add_executable(network_stress_test tests/network_stress_test.cpp)
+target_link_libraries(network_stress_test PRIVATE minidb_wire)
+add_test(NAME network_stress_test COMMAND network_stress_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
