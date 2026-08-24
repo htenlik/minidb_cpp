@@ -77,7 +77,8 @@ struct BenchmarkResult {
     BenchmarkConfig configuration;
     TimingMetrics timing;
     PagerStats pager;
-    StorageMetrics storage;
+    StorageMetrics storageBefore;
+    StorageMetrics storageAfter;
     double averageRowsExamined = 0.0;
     double averageIndexLookups = 0.0;
     EnvironmentMetadata environment;

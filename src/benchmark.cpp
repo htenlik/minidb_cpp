@@ -87,6 +87,13 @@ void writePagerJson(std::ostringstream& output, const PagerStats& pager) {
            << ",\"resident_pages\":" << pager.residentPages << '}';
 }
 
+void writeStorageJson(std::ostringstream& output, const StorageMetrics& storage) {
+    output << "{\"database_pages\":" << storage.databasePages
+           << ",\"database_bytes\":" << storage.databaseBytes
+           << ",\"free_pages\":" << storage.freePages
+           << ",\"resident_pages\":" << storage.residentPages << '}';
+}
+
 } // namespace
 
 ParseResult parseArguments(std::span<const std::string_view> arguments) {
@@ -280,11 +287,11 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"max_ns\":" << result.timing.maximumNanoseconds << '}'
                << ",\"pager\":";
         writePagerJson(output, result.pager);
-        output << ",\"storage\":{\"database_pages\":" << result.storage.databasePages
-               << ",\"database_bytes\":" << result.storage.databaseBytes
-               << ",\"free_pages\":" << result.storage.freePages
-               << ",\"resident_pages\":" << result.storage.residentPages << '}'
-               << ",\"execution\":{\"average_rows_examined\":"
+        output << ",\"storage\":{\"before\":";
+        writeStorageJson(output, result.storageBefore);
+        output << ",\"after\":";
+        writeStorageJson(output, result.storageAfter);
+        output << '}' << ",\"execution\":{\"average_rows_examined\":"
                << result.averageRowsExamined
                << ",\"average_index_lookups\":" << result.averageIndexLookups << '}'
                << ",\"environment\":{\"version_context\":\""
@@ -309,6 +316,14 @@ std::string formatHuman(const BenchmarkResult& result) {
     std::ostringstream output;
     output << std::fixed << std::setprecision(2)
            << "benchmark: " << result.benchmark << " (repetition " << result.repetition << ")\n"
+           << "seed/mode: " << result.seed << '/'
+           << (result.configuration.cacheMode == CacheMode::Hot ? "hot" : "reopen") << '\n'
+           << "environment: " << result.environment.versionContext << ", git "
+           << result.environment.gitCommit << ", " << result.environment.compiler << ", "
+           << result.environment.buildType << ", " << result.environment.platform << '\n'
+           << "format: C++" << result.environment.cppStandard << ", page size "
+           << result.environment.pageSize << ", protocol "
+           << result.environment.protocolVersion << '\n'
            << "operations: " << result.timing.operationCount << '\n'
            << "total: " << (static_cast<double>(result.timing.totalNanoseconds) / 1'000'000.0)
            << " ms\nthroughput: " << result.timing.operationsPerSecond << " ops/s\n"
@@ -320,8 +335,19 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.pager.pageRequests << '/' << result.pager.cacheHits << '/'
            << result.pager.cacheMisses << '/' << result.pager.physicalPageReads << '/'
            << result.pager.physicalPageWrites << '/' << result.pager.residentPages << '\n'
-           << "storage pages/bytes/free: " << result.storage.databasePages << '/'
-           << result.storage.databaseBytes << '/' << result.storage.freePages << '\n'
+           << "pager dirty marks/flush calls/appended pages: " << result.pager.dirtyMarks
+           << '/' << result.pager.flushCalls << '/' << result.pager.appendedPages << '\n'
+           << "storage before pages/bytes/free/resident: "
+           << result.storageBefore.databasePages << '/' << result.storageBefore.databaseBytes
+           << '/' << result.storageBefore.freePages << '/'
+           << result.storageBefore.residentPages << '\n'
+           << "storage after pages/bytes/free/resident: "
+           << result.storageAfter.databasePages << '/' << result.storageAfter.databaseBytes
+           << '/' << result.storageAfter.freePages << '/'
+           << result.storageAfter.residentPages << '\n'
+           << "database growth pages/bytes: "
+           << (result.storageAfter.databasePages - result.storageBefore.databasePages) << '/'
+           << (result.storageAfter.databaseBytes - result.storageBefore.databaseBytes) << '\n'
            << "execution avg rows examined/index lookups: " << result.averageRowsExamined
            << '/' << result.averageIndexLookups << '\n'
            << "validation: " << (result.validationPassed ? "passed" : "failed") << '\n';

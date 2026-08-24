@@ -27,9 +27,9 @@ int main() {
             minidb::test::require(
                 results.size() == 1 && results[0].validationPassed
                     && results[0].timing.operationCount == config.operations
-                    && results[0].storage.databasePages > 0
-                    && results[0].storage.databaseBytes
-                        == results[0].storage.databasePages * minidb::Pager::PAGE_SIZE,
+                    && results[0].storageAfter.databasePages > 0
+                    && results[0].storageAfter.databaseBytes
+                        == results[0].storageAfter.databasePages * minidb::Pager::PAGE_SIZE,
                 "benchmark family smoke result was incomplete");
         }
         std::cout << "benchmark family smoke tests passed\n";

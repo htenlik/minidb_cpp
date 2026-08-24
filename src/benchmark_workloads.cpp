@@ -71,7 +71,8 @@ BenchmarkResult finish(
     const BenchmarkConfig& config,
     std::vector<std::uint64_t> latencies,
     PagerStats pager,
-    StorageMetrics storage,
+    StorageMetrics storageBefore,
+    StorageMetrics storageAfter,
     double averageRowsExamined = 0.0,
     double averageIndexLookups = 0.0) {
     BenchmarkResult result;
@@ -80,7 +81,8 @@ BenchmarkResult finish(
     result.configuration = config;
     result.timing = summarizeTimings(latencies, totalLatency(latencies));
     result.pager = pager;
-    result.storage = storage;
+    result.storageBefore = storageBefore;
+    result.storageAfter = storageAfter;
     result.averageRowsExamined = averageRowsExamined;
     result.averageIndexLookups = averageIndexLookups;
     result.environment = currentEnvironment();
@@ -149,6 +151,7 @@ BenchmarkResult runPager(const BenchmarkConfig& config, std::string name) {
             static_cast<void>(pager->getPage(static_cast<PageId>(index + 1U)));
         }
     }
+    const auto storageBefore = storageMetrics(*pager);
     pager->resetStats();
 
     PagerStats accumulated{};
@@ -177,8 +180,9 @@ BenchmarkResult runPager(const BenchmarkConfig& config, std::string name) {
             throw std::runtime_error("pager benchmark validation failed");
         }
     }
-    const auto storage = storageMetrics(*pager);
-    auto result = finish(name, config, std::move(latencies), accumulated, storage);
+    const auto storageAfter = storageMetrics(*pager);
+    auto result = finish(
+        name, config, std::move(latencies), accumulated, storageBefore, storageAfter);
     pager.reset();
     cleanupDatabase(config);
     return result;
@@ -227,11 +231,13 @@ BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name)
     std::vector<std::uint64_t> latencies;
     latencies.reserve(static_cast<std::size_t>(config.operations));
     PagerStats accumulated{};
+    StorageMetrics storageBefore{};
 
     if (name == "bplus_insert_sequential" || name == "bplus_insert_random") {
         std::vector<IndexKey> keys(static_cast<std::size_t>(config.operations));
         std::iota(keys.begin(), keys.end(), IndexKey{0});
         if (name == "bplus_insert_random") std::shuffle(keys.begin(), keys.end(), random);
+        storageBefore = storageMetrics(*context.pager);
         context.pager->resetStats();
         for (const auto key : keys) {
             measure(latencies, [&] {
@@ -248,6 +254,7 @@ BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name)
              config.cacheMode == CacheMode::Hot && index < config.warmupOperations; ++index) {
             static_cast<void>(context.tree->find(static_cast<IndexKey>(index % setSize)));
         }
+        storageBefore = storageMetrics(*context.pager);
         context.pager->resetStats();
         std::vector<IndexKey> liveKeys(static_cast<std::size_t>(config.rows));
         std::iota(liveKeys.begin(), liveKeys.end(), IndexKey{0});
@@ -314,8 +321,9 @@ BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name)
     }
     accumulated = accumulatePagerStats(accumulated, context.pager->stats());
     context.tree->validate();
-    const auto storage = storageMetrics(*context.pager);
-    auto result = finish(name, config, std::move(latencies), accumulated, storage);
+    const auto storageAfter = storageMetrics(*context.pager);
+    auto result = finish(
+        name, config, std::move(latencies), accumulated, storageBefore, storageAfter);
     context.tree.reset();
     context.pager.reset();
     cleanupDatabase(config);
@@ -374,6 +382,7 @@ BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name)
              && index < config.warmupOperations; ++index) {
         static_cast<void>(context.store->get(recordIds[index % setSize]));
     }
+    const auto storageBefore = storageMetrics(*context.pager);
     context.pager->resetStats();
     PagerStats accumulated{};
     std::vector<std::uint64_t> latencies;
@@ -456,8 +465,9 @@ BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name)
             }
         }
     }
-    const auto storage = storageMetrics(*context.pager);
-    auto result = finish(name, config, std::move(latencies), accumulated, storage);
+    const auto storageAfter = storageMetrics(*context.pager);
+    auto result = finish(
+        name, config, std::move(latencies), accumulated, storageBefore, storageAfter);
     context.store.reset();
     context.pager.reset();
     cleanupDatabase(config);
@@ -525,6 +535,7 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
             static_cast<void>(context.engine->execute(query));
         }
     }
+    const auto storageBefore = storageMetrics(*context.pager);
     context.pager->resetStats();
     PagerStats accumulated{};
     std::vector<std::uint64_t> latencies;
@@ -616,9 +627,9 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
         && context.catalog->openTable("users").size() != liveKeys.size()) {
         throw std::runtime_error("SQL mixed benchmark model size mismatch");
     }
-    const auto storage = storageMetrics(*context.pager);
+    const auto storageAfter = storageMetrics(*context.pager);
     auto result = finish(
-        name, config, std::move(latencies), accumulated, storage,
+        name, config, std::move(latencies), accumulated, storageBefore, storageAfter,
         static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
         static_cast<double>(indexLookups) / static_cast<double>(config.operations));
     context.engine.reset(); context.catalog.reset(); context.pager.reset();
@@ -640,7 +651,9 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
     std::vector<std::uint64_t> latencies;
     latencies.reserve(static_cast<std::size_t>(config.operations));
     PagerStats accumulated{};
+    StorageMetrics initialStorage{};
     StorageMetrics finalStorage{};
+    bool capturedInitialStorage = false;
     std::uint64_t rowsExamined = 0;
     std::uint64_t indexLookups = 0;
     std::mt19937_64 random(config.seed);
@@ -673,6 +686,10 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
                         "SELECT username FROM users WHERE id = "
                         + std::to_string(liveKeys[warmup % liveKeys.size()])));
                 }
+            }
+            if (!capturedInitialStorage) {
+                initialStorage = storageMetrics(server.pager());
+                capturedInitialStorage = true;
             }
             server.pager().resetStats();
             for (; completed < batchEnd; ++completed) {
@@ -737,7 +754,7 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
     }
 
     auto result = finish(
-        name, config, std::move(latencies), accumulated, finalStorage,
+        name, config, std::move(latencies), accumulated, initialStorage, finalStorage,
         static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
         static_cast<double>(indexLookups) / static_cast<double>(config.operations));
     cleanupDatabase(config);
