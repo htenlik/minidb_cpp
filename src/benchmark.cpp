@@ -273,6 +273,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"pages\":" << config.pages
                << ",\"working_set\":" << config.workingSet
                << ",\"warmup_operations\":" << config.warmupOperations
+               << ",\"reopen_interval\":" << config.reopenInterval
+               << ",\"repetitions\":" << config.repetitions
                << ",\"cache_mode\":\""
                << (config.cacheMode == CacheMode::Hot ? "hot" : "reopen")
                << "\",\"tuple_sizes\":\"" << escapeJson(config.tupleSizes) << "\"}"
