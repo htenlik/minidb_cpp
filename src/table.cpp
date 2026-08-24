@@ -154,6 +154,39 @@ void Table::erase(RecordId recordId) {
     }
 }
 
+RecordId Table::update(RecordId recordId, const RowValues& newValues) {
+    const auto oldBytes = heap_.get(recordId);
+    const auto oldValues = TupleCodec::decode(definition_.schema, oldBytes);
+    if (primaryIndex_) {
+        const auto oldKey = primaryKeyOf(oldValues);
+        const auto indexed = primaryIndex_->find(oldKey);
+        if (!indexed.has_value() || *indexed != recordId) {
+            throw std::runtime_error("Primary index does not identify the requested update RID.");
+        }
+        const auto updated = updateByPrimaryKey(oldKey, newValues);
+        if (!updated.has_value()) {
+            throw std::runtime_error("Primary-index update unexpectedly lost its source row.");
+        }
+        return *updated;
+    }
+
+    const auto newBytes = TupleCodec::encode(definition_.schema, newValues);
+    if (heap_.tryUpdate(recordId, newBytes)) {
+        return recordId;
+    }
+    const auto replacement = heap_.insert(newBytes);
+    try {
+        heap_.erase(recordId);
+    } catch (...) {
+        try {
+            heap_.erase(replacement);
+        } catch (...) {
+        }
+        throw;
+    }
+    return replacement;
+}
+
 std::optional<RecordId> Table::updateByPrimaryKey(
     IndexKey oldKey,
     const RowValues& newValues) {

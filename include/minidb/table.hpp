@@ -40,6 +40,7 @@ public:
     [[nodiscard]] std::vector<TableRow> scan() const;
     [[nodiscard]] bool eraseByPrimaryKey(IndexKey key);
     void erase(RecordId recordId);
+    [[nodiscard]] RecordId update(RecordId recordId, const RowValues& newValues);
     [[nodiscard]] std::optional<RecordId> updateByPrimaryKey(
         IndexKey oldKey,
         const RowValues& newValues);

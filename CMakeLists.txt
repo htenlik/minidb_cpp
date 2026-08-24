@@ -36,6 +36,12 @@ add_library(minidb_sql_semantics
 target_include_directories(minidb_sql_semantics PUBLIC include)
 target_link_libraries(minidb_sql_semantics PUBLIC minidb_sql minidb_core)
 
+add_library(minidb_sql_execution
+    src/sql_executor.cpp
+)
+target_include_directories(minidb_sql_execution PUBLIC include)
+target_link_libraries(minidb_sql_execution PUBLIC minidb_sql_semantics)
+
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
 enable_testing()
