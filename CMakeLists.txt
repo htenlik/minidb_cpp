@@ -113,6 +113,14 @@ add_executable(sql_semantics_test tests/sql_semantics_test.cpp)
 target_link_libraries(sql_semantics_test PRIVATE minidb_sql_semantics)
 add_test(NAME sql_semantics_test COMMAND sql_semantics_test)
 
+add_executable(sql_executor_test tests/sql_executor_test.cpp)
+target_link_libraries(sql_executor_test PRIVATE minidb_sql_execution)
+add_test(NAME sql_executor_test COMMAND sql_executor_test)
+
+add_executable(sql_executor_random_test tests/sql_executor_random_test.cpp)
+target_link_libraries(sql_executor_random_test PRIVATE minidb_sql_execution)
+add_test(NAME sql_executor_random_test COMMAND sql_executor_random_test)
+
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
 add_test(NAME bplus_tree_test COMMAND bplus_tree_test)
