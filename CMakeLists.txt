@@ -116,6 +116,10 @@ add_executable(buffer_pool_manager_test tests/buffer_pool_manager_test.cpp)
 target_link_libraries(buffer_pool_manager_test PRIVATE minidb_core)
 add_test(NAME buffer_pool_manager_test COMMAND buffer_pool_manager_test)
 
+add_executable(buffer_pool_random_test tests/buffer_pool_random_test.cpp)
+target_link_libraries(buffer_pool_random_test PRIVATE minidb_core)
+add_test(NAME buffer_pool_random_test COMMAND buffer_pool_random_test)
+
 add_executable(row_test tests/row_test.cpp)
 target_link_libraries(row_test PRIVATE minidb_core)
 add_test(NAME row_test COMMAND row_test)
