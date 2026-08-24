@@ -192,6 +192,18 @@ add_executable(cli_format_test tests/cli_format_test.cpp)
 target_link_libraries(cli_format_test PRIVATE minidb_network)
 add_test(NAME cli_format_test COMMAND cli_format_test)
 
+add_executable(benchmark_test tests/benchmark_test.cpp)
+target_link_libraries(benchmark_test PRIVATE minidb_benchmark)
+add_test(NAME benchmark_test COMMAND benchmark_test)
+
+add_executable(benchmark_smoke_test tests/benchmark_smoke_test.cpp)
+target_link_libraries(benchmark_smoke_test PRIVATE minidb_benchmark)
+add_test(NAME benchmark_smoke_test COMMAND benchmark_smoke_test)
+
+add_executable(benchmark_quick_suite_test tests/benchmark_quick_suite_test.cpp)
+target_link_libraries(benchmark_quick_suite_test PRIVATE minidb_benchmark)
+add_test(NAME benchmark_quick_suite_test COMMAND benchmark_quick_suite_test)
+
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
 add_test(NAME bplus_tree_test COMMAND bplus_tree_test)
