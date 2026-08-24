@@ -42,6 +42,12 @@ add_library(minidb_sql_execution
 target_include_directories(minidb_sql_execution PUBLIC include)
 target_link_libraries(minidb_sql_execution PUBLIC minidb_sql_semantics)
 
+add_library(minidb_wire
+    src/wire_protocol.cpp
+)
+target_include_directories(minidb_wire PUBLIC include)
+target_link_libraries(minidb_wire PUBLIC minidb_sql_execution)
+
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
 enable_testing()
@@ -120,6 +126,10 @@ add_test(NAME sql_executor_test COMMAND sql_executor_test)
 add_executable(sql_executor_random_test tests/sql_executor_random_test.cpp)
 target_link_libraries(sql_executor_random_test PRIVATE minidb_sql_execution)
 add_test(NAME sql_executor_random_test COMMAND sql_executor_random_test)
+
+add_executable(wire_protocol_test tests/wire_protocol_test.cpp)
+target_link_libraries(wire_protocol_test PRIVATE minidb_wire)
+add_test(NAME wire_protocol_test COMMAND wire_protocol_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
