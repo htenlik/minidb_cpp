@@ -1,4 +1,3 @@
-#include "minidb/page_allocator.hpp"
 #include "minidb/slotted_page.hpp"
 #include "test_utils.hpp"
 
@@ -20,13 +19,13 @@ minidb::TupleBytes makeTuple(std::size_t size, std::uint8_t seed) {
     return tuple;
 }
 
-std::uint16_t readUint16(const minidb::Pager::Page& page, std::size_t offset) {
+std::uint16_t readUint16(const minidb::DiskManager::Page& page, std::size_t offset) {
     return static_cast<std::uint16_t>(std::to_integer<std::uint16_t>(page[offset]))
         | static_cast<std::uint16_t>(
             std::to_integer<std::uint16_t>(page[offset + 1]) << 8U);
 }
 
-std::uint32_t readUint32(const minidb::Pager::Page& page, std::size_t offset) {
+std::uint32_t readUint32(const minidb::DiskManager::Page& page, std::size_t offset) {
     std::uint32_t value = 0;
     for (std::size_t index = 0; index < 4; ++index) {
         value |= std::to_integer<std::uint32_t>(page[offset + index]) << (index * 8U);
@@ -34,31 +33,28 @@ std::uint32_t readUint32(const minidb::Pager::Page& page, std::size_t offset) {
     return value;
 }
 
-void writeUint16(minidb::Pager::Page& page, std::size_t offset, std::uint16_t value) {
+void writeUint16(minidb::DiskManager::Page& page, std::size_t offset, std::uint16_t value) {
     for (std::size_t index = 0; index < 2; ++index) {
         page[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
     }
 }
 
-void writeUint32(minidb::Pager::Page& page, std::size_t offset, std::uint32_t value) {
+void writeUint32(minidb::DiskManager::Page& page, std::size_t offset, std::uint32_t value) {
     for (std::size_t index = 0; index < 4; ++index) {
         page[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
     }
 }
 
 struct PageFixture {
-    explicit PageFixture(std::string_view name)
-        : database(name), pager(database.path().string()), allocator(pager) {
-        heapMetadataPageId = allocator.allocatePage();
-        pageId = allocator.allocatePage();
-        minidb::SlottedPage::initialize(pager, pageId, heapMetadataPageId);
+    explicit PageFixture(std::string_view) {
+        minidb::SlottedPageView::initialize(
+            bytes, pageId, pageCount, heapMetadataPageId);
     }
 
-    minidb::test::TemporaryDatabase database;
-    minidb::Pager pager;
-    minidb::PageAllocator allocator;
-    minidb::PageId heapMetadataPageId = minidb::INVALID_PAGE_ID;
-    minidb::PageId pageId = minidb::INVALID_PAGE_ID;
+    minidb::DiskManager::Page bytes{};
+    minidb::PageId heapMetadataPageId = 1;
+    minidb::PageId pageId = 2;
+    minidb::PageId pageCount = 3;
 };
 
 void testPhysicalLayoutAndEmptyPage() {
@@ -68,8 +64,8 @@ void testPhysicalLayoutAndEmptyPage() {
     static_assert(minidb::slotted_page_layout::MAX_TUPLE_SIZE == 4040);
 
     PageFixture fixture("slotted_layout");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
-    const auto& bytes = fixture.pager.getPage(fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
+    const auto& bytes = fixture.bytes;
     minidb::test::require(
         std::equal(
             minidb::slotted_page_layout::MAGIC.begin(),
@@ -86,10 +82,10 @@ void testPhysicalLayoutAndEmptyPage() {
                           "New slotted page was not empty");
     minidb::test::require(
         page.lowerBoundary() == minidb::slotted_page_layout::HEADER_SIZE
-            && page.upperBoundary() == minidb::Pager::PAGE_SIZE,
+            && page.upperBoundary() == minidb::database_format::PAGE_SIZE,
         "New slotted page had incorrect free-space boundaries");
     minidb::test::require(
-        page.freeSpace() == minidb::Pager::PAGE_SIZE - minidb::slotted_page_layout::HEADER_SIZE,
+        page.freeSpace() == minidb::database_format::PAGE_SIZE - minidb::slotted_page_layout::HEADER_SIZE,
         "New slotted page reported incorrect free space");
     minidb::test::require(page.heapMetadataPageId() == fixture.heapMetadataPageId,
                           "Slotted page did not persist its owning heap metadata ID");
@@ -101,7 +97,7 @@ void testPhysicalLayoutAndEmptyPage() {
 
 void testInsertGetSlotDirectoryAndStableIds() {
     PageFixture fixture("slotted_insert");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     const auto first = makeTuple(3, 1);
     const auto second = makeTuple(71, 2);
     const auto firstSlot = page.insert(first);
@@ -111,7 +107,7 @@ void testInsertGetSlotDirectoryAndStableIds() {
                           "New tuples did not receive increasing SlotIds");
     minidb::test::require(page.get(firstSlot) == first && page.get(secondSlot) == second,
                           "Inserted tuple bytes did not round trip");
-    const auto& bytes = fixture.pager.getPage(fixture.pageId);
+    const auto& bytes = fixture.bytes;
     const auto firstDirectoryOffset = minidb::slotted_page_layout::slotOffset(firstSlot);
     const auto secondDirectoryOffset = minidb::slotted_page_layout::slotOffset(secondSlot);
     minidb::test::require(firstDirectoryOffset == 4088 && secondDirectoryOffset == 4080,
@@ -137,7 +133,7 @@ void testInsertGetSlotDirectoryAndStableIds() {
 
 void testDeleteCompactionAndSlotReuse() {
     PageFixture fixture("slotted_compaction");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     const auto first = makeTuple(100, 1);
     const auto middle = makeTuple(57, 2);
     const auto last = makeTuple(83, 3);
@@ -147,7 +143,7 @@ void testDeleteCompactionAndSlotReuse() {
     const auto slotCountBefore = page.slotCount();
     const auto upperBefore = page.upperBoundary();
     const auto lastOffsetBefore = readUint16(
-        fixture.pager.getPage(fixture.pageId),
+        fixture.bytes,
         minidb::slotted_page_layout::slotOffset(lastSlot));
 
     page.erase(middleSlot);
@@ -158,7 +154,7 @@ void testDeleteCompactionAndSlotReuse() {
     minidb::test::require(page.get(firstSlot) == first && page.get(lastSlot) == last,
                           "Compaction changed surviving tuple bytes");
     const auto lastOffsetAfter = readUint16(
-        fixture.pager.getPage(fixture.pageId),
+        fixture.bytes,
         minidb::slotted_page_layout::slotOffset(lastSlot));
     minidb::test::require(lastOffsetAfter < lastOffsetBefore,
                           "Compaction did not move payload across the deleted gap");
@@ -178,7 +174,7 @@ void testDeleteCompactionAndSlotReuse() {
 
 void testUpdateCasesAndFailureAtomicity() {
     PageFixture fixture("slotted_update");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     const auto slot = page.insert(makeTuple(100, 1));
     const auto same = makeTuple(100, 2);
     minidb::test::require(page.tryUpdate(slot, same) && page.get(slot) == same,
@@ -204,7 +200,7 @@ void testUpdateCasesAndFailureAtomicity() {
 
 void testCapacityBoundariesAndTupleValidation() {
     PageFixture fixture("slotted_capacity");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     const auto largest = makeTuple(minidb::slotted_page_layout::MAX_TUPLE_SIZE, 7);
     const auto slot = page.insert(largest);
     minidb::test::require(page.get(slot) == largest, "Largest inline tuple did not round trip");
@@ -215,7 +211,7 @@ void testCapacityBoundariesAndTupleValidation() {
         "Full slotted page accepted capacity plus one");
 
     PageFixture invalidFixture("slotted_invalid_tuple");
-    minidb::SlottedPage invalidPage(invalidFixture.pager, invalidFixture.pageId);
+    minidb::SlottedPageView invalidPage(invalidFixture.bytes, invalidFixture.pageId, invalidFixture.pageCount);
     minidb::test::requireThrows<std::invalid_argument>(
         [&] { static_cast<void>(invalidPage.insert({})); },
         "Slotted page accepted a zero-length tuple");
@@ -229,7 +225,7 @@ void testCapacityBoundariesAndTupleValidation() {
 
 void testDirectedFragmentationStress() {
     PageFixture fixture("slotted_fragmentation");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     std::vector<std::optional<minidb::TupleBytes>> expected;
     expected.reserve(30);
     for (std::size_t index = 0; index < 30; ++index) {
@@ -280,16 +276,18 @@ void testDirectedFragmentationStress() {
 template <typename Mutator>
 void requireCorruptionRejected(std::string_view name, Mutator&& mutate, bool insertTwo = false) {
     PageFixture fixture(name);
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     static_cast<void>(page.insert(makeTuple(20, 1)));
     if (insertTwo) {
         static_cast<void>(page.insert(makeTuple(20, 2)));
     }
-    auto& bytes = fixture.pager.getPage(fixture.pageId);
+    auto& bytes = fixture.bytes;
     mutate(fixture, bytes);
-    fixture.pager.markDirty(fixture.pageId);
     minidb::test::requireThrows<std::runtime_error>(
-        [&] { minidb::SlottedPage corrupted(fixture.pager, fixture.pageId); },
+        [&] {
+            minidb::ConstSlottedPageView corrupted(
+                fixture.bytes, fixture.pageId, fixture.pageCount);
+        },
         "Slotted page accepted corrupted persistent state");
 }
 
@@ -351,22 +349,24 @@ void testCorruptionValidation() {
         writeUint32(
             bytes,
             minidb::slotted_page_layout::NEXT_PAGE_ID_OFFSET,
-            fixture.pager.pageCount() + 10);
+            fixture.pageCount + 10);
     });
 
     PageFixture fixture("slotted_malformed_free_slot");
-    minidb::SlottedPage page(fixture.pager, fixture.pageId);
+    minidb::SlottedPageView page(fixture.bytes, fixture.pageId, fixture.pageCount);
     const auto slot = page.insert(makeTuple(20, 1));
     page.erase(slot);
-    auto& bytes = fixture.pager.getPage(fixture.pageId);
+    auto& bytes = fixture.bytes;
     writeUint16(
         bytes,
         minidb::slotted_page_layout::slotOffset(slot)
             + minidb::slotted_page_layout::SLOT_TUPLE_LENGTH_OFFSET,
         1);
-    fixture.pager.markDirty(fixture.pageId);
     minidb::test::requireThrows<std::runtime_error>(
-        [&] { minidb::SlottedPage corrupted(fixture.pager, fixture.pageId); },
+        [&] {
+            minidb::ConstSlottedPageView corrupted(
+                fixture.bytes, fixture.pageId, fixture.pageCount);
+        },
         "Slotted page accepted a malformed free slot");
 }
 

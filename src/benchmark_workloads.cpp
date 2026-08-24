@@ -56,13 +56,23 @@ void cleanupDatabase(const BenchmarkConfig& config) {
 }
 
 StorageMetrics storageMetrics(Pager& pager) {
-    PageAllocator allocator(pager);
-    const auto freePages = allocator.freePageIds().size();
     return StorageMetrics{
         pager.pageCount(),
         static_cast<std::uint64_t>(pager.pageCount()) * Pager::PAGE_SIZE,
-        freePages,
+        0,
         pager.residentPageCount(),
+    };
+}
+
+StorageMetrics storageMetrics(
+    const DiskManager& diskManager,
+    const BufferPoolManager& bufferPool,
+    const PageAllocator& allocator) {
+    return StorageMetrics{
+        diskManager.pageCount(),
+        static_cast<std::uint64_t>(diskManager.pageCount()) * DiskManager::PAGE_SIZE,
+        allocator.freePageIds().size(),
+        bufferPool.residentPageCount(),
     };
 }
 
@@ -77,6 +87,7 @@ BenchmarkResult finish(
     double averageIndexLookups = 0.0,
     BufferPoolStats buffer = {}) {
     BenchmarkResult result;
+    result.storageBackend = name.starts_with("pager_") ? "legacy_pager" : "buffer_pool";
     result.benchmark = std::move(name);
     result.seed = config.seed;
     result.configuration = config;
@@ -304,24 +315,36 @@ BenchmarkResult runBuffer(const BenchmarkConfig& config, const std::string& name
 }
 
 struct TreeContext {
-    std::unique_ptr<Pager> pager;
+    std::unique_ptr<DiskManager> disk;
+    std::unique_ptr<BufferPoolManager> bufferPool;
+    std::unique_ptr<PageAllocator> allocator;
     std::optional<PersistentBPlusTree> tree;
     PageId metadataPageId = INVALID_PAGE_ID;
 };
 
 TreeContext createTree(const BenchmarkConfig& config) {
     TreeContext context;
-    context.pager = std::make_unique<Pager>(config.databasePath);
-    context.tree.emplace(PersistentBPlusTree::create(*context.pager));
+    context.disk = std::make_unique<DiskManager>(config.databasePath);
+    context.bufferPool = std::make_unique<BufferPoolManager>(
+        *context.disk, config.bufferFrames, config.lruK);
+    context.allocator = std::make_unique<PageAllocator>(*context.bufferPool, *context.disk);
+    context.tree.emplace(PersistentBPlusTree::create(
+        *context.bufferPool, *context.disk, *context.allocator));
     context.metadataPageId = context.tree->metadataPageId();
     return context;
 }
 
 void reopenTree(TreeContext& context, const BenchmarkConfig& config) {
     context.tree.reset();
-    context.pager.reset();
-    context.pager = std::make_unique<Pager>(config.databasePath);
-    context.tree.emplace(PersistentBPlusTree::open(*context.pager, context.metadataPageId));
+    context.allocator.reset();
+    context.bufferPool.reset();
+    context.disk.reset();
+    context.disk = std::make_unique<DiskManager>(config.databasePath);
+    context.bufferPool = std::make_unique<BufferPoolManager>(
+        *context.disk, config.bufferFrames, config.lruK);
+    context.allocator = std::make_unique<PageAllocator>(*context.bufferPool, *context.disk);
+    context.tree.emplace(PersistentBPlusTree::open(
+        *context.bufferPool, *context.disk, *context.allocator, context.metadataPageId));
 }
 
 void populateTree(TreeContext& context, std::uint64_t rows, std::uint64_t seed, bool randomOrder) {
@@ -336,7 +359,7 @@ void populateTree(TreeContext& context, std::uint64_t rows, std::uint64_t seed, 
             throw std::runtime_error("B+ benchmark setup inserted a duplicate key");
         }
     }
-    context.pager->flushAll();
+    context.bufferPool->flushAll();
 }
 
 BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name) {
@@ -345,15 +368,15 @@ BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name)
     std::mt19937_64 random(config.seed);
     std::vector<std::uint64_t> latencies;
     latencies.reserve(static_cast<std::size_t>(config.operations));
-    PagerStats accumulated{};
+    BufferPoolStats accumulated{};
     StorageMetrics storageBefore{};
 
     if (name == "bplus_insert_sequential" || name == "bplus_insert_random") {
         std::vector<IndexKey> keys(static_cast<std::size_t>(config.operations));
         std::iota(keys.begin(), keys.end(), IndexKey{0});
         if (name == "bplus_insert_random") std::shuffle(keys.begin(), keys.end(), random);
-        storageBefore = storageMetrics(*context.pager);
-        context.pager->resetStats();
+        storageBefore = storageMetrics(*context.disk, *context.bufferPool, *context.allocator);
+        context.bufferPool->resetStats();
         for (const auto key : keys) {
             measure(latencies, [&] {
                 if (!context.tree->insert(key, syntheticRecordId(key))) {
@@ -369,17 +392,17 @@ BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name)
              config.cacheMode == CacheMode::Hot && index < config.warmupOperations; ++index) {
             static_cast<void>(context.tree->find(static_cast<IndexKey>(index % setSize)));
         }
-        storageBefore = storageMetrics(*context.pager);
-        context.pager->resetStats();
+        storageBefore = storageMetrics(*context.disk, *context.bufferPool, *context.allocator);
+        context.bufferPool->resetStats();
         std::vector<IndexKey> liveKeys(static_cast<std::size_t>(config.rows));
         std::iota(liveKeys.begin(), liveKeys.end(), IndexKey{0});
         IndexKey nextKey = static_cast<IndexKey>(config.rows);
         for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
             if (config.cacheMode == CacheMode::Reopen && operation != 0
                 && operation % config.reopenInterval == 0) {
-                accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+                accumulated = accumulateBufferStats(accumulated, context.bufferPool->stats());
                 reopenTree(context, config);
-                context.pager->resetStats();
+                context.bufferPool->resetStats();
             }
             if (name == "bplus_find_hit") {
                 const auto key = static_cast<IndexKey>(random() % setSize);
@@ -434,36 +457,52 @@ BenchmarkResult runBplus(const BenchmarkConfig& config, const std::string& name)
             }
         }
     }
-    accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+    accumulated = accumulateBufferStats(accumulated, context.bufferPool->stats());
     context.tree->validate();
-    const auto storageAfter = storageMetrics(*context.pager);
+    const auto storageAfter = storageMetrics(
+        *context.disk, *context.bufferPool, *context.allocator);
     auto result = finish(
-        name, config, std::move(latencies), accumulated, storageBefore, storageAfter);
+        name, config, std::move(latencies), {}, storageBefore, storageAfter,
+        0.0, 0.0, accumulated);
     context.tree.reset();
-    context.pager.reset();
+    context.allocator.reset();
+    context.bufferPool.reset();
+    context.disk.reset();
     cleanupDatabase(config);
     return result;
 }
 
 struct TupleContext {
-    std::unique_ptr<Pager> pager;
+    std::unique_ptr<DiskManager> disk;
+    std::unique_ptr<BufferPoolManager> bufferPool;
+    std::unique_ptr<PageAllocator> allocator;
     std::optional<TupleStore> store;
     PageId metadataPageId = INVALID_PAGE_ID;
 };
 
 TupleContext createTupleStore(const BenchmarkConfig& config) {
     TupleContext context;
-    context.pager = std::make_unique<Pager>(config.databasePath);
-    context.store.emplace(TupleStore::create(*context.pager));
+    context.disk = std::make_unique<DiskManager>(config.databasePath);
+    context.bufferPool = std::make_unique<BufferPoolManager>(
+        *context.disk, config.bufferFrames, config.lruK);
+    context.allocator = std::make_unique<PageAllocator>(*context.bufferPool, *context.disk);
+    context.store.emplace(TupleStore::create(
+        *context.bufferPool, *context.disk, *context.allocator));
     context.metadataPageId = context.store->metadataPageId();
     return context;
 }
 
 void reopenTupleStore(TupleContext& context, const BenchmarkConfig& config) {
     context.store.reset();
-    context.pager.reset();
-    context.pager = std::make_unique<Pager>(config.databasePath);
-    context.store.emplace(TupleStore::open(*context.pager, context.metadataPageId));
+    context.allocator.reset();
+    context.bufferPool.reset();
+    context.disk.reset();
+    context.disk = std::make_unique<DiskManager>(config.databasePath);
+    context.bufferPool = std::make_unique<BufferPoolManager>(
+        *context.disk, config.bufferFrames, config.lruK);
+    context.allocator = std::make_unique<PageAllocator>(*context.bufferPool, *context.disk);
+    context.store.emplace(TupleStore::open(
+        *context.bufferPool, *context.disk, *context.allocator, context.metadataPageId));
 }
 
 std::vector<RecordId> populateTuples(
@@ -476,7 +515,7 @@ std::vector<RecordId> populateTuples(
         const auto tuple = tuplePayload(config.seed, index, config.tupleSizes);
         recordIds.push_back(context.store->insert(tuple));
     }
-    context.pager->flushAll();
+    context.bufferPool->flushAll();
     return recordIds;
 }
 
@@ -497,9 +536,10 @@ BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name)
              && index < config.warmupOperations; ++index) {
         static_cast<void>(context.store->get(recordIds[index % setSize]));
     }
-    const auto storageBefore = storageMetrics(*context.pager);
-    context.pager->resetStats();
-    PagerStats accumulated{};
+    const auto storageBefore = storageMetrics(
+        *context.disk, *context.bufferPool, *context.allocator);
+    context.bufferPool->resetStats();
+    BufferPoolStats accumulated{};
     std::vector<std::uint64_t> latencies;
     latencies.reserve(static_cast<std::size_t>(config.operations));
     std::mt19937_64 random(config.seed);
@@ -514,9 +554,9 @@ BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name)
     for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
         if (config.cacheMode == CacheMode::Reopen && operation != 0
             && operation % config.reopenInterval == 0 && name != "tuple_insert") {
-            accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+            accumulated = accumulateBufferStats(accumulated, context.bufferPool->stats());
             reopenTupleStore(context, config);
-            context.pager->resetStats();
+            context.bufferPool->resetStats();
         }
         if (name == "tuple_insert") {
             const auto tuple = tuplePayload(config.seed, operation, config.tupleSizes);
@@ -570,7 +610,7 @@ BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name)
             }
         }
     }
-    accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+    accumulated = accumulateBufferStats(accumulated, context.bufferPool->stats());
     context.store->validate();
     if (name == "tuple_fragmentation") {
         for (std::size_t index = 0; index < model.size(); ++index) {
@@ -580,23 +620,32 @@ BenchmarkResult runTuple(const BenchmarkConfig& config, const std::string& name)
             }
         }
     }
-    const auto storageAfter = storageMetrics(*context.pager);
+    const auto storageAfter = storageMetrics(
+        *context.disk, *context.bufferPool, *context.allocator);
     auto result = finish(
-        name, config, std::move(latencies), accumulated, storageBefore, storageAfter);
+        name, config, std::move(latencies), {}, storageBefore, storageAfter,
+        0.0, 0.0, accumulated);
     context.store.reset();
-    context.pager.reset();
+    context.allocator.reset();
+    context.bufferPool.reset();
+    context.disk.reset();
     cleanupDatabase(config);
     return result;
 }
 
 struct SqlContext {
-    std::unique_ptr<Pager> pager;
+    std::unique_ptr<DiskManager> disk;
+    std::unique_ptr<BufferPoolManager> bufferPool;
+    std::unique_ptr<PageAllocator> allocator;
     std::optional<Catalog> catalog;
     std::unique_ptr<sql::SqlEngine> engine;
 
     explicit SqlContext(const BenchmarkConfig& config)
-        : pager(std::make_unique<Pager>(config.databasePath)) {
-        catalog.emplace(Catalog::openOrCreate(*pager));
+        : disk(std::make_unique<DiskManager>(config.databasePath)),
+          bufferPool(std::make_unique<BufferPoolManager>(
+              *disk, config.bufferFrames, config.lruK)),
+          allocator(std::make_unique<PageAllocator>(*bufferPool, *disk)) {
+        catalog.emplace(Catalog::openOrCreate(*bufferPool, *disk, *allocator));
         engine = std::make_unique<sql::SqlEngine>(*catalog);
     }
 };
@@ -604,9 +653,16 @@ struct SqlContext {
 void reopenSql(SqlContext& context, const BenchmarkConfig& config) {
     context.engine.reset();
     context.catalog.reset();
-    context.pager.reset();
-    context.pager = std::make_unique<Pager>(config.databasePath);
-    context.catalog.emplace(Catalog::openOrCreate(*context.pager));
+    context.allocator.reset();
+    context.bufferPool.reset();
+    context.disk.reset();
+    context.disk = std::make_unique<DiskManager>(config.databasePath);
+    context.bufferPool = std::make_unique<BufferPoolManager>(
+        *context.disk, config.bufferFrames, config.lruK);
+    context.allocator = std::make_unique<PageAllocator>(
+        *context.bufferPool, *context.disk);
+    context.catalog.emplace(Catalog::openOrCreate(
+        *context.bufferPool, *context.disk, *context.allocator));
     context.engine = std::make_unique<sql::SqlEngine>(*context.catalog);
 }
 
@@ -637,7 +693,7 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
     SqlContext context(config);
     createUsers(*context.engine);
     if (name != "sql_insert") populateUsers(*context.engine, config.rows);
-    context.pager->flushAll();
+    context.bufferPool->flushAll();
     if (config.cacheMode == CacheMode::Reopen) reopenSql(context, config);
     const auto setSize = workingSet(config.workingSet, config.rows);
     if (config.cacheMode == CacheMode::Hot
@@ -650,9 +706,10 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
             static_cast<void>(context.engine->execute(query));
         }
     }
-    const auto storageBefore = storageMetrics(*context.pager);
-    context.pager->resetStats();
-    PagerStats accumulated{};
+    const auto storageBefore = storageMetrics(
+        *context.disk, *context.bufferPool, *context.allocator);
+    context.bufferPool->resetStats();
+    BufferPoolStats accumulated{};
     std::vector<std::uint64_t> latencies;
     latencies.reserve(static_cast<std::size_t>(config.operations));
     std::mt19937_64 random(config.seed);
@@ -665,9 +722,9 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
     for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
         if (config.cacheMode == CacheMode::Reopen && operation != 0
             && operation % config.reopenInterval == 0) {
-            accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+            accumulated = accumulateBufferStats(accumulated, context.bufferPool->stats());
             reopenSql(context, config);
-            context.pager->resetStats();
+            context.bufferPool->resetStats();
         }
         sql::QueryResult result;
         if (name == "sql_pk_lookup") {
@@ -733,7 +790,7 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
         rowsExamined += examined;
         indexLookups += lookups;
     }
-    accumulated = accumulatePagerStats(accumulated, context.pager->stats());
+    accumulated = accumulateBufferStats(accumulated, context.bufferPool->stats());
     context.catalog->validate();
     if (name == "sql_insert" && context.catalog->openTable("users").size() != config.operations) {
         throw std::runtime_error("SQL insert benchmark size validation failed");
@@ -742,12 +799,18 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
         && context.catalog->openTable("users").size() != liveKeys.size()) {
         throw std::runtime_error("SQL mixed benchmark model size mismatch");
     }
-    const auto storageAfter = storageMetrics(*context.pager);
+    const auto storageAfter = storageMetrics(
+        *context.disk, *context.bufferPool, *context.allocator);
     auto result = finish(
-        name, config, std::move(latencies), accumulated, storageBefore, storageAfter,
+        name, config, std::move(latencies), {}, storageBefore, storageAfter,
         static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
-        static_cast<double>(indexLookups) / static_cast<double>(config.operations));
-    context.engine.reset(); context.catalog.reset(); context.pager.reset();
+        static_cast<double>(indexLookups) / static_cast<double>(config.operations),
+        accumulated);
+    context.engine.reset();
+    context.catalog.reset();
+    context.allocator.reset();
+    context.bufferPool.reset();
+    context.disk.reset();
     cleanupDatabase(config);
     return result;
 }
@@ -755,17 +818,15 @@ BenchmarkResult runSql(const BenchmarkConfig& config, const std::string& name) {
 BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
     removeDatabase(config);
     {
-        Pager pager(config.databasePath);
-        auto catalog = Catalog::openOrCreate(pager);
-        sql::SqlEngine engine(catalog);
-        createUsers(engine);
-        if (name != "tcp_insert") populateUsers(engine, config.rows);
-        pager.flushAll();
+        SqlContext context(config);
+        createUsers(*context.engine);
+        if (name != "tcp_insert") populateUsers(*context.engine, config.rows);
+        context.bufferPool->flushAll();
     }
 
     std::vector<std::uint64_t> latencies;
     latencies.reserve(static_cast<std::size_t>(config.operations));
-    PagerStats accumulated{};
+    BufferPoolStats accumulated{};
     StorageMetrics initialStorage{};
     StorageMetrics finalStorage{};
     bool capturedInitialStorage = false;
@@ -783,7 +844,13 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
     while (completed < config.operations) {
         const auto batchEnd = std::min(config.operations, completed + batchSize);
         net::DatabaseServer server(
-            config.databasePath, net::ServerConfig{"127.0.0.1", 0, 8});
+            config.databasePath,
+            net::ServerConfig{
+                "127.0.0.1",
+                0,
+                8,
+                static_cast<std::size_t>(config.bufferFrames),
+                static_cast<std::size_t>(config.lruK)});
         server.start();
         std::exception_ptr serverError;
         std::thread serverThread([&] {
@@ -803,10 +870,11 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
                 }
             }
             if (!capturedInitialStorage) {
-                initialStorage = storageMetrics(server.pager());
+                initialStorage = storageMetrics(
+                    server.diskManager(), server.bufferPool(), server.pageAllocator());
                 capturedInitialStorage = true;
             }
-            server.pager().resetStats();
+            server.bufferPool().resetStats();
             for (; completed < batchEnd; ++completed) {
                 sql::QueryResult result;
                 if (name == "tcp_pk_lookup") {
@@ -863,15 +931,17 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
         serverThread.join();
         if (serverError) std::rethrow_exception(serverError);
         if (clientError) std::rethrow_exception(clientError);
-        accumulated = accumulatePagerStats(accumulated, server.pager().stats());
+        accumulated = accumulateBufferStats(accumulated, server.bufferPool().stats());
         server.catalog().validate();
-        finalStorage = storageMetrics(server.pager());
+        finalStorage = storageMetrics(
+            server.diskManager(), server.bufferPool(), server.pageAllocator());
     }
 
     auto result = finish(
-        name, config, std::move(latencies), accumulated, initialStorage, finalStorage,
+        name, config, std::move(latencies), {}, initialStorage, finalStorage,
         static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
-        static_cast<double>(indexLookups) / static_cast<double>(config.operations));
+        static_cast<double>(indexLookups) / static_cast<double>(config.operations),
+        accumulated);
     cleanupDatabase(config);
     return result;
 }

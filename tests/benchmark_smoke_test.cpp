@@ -25,8 +25,10 @@ int main() {
             config.databasePath = (std::filesystem::temp_directory_path()
                 / ("minidb_benchmark_smoke_" + family + ".db")).string();
             const auto results = minidb::bench::runConfiguredBenchmarks(config);
+            const auto expectedBackend = family == "pager" ? "legacy_pager" : "buffer_pool";
             minidb::test::require(
                 results.size() == 1 && results[0].validationPassed
+                    && results[0].storageBackend == expectedBackend
                     && results[0].timing.operationCount == config.operations
                     && results[0].storageAfter.databasePages > 0
                     && results[0].storageAfter.databaseBytes

@@ -90,7 +90,7 @@ std::size_t modeledFreeSpace(
     const TupleModel& tuples,
     minidb::PageId pageId,
     const PageModel& page) {
-    return minidb::Pager::PAGE_SIZE
+    return minidb::database_format::PAGE_SIZE
         - minidb::slotted_page_layout::HEADER_SIZE
         - (static_cast<std::size_t>(page.slotCount) * minidb::slotted_page_layout::SLOT_SIZE)
         - pagePayloadSize(tuples, pageId);
@@ -119,7 +119,8 @@ void validateModel(
     const TupleModel& tuples,
     const std::vector<minidb::PageId>& pageOrder,
     const std::unordered_map<minidb::PageId, PageModel>& pages,
-    minidb::PageAllocator& allocator) {
+    minidb::PageAllocator& allocator,
+    minidb::BufferPoolManager& bufferPool) {
     store.validate();
     allocator.validate();
     minidb::test::require(store.size() == tuples.size(), "Random tuple-store size differs");
@@ -138,6 +139,11 @@ void validateModel(
             std::find(freePages.begin(), freePages.end(), pageId) == freePages.end(),
             "Random workload found a page both live and free");
     }
+    bufferPool.validate();
+    bufferPool.validateReplacer();
+    minidb::test::require(
+        bufferPool.stats().pinnedFrames == 0,
+        "Random TupleStore operation leaked a page pin");
 }
 
 std::string context(
@@ -166,17 +172,17 @@ void runRandomWorkload(std::uint32_t seed) {
     std::size_t reopenCount = 0;
 
     for (std::size_t batch = 0; batch < OPERATION_COUNT; batch += REOPEN_INTERVAL) {
-        minidb::Pager pager(database.path().string());
-        minidb::PageAllocator allocator(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto& allocator = storage.allocator;
         auto store = batch == 0
-            ? minidb::TupleStore::create(pager)
-            : minidb::TupleStore::open(pager, metadataPageId);
+            ? minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator)
+            : minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId);
         if (batch == 0) {
             metadataPageId = store.metadataPageId();
         } else {
             ++reopenCount;
         }
-        validateModel(store, tuples, pageOrder, pages, allocator);
+        validateModel(store, tuples, pageOrder, pages, allocator, storage.bufferPool);
 
         const auto end = std::min(batch + REOPEN_INTERVAL, OPERATION_COUNT);
         for (std::size_t operation = batch; operation < end; ++operation) {
@@ -282,7 +288,7 @@ void runRandomWorkload(std::uint32_t seed) {
                 }
 
                 if (operation % 50 == 0) {
-                    validateModel(store, tuples, pageOrder, pages, allocator);
+                    validateModel(store, tuples, pageOrder, pages, allocator, storage.bufferPool);
                 }
             } catch (const std::exception& error) {
                 throw std::runtime_error(
@@ -296,8 +302,8 @@ void runRandomWorkload(std::uint32_t seed) {
                     + ": " + error.what());
             }
         }
-        validateModel(store, tuples, pageOrder, pages, allocator);
-        pager.flushAll();
+        validateModel(store, tuples, pageOrder, pages, allocator, storage.bufferPool);
+        storage.bufferPool.flushAll();
     }
 }
 

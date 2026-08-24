@@ -91,10 +91,19 @@ Socket createListener(const ServerConfig& config, std::uint16_t& boundPort) {
 
 } // namespace
 
-TcpServer::TcpServer(ServerConfig config, sql::SqlEngine& engine, Pager& pager)
-    : config_(std::move(config)), engine_(engine), pager_(pager) {
-    if (config_.host.empty() || config_.backlog <= 0) {
-        throw std::invalid_argument("server host must be nonempty and backlog must be positive");
+TcpServer::TcpServer(
+    ServerConfig config,
+    sql::SqlEngine& engine,
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager)
+    : config_(std::move(config)),
+      engine_(engine),
+      bufferPool_(bufferPool),
+      diskManager_(diskManager) {
+    if (config_.host.empty() || config_.backlog <= 0
+        || config_.bufferFrames == 0 || config_.lruK == 0) {
+        throw std::invalid_argument(
+            "server host must be nonempty and backlog/buffer settings must be positive");
     }
 }
 
@@ -157,7 +166,8 @@ void TcpServer::serveConnection(int descriptor) {
         const auto source = decodeExecuteSqlPayload(*request);
         try {
             const auto result = engine_.execute(source);
-            pager_.flushAll();
+            bufferPool_.flushAll();
+            diskManager_.flush();
             try {
                 writeFrame(descriptor, encodeQueryResultFrame(requestId, result));
             } catch (const ProtocolError&) {

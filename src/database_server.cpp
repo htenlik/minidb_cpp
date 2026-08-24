@@ -3,10 +3,11 @@
 namespace minidb::net {
 
 DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
-    : pager_(databasePath),
-      allocator_(pager_),
-      catalog_(Catalog::openOrCreate(pager_)),
+    : diskManager_(databasePath),
+      bufferPool_(diskManager_, config.bufferFrames, config.lruK),
+      allocator_(bufferPool_, diskManager_),
+      catalog_(Catalog::openOrCreate(bufferPool_, diskManager_, allocator_)),
       engine_(catalog_),
-      server_(std::move(config), engine_, pager_) {}
+      server_(std::move(config), engine_, bufferPool_, diskManager_) {}
 
 } // namespace minidb::net

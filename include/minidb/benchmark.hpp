@@ -75,6 +75,7 @@ struct EnvironmentMetadata {
 
 struct BenchmarkResult {
     std::string benchmark;
+    std::string storageBackend;
     std::uint64_t seed = 0;
     std::uint32_t repetition = 0;
     BenchmarkConfig configuration;

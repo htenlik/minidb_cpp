@@ -16,7 +16,6 @@ namespace {
 
 using minidb::Catalog;
 using minidb::DataType;
-using minidb::Pager;
 using minidb::RowValues;
 using minidb::sql::AccessPath;
 using minidb::sql::CommandKind;
@@ -77,8 +76,8 @@ void createUsers(SqlEngine& engine) {
 
 void testCreateAndSemanticValidation() {
     minidb::test::TemporaryDatabase database("sql_executor_create");
-    Pager pager(database.path().string());
-    auto catalog = Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     SqlEngine engine(catalog);
     createUsers(engine);
 
@@ -122,8 +121,8 @@ void testCreateAndSemanticValidation() {
 
 void testInsertProjectionWhereAndIndexStats() {
     minidb::test::TemporaryDatabase database("sql_executor_select");
-    Pager pager(database.path().string());
-    auto catalog = Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     SqlEngine engine(catalog);
     createUsers(engine);
 
@@ -236,8 +235,8 @@ void testInsertProjectionWhereAndIndexStats() {
 
 void testInsertErrorsAndIntegerBoundaries() {
     minidb::test::TemporaryDatabase database("sql_executor_insert_errors");
-    Pager pager(database.path().string());
-    auto catalog = Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     SqlEngine engine(catalog);
     static_cast<void>(engine.execute(
         "CREATE TABLE numbers (id UINT32 PRIMARY KEY, value INT64 NOT NULL, note VARCHAR(3))"));
@@ -294,8 +293,8 @@ void testInsertErrorsAndIntegerBoundaries() {
 
 void testUpdateDeleteRelocationAndNoPrimaryKey() {
     minidb::test::TemporaryDatabase database("sql_executor_mutations");
-    Pager pager(database.path().string());
-    auto catalog = Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     SqlEngine engine(catalog);
     static_cast<void>(engine.execute(
         "CREATE TABLE items (id UINT32 PRIMARY KEY, payload VARCHAR(4000) NOT NULL, "
@@ -399,8 +398,8 @@ void testUpdateDeleteRelocationAndNoPrimaryKey() {
 
 void testPrimaryIndexAccessAtScale() {
     minidb::test::TemporaryDatabase database("sql_executor_pk_scale");
-    Pager pager(database.path().string());
-    auto catalog = Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     SqlEngine engine(catalog);
     static_cast<void>(engine.execute(
         "CREATE TABLE indexed_users (id UINT32 PRIMARY KEY, username VARCHAR(32) NOT NULL, "
@@ -438,18 +437,18 @@ void testPrimaryIndexAccessAtScale() {
 void testReopenAndMultipleTables() {
     minidb::test::TemporaryDatabase database("sql_executor_reopen");
     {
-        Pager pager(database.path().string());
-        auto catalog = Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         SqlEngine engine(catalog);
         static_cast<void>(engine.execute("CREATE TABLE a (id UINT32 PRIMARY KEY, text VARCHAR(20))"));
         static_cast<void>(engine.execute("CREATE TABLE b (flag BOOLEAN NOT NULL)"));
         static_cast<void>(engine.execute("INSERT INTO a VALUES (1, 'alpha')"));
         static_cast<void>(engine.execute("INSERT INTO b VALUES (TRUE)"));
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        Pager pager(database.path().string());
-        auto catalog = Catalog::open(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator);
         SqlEngine engine(catalog);
         const auto a = selection(engine.execute("SELECT text FROM A WHERE id = 1"));
         const auto b = selection(engine.execute("SELECT flag FROM b"));

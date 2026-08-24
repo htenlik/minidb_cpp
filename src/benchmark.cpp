@@ -319,6 +319,7 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
         const auto& result = results[index];
         const auto& config = result.configuration;
         output << "{\"benchmark\":\"" << escapeJson(result.benchmark)
+               << "\",\"storage_backend\":\"" << escapeJson(result.storageBackend)
                << "\",\"seed\":" << result.seed
                << ",\"repetition\":" << result.repetition
                << ",\"configuration\":{\"rows\":" << config.rows
@@ -375,6 +376,7 @@ std::string formatHuman(const BenchmarkResult& result) {
     std::ostringstream output;
     output << std::fixed << std::setprecision(2)
            << "benchmark: " << result.benchmark << " (repetition " << result.repetition << ")\n"
+           << "storage backend: " << result.storageBackend << '\n'
            << "seed/mode: " << result.seed << '/'
            << (result.configuration.cacheMode == CacheMode::Hot ? "hot" : "reopen") << '\n'
            << "environment: " << result.environment.versionContext << ", git "
@@ -435,7 +437,7 @@ EnvironmentMetadata currentEnvironment() {
     const std::string buildType = std::string(MINIDB_BUILD_TYPE).empty()
         ? "unspecified" : MINIDB_BUILD_TYPE;
     return EnvironmentMetadata{
-        "v0.1.0 baseline + Milestone 9 observability",
+        "v0.1.0 frozen MVP + Milestone 10B buffer-backed engine",
         MINIDB_GIT_COMMIT,
         __VERSION__,
         buildType,

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "minidb/pager.hpp"
+#include "minidb/buffer_pool_manager.hpp"
+#include "minidb/disk_manager.hpp"
 #include "minidb/sql_executor.hpp"
 #include "minidb/tcp_transport.hpp"
 
@@ -16,11 +17,17 @@ struct ServerConfig {
     std::string host = "127.0.0.1";
     std::uint16_t port = DEFAULT_SERVER_PORT;
     int backlog = 16;
+    std::size_t bufferFrames = 128;
+    std::size_t lruK = 2;
 };
 
 class TcpServer {
 public:
-    TcpServer(ServerConfig config, sql::SqlEngine& engine, Pager& pager);
+    TcpServer(
+        ServerConfig config,
+        sql::SqlEngine& engine,
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager);
 
     void start();
     // A zero connection limit serves indefinitely. Tests use a finite limit.
@@ -34,7 +41,8 @@ public:
 private:
     ServerConfig config_;
     sql::SqlEngine& engine_;
-    Pager& pager_;
+    BufferPoolManager& bufferPool_;
+    DiskManager& diskManager_;
     Socket listener_;
     std::uint16_t boundPort_ = 0;
 

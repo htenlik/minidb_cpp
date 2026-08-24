@@ -2,7 +2,6 @@
 
 #include "minidb/index_types.hpp"
 #include "minidb/page_allocator.hpp"
-#include "minidb/pager.hpp"
 
 #include <array>
 #include <cstddef>
@@ -34,7 +33,7 @@ inline constexpr std::size_t HEADER_SIZE = 64;
 inline constexpr std::size_t RESERVED_SIZE = HEADER_SIZE - RESERVED_OFFSET;
 
 static_assert(RESERVED_OFFSET == 36);
-static_assert(HEADER_SIZE <= Pager::PAGE_SIZE);
+static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 
 } // namespace persistent_index_metadata_layout
 
@@ -65,10 +64,10 @@ inline constexpr std::size_t SLOT_ID_SIZE = 2;
 inline constexpr std::size_t ENTRY_SIZE = KEY_SIZE + RECORD_PAGE_ID_SIZE + SLOT_ID_SIZE;
 inline constexpr std::size_t ENTRY_DATA_OFFSET = HEADER_SIZE;
 inline constexpr std::size_t PHYSICAL_CAPACITY =
-    (Pager::PAGE_SIZE - ENTRY_DATA_OFFSET) / ENTRY_SIZE;
+    (database_format::PAGE_SIZE - ENTRY_DATA_OFFSET) / ENTRY_SIZE;
 inline constexpr std::size_t USED_SIZE =
     ENTRY_DATA_OFFSET + (PHYSICAL_CAPACITY * ENTRY_SIZE);
-inline constexpr std::size_t UNUSED_SIZE = Pager::PAGE_SIZE - USED_SIZE;
+inline constexpr std::size_t UNUSED_SIZE = database_format::PAGE_SIZE - USED_SIZE;
 
 [[nodiscard]] constexpr std::size_t entryOffset(std::size_t index) noexcept {
     return ENTRY_DATA_OFFSET + (index * ENTRY_SIZE);
@@ -77,8 +76,8 @@ inline constexpr std::size_t UNUSED_SIZE = Pager::PAGE_SIZE - USED_SIZE;
 static_assert(HEADER_SIZE == 32);
 static_assert(ENTRY_SIZE == 10);
 static_assert(PHYSICAL_CAPACITY == 406);
-static_assert(USED_SIZE <= Pager::PAGE_SIZE);
-static_assert(USED_SIZE + ENTRY_SIZE > Pager::PAGE_SIZE);
+static_assert(USED_SIZE <= database_format::PAGE_SIZE);
+static_assert(USED_SIZE + ENTRY_SIZE > database_format::PAGE_SIZE);
 
 } // namespace persistent_bplus_leaf_layout
 
@@ -106,11 +105,11 @@ inline constexpr std::size_t KEY_SIZE = 4;
 inline constexpr std::size_t KEY_CHILD_PAIR_SIZE = KEY_SIZE + PAGE_ID_SIZE;
 inline constexpr std::size_t FIRST_CHILD_OFFSET = HEADER_SIZE;
 inline constexpr std::size_t PHYSICAL_CAPACITY =
-    (Pager::PAGE_SIZE - HEADER_SIZE - PAGE_ID_SIZE) / KEY_CHILD_PAIR_SIZE;
+    (database_format::PAGE_SIZE - HEADER_SIZE - PAGE_ID_SIZE) / KEY_CHILD_PAIR_SIZE;
 inline constexpr std::size_t PHYSICAL_FANOUT = PHYSICAL_CAPACITY + 1;
 inline constexpr std::size_t USED_SIZE =
     HEADER_SIZE + PAGE_ID_SIZE + (PHYSICAL_CAPACITY * KEY_CHILD_PAIR_SIZE);
-inline constexpr std::size_t UNUSED_SIZE = Pager::PAGE_SIZE - USED_SIZE;
+inline constexpr std::size_t UNUSED_SIZE = database_format::PAGE_SIZE - USED_SIZE;
 
 [[nodiscard]] constexpr std::size_t childOffset(std::size_t index) noexcept {
     return FIRST_CHILD_OFFSET + (index * KEY_CHILD_PAIR_SIZE);
@@ -123,8 +122,8 @@ inline constexpr std::size_t UNUSED_SIZE = Pager::PAGE_SIZE - USED_SIZE;
 static_assert(HEADER_SIZE == 32);
 static_assert(PHYSICAL_CAPACITY == 507);
 static_assert(PHYSICAL_FANOUT == 508);
-static_assert(USED_SIZE <= Pager::PAGE_SIZE);
-static_assert(USED_SIZE + KEY_CHILD_PAIR_SIZE > Pager::PAGE_SIZE);
+static_assert(USED_SIZE <= database_format::PAGE_SIZE);
+static_assert(USED_SIZE + KEY_CHILD_PAIR_SIZE > database_format::PAGE_SIZE);
 
 } // namespace persistent_bplus_internal_layout
 
@@ -137,10 +136,16 @@ public:
         static_cast<std::uint32_t>(persistent_bplus_internal_layout::PHYSICAL_CAPACITY);
 
     [[nodiscard]] static PersistentBPlusTree create(
-        Pager& pager,
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
         std::uint32_t leafMaxKeys = PHYSICAL_LEAF_MAX_KEYS,
         std::uint32_t internalMaxKeys = PHYSICAL_INTERNAL_MAX_KEYS);
-    [[nodiscard]] static PersistentBPlusTree open(Pager& pager, PageId metadataPageId);
+    [[nodiscard]] static PersistentBPlusTree open(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
+        PageId metadataPageId);
 
     PersistentBPlusTree(const PersistentBPlusTree&) = delete;
     PersistentBPlusTree& operator=(const PersistentBPlusTree&) = delete;
@@ -173,12 +178,20 @@ private:
     struct PathFrame;
     struct SplitResult;
 
-    Pager& pager_;
-    PageAllocator allocator_;
+    BufferPoolManager& bufferPool_;
+    DiskManager& diskManager_;
+    PageAllocator& allocator_;
     PageId metadataPageId_;
 
-    PersistentBPlusTree(Pager& pager, PageId metadataPageId)
-        : pager_(pager), allocator_(pager), metadataPageId_(metadataPageId) {}
+    PersistentBPlusTree(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
+        PageId metadataPageId)
+        : bufferPool_(bufferPool),
+          diskManager_(diskManager),
+          allocator_(allocator),
+          metadataPageId_(metadataPageId) {}
 
     [[nodiscard]] Metadata readMetadata() const;
     void writeMetadata(const Metadata& metadata);

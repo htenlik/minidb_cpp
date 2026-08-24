@@ -1,5 +1,7 @@
 #pragma once
 
+#include "minidb/buffer_pool_manager.hpp"
+#include "minidb/disk_manager.hpp"
 #include "minidb/page_allocator.hpp"
 #include "minidb/slotted_page.hpp"
 
@@ -33,7 +35,7 @@ inline constexpr std::size_t HEADER_SIZE = 64;
 inline constexpr std::size_t RESERVED_SIZE = HEADER_SIZE - RESERVED_OFFSET;
 
 static_assert(RESERVED_OFFSET == 32);
-static_assert(HEADER_SIZE <= Pager::PAGE_SIZE);
+static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 
 } // namespace tuple_heap_metadata_layout
 
@@ -41,8 +43,15 @@ class TupleStore {
 public:
     using ScanEntry = std::pair<RecordId, TupleBytes>;
 
-    [[nodiscard]] static TupleStore create(Pager& pager);
-    [[nodiscard]] static TupleStore open(Pager& pager, PageId metadataPageId);
+    [[nodiscard]] static TupleStore create(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator);
+    [[nodiscard]] static TupleStore open(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
+        PageId metadataPageId);
 
     TupleStore(const TupleStore&) = delete;
     TupleStore& operator=(const TupleStore&) = delete;
@@ -70,19 +79,27 @@ private:
         std::uint64_t tupleCount = 0;
     };
 
-    Pager& pager_;
-    PageAllocator allocator_;
+    BufferPoolManager& bufferPool_;
+    DiskManager& diskManager_;
+    PageAllocator& allocator_;
     PageId metadataPageId_;
 
-    TupleStore(Pager& pager, PageId metadataPageId)
-        : pager_(pager), allocator_(pager), metadataPageId_(metadataPageId) {}
+    TupleStore(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
+        PageId metadataPageId)
+        : bufferPool_(bufferPool),
+          diskManager_(diskManager),
+          allocator_(allocator),
+          metadataPageId_(metadataPageId) {}
 
     [[nodiscard]] Metadata readMetadata() const;
     void writeMetadata(const Metadata& metadata);
     void validateMetadataPageId() const;
     static void validateTupleSize(std::size_t size);
-    [[nodiscard]] SlottedPage openOwnedPage(PageId pageId) const;
-    [[nodiscard]] SlottedPage openRecordPage(RecordId recordId) const;
+    void validateOwnedPage(const ConstSlottedPageView& page) const;
+    void validateRecordId(RecordId recordId, const ConstSlottedPageView& page) const;
 };
 
 } // namespace minidb

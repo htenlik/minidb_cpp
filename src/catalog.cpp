@@ -1,6 +1,7 @@
 #include "minidb/catalog.hpp"
 
 #include "minidb/byte_codec.hpp"
+#include "minidb/page_access.hpp"
 #include "minidb/persistent_bplus_tree.hpp"
 #include "minidb/table.hpp"
 
@@ -13,53 +14,66 @@ namespace minidb {
 namespace {
 
 void requireExistingDataPage(
-    const Pager& pager,
+    const DiskManager& diskManager,
     PageId pageId,
     PageId excludedPageId,
     const char* description) {
     if (pageId == database_format::METADATA_PAGE_ID || pageId == INVALID_PAGE_ID
-        || pageId == excludedPageId || pageId >= pager.pageCount()) {
+        || pageId == excludedPageId || pageId >= diskManager.pageCount()) {
         throw std::runtime_error(std::string(description) + " is not an existing data page.");
     }
 }
 
 } // namespace
 
-Catalog Catalog::openOrCreate(Pager& pager) {
-    const auto rootPageId = pager.databaseHeader().catalogRootPageId;
+Catalog Catalog::openOrCreate(
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager,
+    PageAllocator& allocator) {
+    const auto rootPageId = diskManager.databaseHeader().catalogRootPageId;
     if (rootPageId != INVALID_PAGE_ID) {
-        return open(pager);
+        return open(bufferPool, diskManager, allocator);
     }
 
-    PageAllocator allocator(pager);
     const auto metadataPageId = allocator.allocatePage();
-    auto entries = TupleStore::create(pager);
-    writeMetadataPage(pager, metadataPageId, Metadata{
+    auto entries = TupleStore::create(bufferPool, diskManager, allocator);
+    writeMetadataPage(bufferPool, diskManager, metadataPageId, Metadata{
         entries.metadataPageId(),
         1,
         0,
     });
-    pager.updateCatalogRootPageId(metadataPageId);
-    Catalog catalog(pager, metadataPageId, std::move(entries));
+    diskManager.updateCatalogRootPageId(metadataPageId);
+    Catalog catalog(
+        bufferPool, diskManager, allocator, metadataPageId, std::move(entries));
     catalog.validate();
     return catalog;
 }
 
-Catalog Catalog::open(Pager& pager) {
-    const auto metadataPageId = pager.databaseHeader().catalogRootPageId;
+Catalog Catalog::open(
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager,
+    PageAllocator& allocator) {
+    const auto metadataPageId = diskManager.databaseHeader().catalogRootPageId;
     if (metadataPageId == INVALID_PAGE_ID) {
         throw std::runtime_error("Database has no initialized catalog.");
     }
-    const auto metadata = readMetadataPage(pager, metadataPageId);
-    auto entries = TupleStore::open(pager, metadata.entriesHeapMetadataPageId);
-    Catalog catalog(pager, metadataPageId, std::move(entries));
+    const auto metadata = readMetadataPage(bufferPool, diskManager, metadataPageId);
+    auto entries = TupleStore::open(
+        bufferPool, diskManager, allocator, metadata.entriesHeapMetadataPageId);
+    Catalog catalog(
+        bufferPool, diskManager, allocator, metadataPageId, std::move(entries));
     catalog.validate();
     return catalog;
 }
 
-Catalog::Metadata Catalog::readMetadataPage(Pager& pager, PageId metadataPageId) {
-    requireExistingDataPage(pager, metadataPageId, INVALID_PAGE_ID, "Catalog metadata PageId");
-    const auto& page = pager.getPage(metadataPageId);
+Catalog::Metadata Catalog::readMetadataPage(
+    BufferPoolManager& bufferPool,
+    const DiskManager& diskManager,
+    PageId metadataPageId) {
+    requireExistingDataPage(
+        diskManager, metadataPageId, INVALID_PAGE_ID, "Catalog metadata PageId");
+    const auto guard = requireReadPage(bufferPool, metadataPageId, "read catalog metadata");
+    const auto page = guard.data();
     using namespace catalog_metadata_layout;
     if (!std::equal(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET)) {
         throw std::runtime_error("Invalid catalog metadata magic/type.");
@@ -81,7 +95,7 @@ Catalog::Metadata Catalog::readMetadataPage(Pager& pager, PageId metadataPageId)
         byte_codec::readUint64(page, TABLE_COUNT_OFFSET),
     };
     requireExistingDataPage(
-        pager, metadata.entriesHeapMetadataPageId, metadataPageId,
+        diskManager, metadata.entriesHeapMetadataPageId, metadataPageId,
         "Catalog entries heap metadata PageId");
     if (metadata.nextTableId == INVALID_TABLE_ID) {
         throw std::runtime_error("Catalog next TableId uses the invalid value.");
@@ -90,19 +104,22 @@ Catalog::Metadata Catalog::readMetadataPage(Pager& pager, PageId metadataPageId)
 }
 
 void Catalog::writeMetadataPage(
-    Pager& pager,
+    BufferPoolManager& bufferPool,
+    const DiskManager& diskManager,
     PageId metadataPageId,
     const Metadata& metadata) {
-    requireExistingDataPage(pager, metadataPageId, INVALID_PAGE_ID, "Catalog metadata PageId");
     requireExistingDataPage(
-        pager, metadata.entriesHeapMetadataPageId, metadataPageId,
+        diskManager, metadataPageId, INVALID_PAGE_ID, "Catalog metadata PageId");
+    requireExistingDataPage(
+        diskManager, metadata.entriesHeapMetadataPageId, metadataPageId,
         "Catalog entries heap metadata PageId");
     if (metadata.nextTableId == INVALID_TABLE_ID) {
         throw std::invalid_argument("Catalog next TableId cannot be zero.");
     }
-    auto& page = pager.getPage(metadataPageId);
+    auto guard = requireWritePage(bufferPool, metadataPageId, "write catalog metadata");
+    auto page = guard.data();
     using namespace catalog_metadata_layout;
-    page.fill(std::byte{0});
+    std::fill(page.begin(), page.end(), std::byte{0});
     std::copy(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET);
     byte_codec::writeUint32(page, VERSION_OFFSET, CURRENT_VERSION);
     byte_codec::writeUint32(page, HEADER_SIZE_OFFSET, static_cast<std::uint32_t>(HEADER_SIZE));
@@ -110,11 +127,10 @@ void Catalog::writeMetadataPage(
         page, ENTRIES_HEAP_METADATA_PAGE_ID_OFFSET, metadata.entriesHeapMetadataPageId);
     byte_codec::writeUint64(page, NEXT_TABLE_ID_OFFSET, metadata.nextTableId);
     byte_codec::writeUint64(page, TABLE_COUNT_OFFSET, metadata.tableCount);
-    pager.markDirty(metadataPageId);
 }
 
 Catalog::Metadata Catalog::readMetadata() const {
-    const auto metadata = readMetadataPage(pager_, metadataPageId_);
+    const auto metadata = readMetadataPage(bufferPool_, diskManager_, metadataPageId_);
     if (metadata.entriesHeapMetadataPageId != entries_.metadataPageId()) {
         throw std::runtime_error("Catalog metadata disagrees with its opened entries heap.");
     }
@@ -125,7 +141,7 @@ void Catalog::writeMetadata(const Metadata& metadata) {
     if (metadata.entriesHeapMetadataPageId != entries_.metadataPageId()) {
         throw std::logic_error("Cannot redirect an opened catalog to another entries heap.");
     }
-    writeMetadataPage(pager_, metadataPageId_, metadata);
+    writeMetadataPage(bufferPool_, diskManager_, metadataPageId_, metadata);
 }
 
 std::uint64_t Catalog::tableCount() const {
@@ -192,10 +208,11 @@ Table Catalog::createTable(std::string_view name, const Schema& schema) {
     };
     static_cast<void>(encodeTableDefinition(sizingDefinition));
 
-    auto heap = TupleStore::create(pager_);
+    auto heap = TupleStore::create(bufferPool_, diskManager_, allocator_);
     PageId indexMetadataPageId = INVALID_PAGE_ID;
     if (hasPrimaryKey) {
-        auto index = PersistentBPlusTree::create(pager_);
+        auto index = PersistentBPlusTree::create(
+            bufferPool_, diskManager_, allocator_);
         indexMetadataPageId = index.metadataPageId();
     }
     TableDefinition definition{
@@ -210,7 +227,7 @@ Table Catalog::createTable(std::string_view name, const Schema& schema) {
     ++metadata.nextTableId;
     ++metadata.tableCount;
     writeMetadata(metadata);
-    return Table::open(pager_, std::move(definition));
+    return Table::open(bufferPool_, diskManager_, allocator_, std::move(definition));
 }
 
 Table Catalog::openTable(std::string_view name) const {
@@ -218,7 +235,7 @@ Table Catalog::openTable(std::string_view name) const {
     if (!definition.has_value()) {
         throw std::out_of_range("Catalog table name does not exist.");
     }
-    return Table::open(pager_, std::move(*definition));
+    return Table::open(bufferPool_, diskManager_, allocator_, std::move(*definition));
 }
 
 Table Catalog::openTable(TableId tableId) const {
@@ -226,12 +243,12 @@ Table Catalog::openTable(TableId tableId) const {
     if (!definition.has_value()) {
         throw std::out_of_range("Catalog TableId does not exist.");
     }
-    return Table::open(pager_, std::move(*definition));
+    return Table::open(bufferPool_, diskManager_, allocator_, std::move(*definition));
 }
 
 void Catalog::validate() const {
     const auto metadata = readMetadata();
-    if (pager_.databaseHeader().catalogRootPageId != metadataPageId_) {
+    if (diskManager_.databaseHeader().catalogRootPageId != metadataPageId_) {
         throw std::runtime_error("Database catalog root disagrees with opened Catalog.");
     }
     entries_.validate();
@@ -257,13 +274,12 @@ void Catalog::validate() const {
         throw std::runtime_error("Catalog next TableId does not exceed assigned IDs.");
     }
 
-    PageAllocator allocator(pager_);
-    const auto freePages = allocator.freePageIds();
+    const auto freePages = allocator_.freePageIds();
     const std::unordered_set<PageId> freePageSet(freePages.begin(), freePages.end());
     std::unordered_set<PageId> ownedPages;
     const auto claim = [&](PageId pageId, const char* description) {
         if (pageId == database_format::METADATA_PAGE_ID || pageId == INVALID_PAGE_ID
-            || pageId >= pager_.pageCount() || freePageSet.contains(pageId)
+            || pageId >= diskManager_.pageCount() || freePageSet.contains(pageId)
             || !ownedPages.insert(pageId).second) {
             throw std::runtime_error(std::string("Catalog storage ownership conflict: ")
                                      + description + ".");
@@ -276,16 +292,17 @@ void Catalog::validate() const {
         claim(pageId, "catalog entries heap page");
     }
     for (const auto& definition : definitions) {
-        auto table = Table::open(pager_, definition);
+        auto table = Table::open(bufferPool_, diskManager_, allocator_, definition);
         claim(definition.heapMetadataPageId, "table heap metadata");
-        auto tableHeap = TupleStore::open(pager_, definition.heapMetadataPageId);
+        auto tableHeap = TupleStore::open(
+            bufferPool_, diskManager_, allocator_, definition.heapMetadataPageId);
         for (const auto pageId : tableHeap.reachablePageIds()) {
             claim(pageId, "table heap page");
         }
         if (definition.primaryIndexMetadataPageId != INVALID_PAGE_ID) {
             claim(definition.primaryIndexMetadataPageId, "primary index metadata");
             auto index = PersistentBPlusTree::open(
-                pager_, definition.primaryIndexMetadataPageId);
+                bufferPool_, diskManager_, allocator_, definition.primaryIndexMetadataPageId);
             for (const auto pageId : index.reachableNodePageIds()) {
                 claim(pageId, "primary index node");
             }

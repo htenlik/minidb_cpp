@@ -1,6 +1,7 @@
 #pragma once
 
-#include "minidb/pager.hpp"
+#include "minidb/buffer_pool_manager.hpp"
+#include "minidb/disk_manager.hpp"
 
 #include <array>
 #include <cstddef>
@@ -25,18 +26,18 @@ inline constexpr std::size_t HEADER_SIZE_OFFSET = LAYOUT_VERSION_OFFSET + 4;
 inline constexpr std::size_t NEXT_FREE_PAGE_ID_OFFSET = HEADER_SIZE_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = NEXT_FREE_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t HEADER_SIZE = 32;
-inline constexpr std::size_t RESERVED_SIZE = Pager::PAGE_SIZE - RESERVED_OFFSET;
+inline constexpr std::size_t RESERVED_SIZE = database_format::PAGE_SIZE - RESERVED_OFFSET;
 
 static_assert(RESERVED_OFFSET == 20);
-static_assert(HEADER_SIZE <= Pager::PAGE_SIZE);
+static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 
 } // namespace free_page_layout
 
 // Allocates reusable data pages from a persisted LIFO free list, falling back to
-// Pager's append-only allocation primitive when the list is empty.
+// the buffer pool's append path when the list is empty.
 class PageAllocator {
 public:
-    explicit PageAllocator(Pager& pager);
+    PageAllocator(BufferPoolManager& bufferPool, DiskManager& diskManager);
 
     [[nodiscard]] PageId allocatePage();
     void releasePage(PageId pageId);
@@ -45,7 +46,8 @@ public:
     [[nodiscard]] std::vector<PageId> freePageIds() const;
 
 private:
-    Pager& pager_;
+    BufferPoolManager& bufferPool_;
+    DiskManager& diskManager_;
 
     [[nodiscard]] PageId readNextFreePageId(PageId pageId) const;
     void writeFreePage(PageId pageId, PageId nextPageId);

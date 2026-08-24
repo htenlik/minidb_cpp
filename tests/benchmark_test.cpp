@@ -118,6 +118,7 @@ void testJson() {
         "JSON escaping changed");
     BenchmarkResult result;
     result.benchmark = "demo\nname";
+    result.storageBackend = "buffer_pool";
     result.seed = 7;
     result.repetition = 1;
     result.configuration.benchmark = "demo";
@@ -138,6 +139,8 @@ void testJson() {
     minidb::test::require(
         json.find("\"schema_version\":1") != std::string::npos
             && json.find("demo\\nname") != std::string::npos
+            && json.find("\"storage_backend\":\"buffer_pool\"")
+                != std::string::npos
             && json.find("\"reopen_interval\":17") != std::string::npos
             && json.find("\"repetitions\":3") != std::string::npos
             && json.find("\"dirty_marks\":6") != std::string::npos

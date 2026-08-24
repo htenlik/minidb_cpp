@@ -20,8 +20,12 @@ int main() {
         const auto results = minidb::bench::runConfiguredBenchmarks(config);
         std::set<std::string> names;
         for (const auto& result : results) {
+            const auto expectedBackend = result.benchmark.starts_with("pager_")
+                ? "legacy_pager"
+                : "buffer_pool";
             minidb::test::require(
-                result.validationPassed && result.timing.operationCount == 6,
+                result.validationPassed && result.timing.operationCount == 6
+                    && result.storageBackend == expectedBackend,
                 "quick-suite workload failed validation or operation count");
             names.insert(result.benchmark);
         }
@@ -35,7 +39,9 @@ int main() {
         const auto json = minidb::bench::resultsToJson(results);
         minidb::test::require(
             json.find("\"schema_version\":1") != std::string::npos
-                && json.find("\"benchmark\":\"tcp_pk_lookup\"") != std::string::npos,
+                && json.find("\"benchmark\":\"tcp_pk_lookup\"") != std::string::npos
+                && json.find("\"storage_backend\":\"buffer_pool\"")
+                    != std::string::npos,
             "quick-suite JSON was incomplete");
         std::cout << "benchmark quick suite tests passed\n";
         return 0;

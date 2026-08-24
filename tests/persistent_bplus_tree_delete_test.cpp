@@ -32,21 +32,12 @@ minidb::RecordId makeRid(
     };
 }
 
-std::uint32_t readUint32(const minidb::Pager::Page& page, std::size_t offset) {
+std::uint32_t readUint32(const minidb::DiskManager::Page& page, std::size_t offset) {
     std::uint32_t value = 0;
     for (std::size_t index = 0; index < 4; ++index) {
         value |= std::to_integer<std::uint32_t>(page[offset + index]) << (index * 8U);
     }
     return value;
-}
-
-void writeUint32(
-    minidb::Pager::Page& page,
-    std::size_t offset,
-    std::uint32_t value) {
-    for (std::size_t index = 0; index < 4; ++index) {
-        page[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
-    }
 }
 
 std::vector<minidb::IndexEntry> expectedEntries(const ReferenceIndex& reference) {
@@ -100,9 +91,9 @@ void insertRange(
 
 void testMissingSimpleAndFinalErase() {
     minidb::test::TemporaryDatabase database("persistent_delete_simple");
-    minidb::Pager pager(database.path().string());
-    const auto recordPageId = pager.allocatePage();
-    auto tree = minidb::PersistentBPlusTree::create(pager, 3, 3);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    const auto recordPageId = storage.allocator.allocatePage();
+    auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
 
     minidb::test::require(!tree.erase(7), "Empty persistent tree erased a missing key");
     const auto rid = makeRid(7, recordPageId);
@@ -116,7 +107,7 @@ void testMissingSimpleAndFinalErase() {
     minidb::test::require(tree.rootPageId() == minidb::INVALID_PAGE_ID,
                           "Final-key erase retained a root page");
     minidb::test::require(tree.height() == 0, "Empty persistent tree retained height");
-    minidb::PageAllocator allocator(pager);
+    auto& allocator = storage.allocator;
     const auto freePages = allocator.freePageIds();
     minidb::test::require(
         std::find(freePages.begin(), freePages.end(), leafRoot) != freePages.end(),
@@ -131,20 +122,21 @@ void testTargetedLeafBorrowMergeAndSeparatorRepair() {
                              minidb::IndexKey erased,
                              bool expectReclamation) {
         minidb::test::TemporaryDatabase database(name);
-        minidb::Pager pager(database.path().string());
-        const auto recordPageId = pager.allocatePage();
-        auto tree = minidb::PersistentBPlusTree::create(pager, 3, 3);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        const auto recordPageId = storage.allocator.allocatePage();
+        auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
         ReferenceIndex reference;
         for (const auto key : inserted) {
             const auto rid = makeRid(key, recordPageId, 7);
             static_cast<void>(tree.insert(key, rid));
             reference.emplace(key, rid);
         }
-        const auto freeBefore = minidb::PageAllocator(pager).freePageIds().size();
+        const auto freeBefore = storage.allocator.freePageIds().size();
         minidb::test::require(tree.erase(erased), "Targeted leaf erase failed");
         reference.erase(erased);
         requireMatches(tree, reference);
-        const auto freeAfter = minidb::PageAllocator(pager).freePageIds().size();
+        minidb::test::requireBufferClean(storage);
+        const auto freeAfter = storage.allocator.freePageIds().size();
         minidb::test::require(
             (freeAfter > freeBefore) == expectReclamation,
             "Targeted leaf case did not perform the expected borrow/merge behavior");
@@ -159,9 +151,9 @@ void testTargetedLeafBorrowMergeAndSeparatorRepair() {
     runCase("persistent_leaf_merge_left", {1, 2, 3, 4}, 4, true);
 
     minidb::test::TemporaryDatabase database("persistent_separator_min_change");
-    minidb::Pager pager(database.path().string());
-    const auto recordPageId = pager.allocatePage();
-    auto tree = minidb::PersistentBPlusTree::create(pager, 4, 4);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    const auto recordPageId = storage.allocator.allocatePage();
+    auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 4, 4);
     ReferenceIndex reference;
     for (minidb::IndexKey key = 0; key < 6; ++key) {
         const auto rid = makeRid(key, recordPageId, 19);
@@ -178,9 +170,9 @@ void testTargetedLeafBorrowMergeAndSeparatorRepair() {
 
 void runEraseOrder(std::vector<minidb::IndexKey> order, std::string_view name) {
     minidb::test::TemporaryDatabase database(name);
-    minidb::Pager pager(database.path().string());
-    const auto recordPageId = pager.allocatePage();
-    auto tree = minidb::PersistentBPlusTree::create(pager, 3, 3);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    const auto recordPageId = storage.allocator.allocatePage();
+    auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
     ReferenceIndex reference;
     insertRange(tree, reference, recordPageId, static_cast<minidb::IndexKey>(order.size()), 13);
     minidb::test::require(tree.height() >= 4, "Erase fixture did not create a deep tree");
@@ -243,25 +235,25 @@ void testReopenDeletionAndPageReuse() {
     ReferenceIndex reference;
 
     {
-        minidb::Pager pager(database.path().string());
-        recordPageId = pager.allocatePage();
-        auto tree = minidb::PersistentBPlusTree::create(pager, 3, 3);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        recordPageId = storage.allocator.allocatePage();
+        auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
         metadataPageId = tree.metadataPageId();
         insertRange(tree, reference, recordPageId, 260, 29);
-        highWaterPageCount = pager.pageCount();
+        highWaterPageCount = storage.diskManager.pageCount();
         originalTreePages = tree.reachableNodePageIds();
         requireMatches(tree, reference);
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto tree = minidb::PersistentBPlusTree::open(pager, metadataPageId);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto tree = minidb::PersistentBPlusTree::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId);
         for (minidb::IndexKey key = 0; key < 260; ++key) {
             minidb::test::require(tree.erase(key), "Erase after reopen failed");
             reference.erase(key);
         }
         requireMatches(tree, reference);
-        minidb::PageAllocator allocator(pager);
+        auto& allocator = storage.allocator;
         const auto freePages = allocator.freePageIds();
         minidb::test::require(!freePages.empty(),
                               "Delete-all did not populate the free list");
@@ -273,15 +265,15 @@ void testReopenDeletionAndPageReuse() {
         minidb::test::require(
             reclaimedTreePages.size() == originalTreePages.size(),
             "Delete-all did not reclaim every former tree node page");
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto tree = minidb::PersistentBPlusTree::open(pager, metadataPageId);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto tree = minidb::PersistentBPlusTree::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId);
         insertRange(tree, reference, recordPageId, 260, 41);
         requireMatches(tree, reference);
         minidb::test::require(
-            pager.pageCount() == highWaterPageCount,
+            storage.diskManager.pageCount() == highWaterPageCount,
             "Equivalent refill grew the file instead of reusing reclaimed index pages");
         const auto refillPages = tree.reachableNodePageIds();
         minidb::test::require(
@@ -296,21 +288,21 @@ void testReopenDeletionAndPageReuse() {
                         != reclaimedTreePages.end();
                 }),
             "Refill did not reuse any explicitly reclaimed tree PageId");
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto tree = minidb::PersistentBPlusTree::open(pager, metadataPageId);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto tree = minidb::PersistentBPlusTree::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId);
         requireMatches(tree, reference);
     }
 }
 
 void testIndependentIndexesShareAllocatorSafely() {
     minidb::test::TemporaryDatabase database("persistent_delete_two_indexes");
-    minidb::Pager pager(database.path().string());
-    const auto recordPageId = pager.allocatePage();
-    auto first = minidb::PersistentBPlusTree::create(pager, 3, 3);
-    auto second = minidb::PersistentBPlusTree::create(pager, 4, 4);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    const auto recordPageId = storage.allocator.allocatePage();
+    auto first = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
+    auto second = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 4, 4);
     ReferenceIndex firstReference;
     ReferenceIndex secondReference;
     insertRange(first, firstReference, recordPageId, 100, 1);
@@ -327,7 +319,7 @@ void testIndependentIndexesShareAllocatorSafely() {
     firstReference.clear();
     requireMatches(first, firstReference);
     requireMatches(second, secondReference);
-    const auto freePages = minidb::PageAllocator(pager).freePageIds();
+    const auto freePages = storage.allocator.freePageIds();
     for (const auto pageId : secondPages) {
         minidb::test::require(
             std::find(freePages.begin(), freePages.end(), pageId) == freePages.end(),
@@ -342,77 +334,87 @@ void testIndependentIndexesShareAllocatorSafely() {
 void testDeletionEraCorruptionIsRejected() {
     {
         minidb::test::TemporaryDatabase database("persistent_underfull_leaf");
-        minidb::Pager pager(database.path().string());
-        const auto recordPageId = pager.allocatePage();
-        auto tree = minidb::PersistentBPlusTree::create(pager, 4, 4);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        const auto recordPageId = storage.allocator.allocatePage();
+        auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 4, 4);
         for (minidb::IndexKey key = 0; key < 8; ++key) {
             static_cast<void>(tree.insert(key, makeRid(key, recordPageId)));
         }
-        const auto& root = pager.getPage(tree.rootPageId());
+        const auto root = minidb::test::readPageCopy(storage, tree.rootPageId());
         const auto leafPageId = readUint32(
             root, minidb::persistent_bplus_internal_layout::childOffset(0));
-        auto& leaf = pager.getPage(leafPageId);
-        writeUint32(leaf, minidb::persistent_bplus_leaf_layout::KEY_COUNT_OFFSET, 1);
-        std::fill(
-            leaf.begin() + minidb::persistent_bplus_leaf_layout::entryOffset(1),
-            leaf.end(),
-            std::byte{0});
-        pager.markDirty(leafPageId);
+        minidb::test::mutatePage(storage, leafPageId, [](auto leaf) {
+            for (std::size_t index = 0; index < 4; ++index) {
+                leaf[minidb::persistent_bplus_leaf_layout::KEY_COUNT_OFFSET + index] =
+                    static_cast<std::byte>((1U >> (index * 8U)) & 0xFFU);
+            }
+            std::fill(
+                leaf.begin() + minidb::persistent_bplus_leaf_layout::entryOffset(1),
+                leaf.end(),
+                std::byte{0});
+        });
         minidb::test::requireThrows<std::runtime_error>(
             [&] { tree.validate(); },
             "Validator accepted an underfull non-root leaf");
     }
     {
         minidb::test::TemporaryDatabase database("persistent_underfull_internal");
-        minidb::Pager pager(database.path().string());
-        const auto recordPageId = pager.allocatePage();
-        auto tree = minidb::PersistentBPlusTree::create(pager, 4, 4);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        const auto recordPageId = storage.allocator.allocatePage();
+        auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 4, 4);
         for (minidb::IndexKey key = 0; key < 120; ++key) {
             static_cast<void>(tree.insert(key, makeRid(key, recordPageId)));
         }
         minidb::test::require(tree.height() >= 3, "Internal corruption fixture was too shallow");
-        const auto& root = pager.getPage(tree.rootPageId());
+        const auto root = minidb::test::readPageCopy(storage, tree.rootPageId());
         const auto internalPageId = readUint32(
             root, minidb::persistent_bplus_internal_layout::childOffset(0));
-        auto& internal = pager.getPage(internalPageId);
-        writeUint32(internal, minidb::persistent_bplus_internal_layout::KEY_COUNT_OFFSET, 1);
-        writeUint32(internal, minidb::persistent_bplus_internal_layout::CHILD_COUNT_OFFSET, 2);
-        const auto usedSize = minidb::persistent_bplus_internal_layout::HEADER_SIZE
-            + minidb::persistent_bplus_internal_layout::PAGE_ID_SIZE
-            + minidb::persistent_bplus_internal_layout::KEY_CHILD_PAIR_SIZE;
-        std::fill(internal.begin() + usedSize, internal.end(), std::byte{0});
-        pager.markDirty(internalPageId);
+        minidb::test::mutatePage(storage, internalPageId, [](auto internal) {
+            for (std::size_t index = 0; index < 4; ++index) {
+                internal[minidb::persistent_bplus_internal_layout::KEY_COUNT_OFFSET + index] =
+                    static_cast<std::byte>((1U >> (index * 8U)) & 0xFFU);
+                internal[minidb::persistent_bplus_internal_layout::CHILD_COUNT_OFFSET + index] =
+                    static_cast<std::byte>((2U >> (index * 8U)) & 0xFFU);
+            }
+            const auto usedSize = minidb::persistent_bplus_internal_layout::HEADER_SIZE
+                + minidb::persistent_bplus_internal_layout::PAGE_ID_SIZE
+                + minidb::persistent_bplus_internal_layout::KEY_CHILD_PAIR_SIZE;
+            std::fill(internal.begin() + usedSize, internal.end(), std::byte{0});
+        });
         minidb::test::requireThrows<std::runtime_error>(
             [&] { tree.validate(); },
             "Validator accepted an underfull non-root internal page");
     }
     {
         minidb::test::TemporaryDatabase database("persistent_live_free_overlap");
-        minidb::Pager pager(database.path().string());
-        const auto recordPageId = pager.allocatePage();
-        auto tree = minidb::PersistentBPlusTree::create(pager, 3, 3);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        const auto recordPageId = storage.allocator.allocatePage();
+        auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
         static_cast<void>(tree.insert(7, makeRid(7, recordPageId)));
         const auto leafPageId = tree.rootPageId();
-        auto& page = pager.getPage(leafPageId);
-        page.fill(std::byte{0});
-        std::copy(
-            minidb::free_page_layout::MAGIC.begin(),
-            minidb::free_page_layout::MAGIC.end(),
-            page.begin() + minidb::free_page_layout::MAGIC_OFFSET);
-        writeUint32(
-            page,
-            minidb::free_page_layout::LAYOUT_VERSION_OFFSET,
-            minidb::free_page_layout::CURRENT_VERSION);
-        writeUint32(
-            page,
-            minidb::free_page_layout::HEADER_SIZE_OFFSET,
-            minidb::free_page_layout::HEADER_SIZE);
-        writeUint32(
-            page,
-            minidb::free_page_layout::NEXT_FREE_PAGE_ID_OFFSET,
-            minidb::INVALID_PAGE_ID);
-        pager.markDirty(leafPageId);
-        pager.updateFreeListRootPageId(leafPageId);
+        minidb::test::mutatePage(storage, leafPageId, [](auto page) {
+            std::fill(page.begin(), page.end(), std::byte{0});
+            std::copy(
+                minidb::free_page_layout::MAGIC.begin(),
+                minidb::free_page_layout::MAGIC.end(),
+                page.begin() + minidb::free_page_layout::MAGIC_OFFSET);
+            const auto write = [&](std::size_t offset, std::uint32_t value) {
+                for (std::size_t index = 0; index < 4; ++index) {
+                    page[offset + index] =
+                        static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
+                }
+            };
+            write(
+                minidb::free_page_layout::LAYOUT_VERSION_OFFSET,
+                minidb::free_page_layout::CURRENT_VERSION);
+            write(
+                minidb::free_page_layout::HEADER_SIZE_OFFSET,
+                minidb::free_page_layout::HEADER_SIZE);
+            write(
+                minidb::free_page_layout::NEXT_FREE_PAGE_ID_OFFSET,
+                minidb::INVALID_PAGE_ID);
+        });
+        storage.diskManager.updateFreeListRootPageId(leafPageId);
         minidb::test::requireThrows<std::runtime_error>(
             [&] { tree.validate(); },
             "Validator accepted a page reachable from both the tree and free list");
@@ -421,9 +423,9 @@ void testDeletionEraCorruptionIsRejected() {
 
 void testRepeatedSplitMergeReuseCycles() {
     minidb::test::TemporaryDatabase database("persistent_repeated_reuse_cycles");
-    minidb::Pager pager(database.path().string());
-    const auto recordPageId = pager.allocatePage();
-    auto tree = minidb::PersistentBPlusTree::create(pager, 3, 4);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    const auto recordPageId = storage.allocator.allocatePage();
+    auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 4);
     minidb::PageId stablePageCount = 0;
     constexpr minidb::IndexKey KEY_COUNT = 180;
 
@@ -435,10 +437,10 @@ void testRepeatedSplitMergeReuseCycles() {
         }
         tree.validate();
         if (round == 0) {
-            stablePageCount = pager.pageCount();
+            stablePageCount = storage.diskManager.pageCount();
         } else {
             minidb::test::require(
-                pager.pageCount() == stablePageCount,
+                storage.diskManager.pageCount() == stablePageCount,
                 "Repeated split/merge cycle appended pages instead of reusing free pages");
         }
 
@@ -483,14 +485,14 @@ void runDifferential(
     minidb::PageId recordPageId = minidb::INVALID_PAGE_ID;
 
     for (std::size_t batch = 0; batch < OPERATION_COUNT; batch += REOPEN_INTERVAL) {
-        minidb::Pager pager(database.path().string());
+        minidb::test::TestStorage storage(database.path(), 3, 2);
         const bool afterReopen = batch != 0;
         if (!afterReopen) {
-            recordPageId = pager.allocatePage();
+            recordPageId = storage.allocator.allocatePage();
         }
         auto tree = afterReopen
-            ? minidb::PersistentBPlusTree::open(pager, metadataPageId)
-            : minidb::PersistentBPlusTree::create(pager, leafCapacity, internalCapacity);
+            ? minidb::PersistentBPlusTree::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId)
+            : minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, leafCapacity, internalCapacity);
         if (!afterReopen) {
             metadataPageId = tree.metadataPageId();
         }
@@ -539,6 +541,7 @@ void runDifferential(
 
                 if (operation % 40 == 0) {
                     requireMatches(tree, reference);
+                    minidb::test::requireBufferClean(storage);
                     memory.validate();
                     minidb::test::require(
                         tree.scanAll() == memory.scanAll(),
@@ -552,7 +555,8 @@ void runDifferential(
             }
         }
         requireMatches(tree, reference);
-        pager.flushAll();
+        minidb::test::requireBufferClean(storage);
+        storage.bufferPool.flushAll();
     }
 }
 

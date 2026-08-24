@@ -1,6 +1,6 @@
 #pragma once
 
-#include "minidb/pager.hpp"
+#include "minidb/database_format.hpp"
 #include "minidb/record_id.hpp"
 #include "minidb/tuple_bytes.hpp"
 
@@ -46,12 +46,12 @@ inline constexpr std::uint16_t SLOT_FREE = 0;
 inline constexpr std::uint16_t SLOT_LIVE = 1;
 
 inline constexpr std::size_t MAX_SLOT_COUNT =
-    (Pager::PAGE_SIZE - HEADER_SIZE) / SLOT_SIZE;
+    (database_format::PAGE_SIZE - HEADER_SIZE) / SLOT_SIZE;
 inline constexpr std::size_t MAX_TUPLE_SIZE =
-    Pager::PAGE_SIZE - HEADER_SIZE - SLOT_SIZE;
+    database_format::PAGE_SIZE - HEADER_SIZE - SLOT_SIZE;
 
 [[nodiscard]] constexpr std::size_t slotOffset(SlotId slotId) noexcept {
-    return Pager::PAGE_SIZE
+    return database_format::PAGE_SIZE
         - ((static_cast<std::size_t>(slotId) + 1) * SLOT_SIZE);
 }
 
@@ -63,24 +63,17 @@ static_assert(MAX_TUPLE_SIZE == 4040);
 
 } // namespace slotted_page_layout
 
-class SlottedPage {
+class ConstSlottedPageView {
 public:
-    static void initialize(
-        Pager& pager,
+    ConstSlottedPageView(
+        std::span<const std::byte, database_format::PAGE_SIZE> bytes,
         PageId pageId,
-        PageId heapMetadataPageId,
-        PageId nextPageId = INVALID_PAGE_ID,
-        PageId previousPageId = INVALID_PAGE_ID);
-
-    SlottedPage(Pager& pager, PageId pageId);
+        PageId pageCount);
 
     [[nodiscard]] PageId pageId() const noexcept { return pageId_; }
     [[nodiscard]] PageId heapMetadataPageId() const noexcept;
     [[nodiscard]] PageId nextPageId() const noexcept;
     [[nodiscard]] PageId previousPageId() const noexcept;
-    void setNextPageId(PageId pageId);
-    void setPreviousPageId(PageId pageId);
-
     [[nodiscard]] std::uint16_t slotCount() const noexcept;
     [[nodiscard]] std::uint16_t liveCount() const noexcept;
     [[nodiscard]] bool empty() const noexcept { return liveCount() == 0; }
@@ -89,15 +82,11 @@ public:
     [[nodiscard]] std::size_t freeSpace() const noexcept;
     [[nodiscard]] bool canFit(std::size_t tupleSize) const noexcept;
     [[nodiscard]] bool isOccupied(SlotId slotId) const;
-
-    [[nodiscard]] SlotId insert(std::span<const std::byte> tuple);
     [[nodiscard]] TupleBytes get(SlotId slotId) const;
-    [[nodiscard]] bool tryUpdate(SlotId slotId, std::span<const std::byte> tuple);
-    void erase(SlotId slotId);
-    void compact();
+    [[nodiscard]] std::vector<std::pair<SlotId, TupleBytes>> liveTuples() const;
     void validate() const;
 
-private:
+protected:
     struct SlotEntry {
         std::uint16_t tupleOffset;
         std::uint16_t tupleLength;
@@ -105,16 +94,42 @@ private:
         std::uint16_t reserved;
     };
 
-    Pager& pager_;
+    std::span<const std::byte, database_format::PAGE_SIZE> bytes_;
     PageId pageId_;
-    Pager::Page& bytes_;
+    PageId pageCount_;
 
     [[nodiscard]] SlotEntry readSlot(SlotId slotId) const noexcept;
-    void writeSlot(SlotId slotId, const SlotEntry& slot) noexcept;
     void validateSlotId(SlotId slotId) const;
     void validateLink(PageId linkedPageId) const;
     static void validateTupleSize(std::size_t tupleSize);
-    [[nodiscard]] std::vector<std::pair<SlotId, TupleBytes>> snapshotLiveTuples() const;
+};
+
+class SlottedPageView final : public ConstSlottedPageView {
+public:
+    static void initialize(
+        std::span<std::byte, database_format::PAGE_SIZE> bytes,
+        PageId pageId,
+        PageId pageCount,
+        PageId heapMetadataPageId,
+        PageId nextPageId = INVALID_PAGE_ID,
+        PageId previousPageId = INVALID_PAGE_ID);
+
+    SlottedPageView(
+        std::span<std::byte, database_format::PAGE_SIZE> bytes,
+        PageId pageId,
+        PageId pageCount);
+
+    void setNextPageId(PageId pageId);
+    void setPreviousPageId(PageId pageId);
+    [[nodiscard]] SlotId insert(std::span<const std::byte> tuple);
+    [[nodiscard]] bool tryUpdate(SlotId slotId, std::span<const std::byte> tuple);
+    void erase(SlotId slotId);
+    void compact();
+
+private:
+    std::span<std::byte, database_format::PAGE_SIZE> mutableBytes_;
+
+    void writeSlot(SlotId slotId, const SlotEntry& slot) noexcept;
     void rewritePayload(const std::vector<std::pair<SlotId, TupleBytes>>& tuples);
 };
 

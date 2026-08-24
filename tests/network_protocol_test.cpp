@@ -58,7 +58,7 @@ void runServer(
     const std::string& databasePath,
     std::size_t connections,
     Work&& work) {
-    DatabaseServer server(databasePath, ServerConfig{"127.0.0.1", 0, 8});
+    DatabaseServer server(databasePath, ServerConfig{"127.0.0.1", 0, 8, 3, 2});
     server.start();
     std::exception_ptr serverError;
     std::thread serverThread([&] {

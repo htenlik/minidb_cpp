@@ -1,5 +1,7 @@
 #include "minidb/persistent_bplus_tree.hpp"
 
+#include "minidb/page_access.hpp"
+
 #include <algorithm>
 #include <functional>
 #include <limits>
@@ -13,28 +15,28 @@ namespace {
 
 constexpr std::size_t BITS_PER_BYTE = 8;
 
-void writeUint32(Pager::Page& output, std::size_t offset, std::uint32_t value) noexcept {
+void writeUint32(std::span<std::byte> output, std::size_t offset, std::uint32_t value) noexcept {
     for (std::size_t index = 0; index < 4; ++index) {
         output[offset + index] =
             static_cast<std::byte>((value >> (index * BITS_PER_BYTE)) & 0xFFU);
     }
 }
 
-void writeUint16(Pager::Page& output, std::size_t offset, std::uint16_t value) noexcept {
+void writeUint16(std::span<std::byte> output, std::size_t offset, std::uint16_t value) noexcept {
     for (std::size_t index = 0; index < 2; ++index) {
         output[offset + index] =
             static_cast<std::byte>((value >> (index * BITS_PER_BYTE)) & 0xFFU);
     }
 }
 
-void writeUint64(Pager::Page& output, std::size_t offset, std::uint64_t value) noexcept {
+void writeUint64(std::span<std::byte> output, std::size_t offset, std::uint64_t value) noexcept {
     for (std::size_t index = 0; index < 8; ++index) {
         output[offset + index] =
             static_cast<std::byte>((value >> (index * BITS_PER_BYTE)) & 0xFFU);
     }
 }
 
-std::uint32_t readUint32(const Pager::Page& input, std::size_t offset) noexcept {
+std::uint32_t readUint32(std::span<const std::byte> input, std::size_t offset) noexcept {
     std::uint32_t value = 0;
     for (std::size_t index = 0; index < 4; ++index) {
         value |= std::to_integer<std::uint32_t>(input[offset + index])
@@ -43,7 +45,7 @@ std::uint32_t readUint32(const Pager::Page& input, std::size_t offset) noexcept 
     return value;
 }
 
-std::uint16_t readUint16(const Pager::Page& input, std::size_t offset) noexcept {
+std::uint16_t readUint16(std::span<const std::byte> input, std::size_t offset) noexcept {
     std::uint16_t value = 0;
     for (std::size_t index = 0; index < 2; ++index) {
         value |= static_cast<std::uint16_t>(
@@ -53,7 +55,7 @@ std::uint16_t readUint16(const Pager::Page& input, std::size_t offset) noexcept 
     return value;
 }
 
-std::uint64_t readUint64(const Pager::Page& input, std::size_t offset) noexcept {
+std::uint64_t readUint64(std::span<const std::byte> input, std::size_t offset) noexcept {
     std::uint64_t value = 0;
     for (std::size_t index = 0; index < 8; ++index) {
         value |= std::to_integer<std::uint64_t>(input[offset + index])
@@ -106,13 +108,14 @@ struct PersistentBPlusTree::SplitResult {
 };
 
 PersistentBPlusTree PersistentBPlusTree::create(
-    Pager& pager,
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager,
+    PageAllocator& allocator,
     std::uint32_t leafMaxKeys,
     std::uint32_t internalMaxKeys) {
     validateLogicalCapacities(leafMaxKeys, internalMaxKeys);
-    PageAllocator allocator(pager);
     const auto metadataPageId = allocator.allocatePage();
-    PersistentBPlusTree tree(pager, metadataPageId);
+    PersistentBPlusTree tree(bufferPool, diskManager, allocator, metadataPageId);
     tree.writeMetadata(Metadata{
         INVALID_PAGE_ID,
         0,
@@ -122,8 +125,12 @@ PersistentBPlusTree PersistentBPlusTree::create(
     return tree;
 }
 
-PersistentBPlusTree PersistentBPlusTree::open(Pager& pager, PageId metadataPageId) {
-    PersistentBPlusTree tree(pager, metadataPageId);
+PersistentBPlusTree PersistentBPlusTree::open(
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager,
+    PageAllocator& allocator,
+    PageId metadataPageId) {
+    PersistentBPlusTree tree(bufferPool, diskManager, allocator, metadataPageId);
     const auto metadata = tree.readMetadata();
     if (metadata.rootPageId != INVALID_PAGE_ID) {
         if (tree.isLeafPage(metadata.rootPageId)) {
@@ -179,14 +186,16 @@ std::size_t PersistentBPlusTree::height() const {
 void PersistentBPlusTree::validateMetadataPageId() const {
     if (metadataPageId_ == database_format::METADATA_PAGE_ID
         || metadataPageId_ == INVALID_PAGE_ID
-        || metadataPageId_ >= pager_.pageCount()) {
+        || metadataPageId_ >= diskManager_.pageCount()) {
         throw std::out_of_range("Persistent B+ tree metadata page ID does not exist.");
     }
 }
 
 PersistentBPlusTree::Metadata PersistentBPlusTree::readMetadata() const {
     validateMetadataPageId();
-    const auto& page = pager_.getPage(metadataPageId_);
+    const auto guard = requireReadPage(
+        bufferPool_, metadataPageId_, "read persistent B+ tree metadata");
+    const auto page = guard.data();
     using namespace persistent_index_metadata_layout;
 
     if (!std::equal(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET)) {
@@ -227,7 +236,7 @@ PersistentBPlusTree::Metadata PersistentBPlusTree::readMetadata() const {
     } else {
         if (metadata.rootPageId == database_format::METADATA_PAGE_ID
             || metadata.rootPageId == metadataPageId_
-            || metadata.rootPageId >= pager_.pageCount()) {
+            || metadata.rootPageId >= diskManager_.pageCount()) {
             throw std::runtime_error("Persistent B+ tree metadata has an invalid root page ID.");
         }
         if (metadata.entryCount == 0) {
@@ -240,10 +249,12 @@ PersistentBPlusTree::Metadata PersistentBPlusTree::readMetadata() const {
 void PersistentBPlusTree::writeMetadata(const Metadata& metadata) {
     validateLogicalCapacities(metadata.leafMaxKeys, metadata.internalMaxKeys);
     validateMetadataPageId();
-    auto& page = pager_.getPage(metadataPageId_);
+    auto guard = requireWritePage(
+        bufferPool_, metadataPageId_, "write persistent B+ tree metadata");
+    auto page = guard.data();
     using namespace persistent_index_metadata_layout;
 
-    page.fill(std::byte{0});
+    std::fill(page.begin(), page.end(), std::byte{0});
     std::copy(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET);
     writeUint32(page, LAYOUT_VERSION_OFFSET, CURRENT_VERSION);
     writeUint32(page, HEADER_SIZE_OFFSET, static_cast<std::uint32_t>(HEADER_SIZE));
@@ -251,17 +262,17 @@ void PersistentBPlusTree::writeMetadata(const Metadata& metadata) {
     writeUint64(page, ENTRY_COUNT_OFFSET, metadata.entryCount);
     writeUint32(page, LEAF_MAX_KEYS_OFFSET, metadata.leafMaxKeys);
     writeUint32(page, INTERNAL_MAX_KEYS_OFFSET, metadata.internalMaxKeys);
-    pager_.markDirty(metadataPageId_);
 }
 
 bool PersistentBPlusTree::isLeafPage(PageId pageId) const {
     if (pageId == database_format::METADATA_PAGE_ID
         || pageId == INVALID_PAGE_ID
         || pageId == metadataPageId_
-        || pageId >= pager_.pageCount()) {
+        || pageId >= diskManager_.pageCount()) {
         throw std::runtime_error("Persistent B+ tree references an invalid node page ID.");
     }
-    const auto& page = pager_.getPage(pageId);
+    const auto guard = requireReadPage(bufferPool_, pageId, "read B+ tree node type");
+    const auto page = guard.data();
     if (std::equal(
             persistent_bplus_leaf_layout::MAGIC.begin(),
             persistent_bplus_leaf_layout::MAGIC.end(),
@@ -283,7 +294,8 @@ PersistentBPlusTree::LeafNode PersistentBPlusTree::readLeaf(
     if (!isLeafPage(pageId)) {
         throw std::runtime_error("Expected a persistent B+ tree leaf page.");
     }
-    const auto& page = pager_.getPage(pageId);
+    const auto guard = requireReadPage(bufferPool_, pageId, "read B+ tree leaf");
+    const auto page = guard.data();
     using namespace persistent_bplus_leaf_layout;
 
     const auto version = readUint32(page, LAYOUT_VERSION_OFFSET);
@@ -309,7 +321,7 @@ PersistentBPlusTree::LeafNode PersistentBPlusTree::readLeaf(
         if (link == database_format::METADATA_PAGE_ID
             || link == metadataPageId_
             || link == pageId
-            || link >= pager_.pageCount()) {
+            || link >= diskManager_.pageCount()) {
             throw std::runtime_error("Persistent B+ tree leaf has an invalid sibling page ID.");
         }
     };
@@ -353,9 +365,10 @@ void PersistentBPlusTree::writeLeaf(PageId pageId, const LeafNode& leaf) {
         || leaf.entries.size() > persistent_bplus_leaf_layout::PHYSICAL_CAPACITY) {
         throw std::logic_error("Cannot serialize a persistent B+ tree leaf with invalid size.");
     }
-    auto& page = pager_.getPage(pageId);
+    auto guard = requireWritePage(bufferPool_, pageId, "write B+ tree leaf");
+    auto page = guard.data();
     using namespace persistent_bplus_leaf_layout;
-    page.fill(std::byte{0});
+    std::fill(page.begin(), page.end(), std::byte{0});
     std::copy(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET);
     writeUint32(page, LAYOUT_VERSION_OFFSET, CURRENT_VERSION);
     writeUint32(page, HEADER_SIZE_OFFSET, static_cast<std::uint32_t>(HEADER_SIZE));
@@ -372,7 +385,6 @@ void PersistentBPlusTree::writeLeaf(PageId pageId, const LeafNode& leaf) {
             offset + KEY_SIZE + RECORD_PAGE_ID_SIZE,
             leaf.entries[index].recordId.slotId);
     }
-    pager_.markDirty(pageId);
 }
 
 PersistentBPlusTree::InternalNode PersistentBPlusTree::readInternal(
@@ -381,7 +393,8 @@ PersistentBPlusTree::InternalNode PersistentBPlusTree::readInternal(
     if (isLeafPage(pageId)) {
         throw std::runtime_error("Expected a persistent B+ tree internal page.");
     }
-    const auto& page = pager_.getPage(pageId);
+    const auto guard = requireReadPage(bufferPool_, pageId, "read B+ tree internal node");
+    const auto page = guard.data();
     using namespace persistent_bplus_internal_layout;
 
     const auto version = readUint32(page, LAYOUT_VERSION_OFFSET);
@@ -416,7 +429,7 @@ PersistentBPlusTree::InternalNode PersistentBPlusTree::readInternal(
             || childPageId == INVALID_PAGE_ID
             || childPageId == metadataPageId_
             || childPageId == pageId
-            || childPageId >= pager_.pageCount()) {
+            || childPageId >= diskManager_.pageCount()) {
             throw std::runtime_error("Persistent B+ tree internal page has an invalid child ID.");
         }
         internalNode.children.push_back(childPageId);
@@ -448,9 +461,10 @@ void PersistentBPlusTree::writeInternal(
         || internalNode.children.size() != internalNode.keys.size() + 1) {
         throw std::logic_error("Cannot serialize an invalid persistent B+ tree internal node.");
     }
-    auto& page = pager_.getPage(pageId);
+    auto guard = requireWritePage(bufferPool_, pageId, "write B+ tree internal node");
+    auto page = guard.data();
     using namespace persistent_bplus_internal_layout;
-    page.fill(std::byte{0});
+    std::fill(page.begin(), page.end(), std::byte{0});
     std::copy(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET);
     writeUint32(page, LAYOUT_VERSION_OFFSET, CURRENT_VERSION);
     writeUint32(page, HEADER_SIZE_OFFSET, static_cast<std::uint32_t>(HEADER_SIZE));
@@ -465,7 +479,6 @@ void PersistentBPlusTree::writeInternal(
             writeUint32(page, keyOffset(index), internalNode.keys[index]);
         }
     }
-    pager_.markDirty(pageId);
 }
 
 PageId PersistentBPlusTree::findLeafPage(

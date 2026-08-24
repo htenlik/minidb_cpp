@@ -41,8 +41,14 @@ static_assert(HEADER_SIZE == 64);
 
 class Catalog {
 public:
-    [[nodiscard]] static Catalog openOrCreate(Pager& pager);
-    [[nodiscard]] static Catalog open(Pager& pager);
+    [[nodiscard]] static Catalog openOrCreate(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator);
+    [[nodiscard]] static Catalog open(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator);
 
     Catalog(const Catalog&) = delete;
     Catalog& operator=(const Catalog&) = delete;
@@ -69,18 +75,33 @@ private:
         std::uint64_t tableCount;
     };
 
-    Pager& pager_;
+    BufferPoolManager& bufferPool_;
+    DiskManager& diskManager_;
+    PageAllocator& allocator_;
     PageId metadataPageId_;
     TupleStore entries_;
 
-    Catalog(Pager& pager, PageId metadataPageId, TupleStore entries)
-        : pager_(pager), metadataPageId_(metadataPageId), entries_(std::move(entries)) {}
+    Catalog(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
+        PageId metadataPageId,
+        TupleStore entries)
+        : bufferPool_(bufferPool),
+          diskManager_(diskManager),
+          allocator_(allocator),
+          metadataPageId_(metadataPageId),
+          entries_(std::move(entries)) {}
 
     [[nodiscard]] Metadata readMetadata() const;
     void writeMetadata(const Metadata& metadata);
-    [[nodiscard]] static Metadata readMetadataPage(Pager& pager, PageId metadataPageId);
+    [[nodiscard]] static Metadata readMetadataPage(
+        BufferPoolManager& bufferPool,
+        const DiskManager& diskManager,
+        PageId metadataPageId);
     static void writeMetadataPage(
-        Pager& pager,
+        BufferPoolManager& bufferPool,
+        const DiskManager& diskManager,
         PageId metadataPageId,
         const Metadata& metadata);
 };

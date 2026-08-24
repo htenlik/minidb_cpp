@@ -19,8 +19,19 @@ std::uint16_t parsePort(std::string_view text) {
     return static_cast<std::uint16_t>(value);
 }
 
+std::size_t parsePositiveSize(std::string_view text, const char* option) {
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() || value == 0) {
+        throw std::invalid_argument(std::string("invalid ") + option + " value");
+    }
+    return value;
+}
+
 void usage() {
-    std::cerr << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT]\n";
+    std::cerr
+        << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
+           "[--buffer-frames N] [--lru-k N]\n";
 }
 
 } // namespace
@@ -39,6 +50,10 @@ int main(int argc, char** argv) {
                 config.host = argv[++index];
             } else if (argument == "--port" && index + 1 < argc) {
                 config.port = parsePort(argv[++index]);
+            } else if (argument == "--buffer-frames" && index + 1 < argc) {
+                config.bufferFrames = parsePositiveSize(argv[++index], "--buffer-frames");
+            } else if (argument == "--lru-k" && index + 1 < argc) {
+                config.lruK = parsePositiveSize(argv[++index], "--lru-k");
             } else {
                 usage();
                 return 2;

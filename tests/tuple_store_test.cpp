@@ -1,4 +1,5 @@
 #include "minidb/persistent_bplus_tree.hpp"
+#include "minidb/page_access.hpp"
 #include "minidb/tuple_store.hpp"
 #include "test_utils.hpp"
 
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -21,7 +23,7 @@ minidb::TupleBytes makeTuple(std::size_t size, std::uint8_t seed) {
     return tuple;
 }
 
-std::uint32_t readUint32(const minidb::Pager::Page& page, std::size_t offset) {
+std::uint32_t readUint32(std::span<const std::byte> page, std::size_t offset) {
     std::uint32_t value = 0;
     for (std::size_t index = 0; index < 4; ++index) {
         value |= std::to_integer<std::uint32_t>(page[offset + index]) << (index * 8U);
@@ -29,7 +31,7 @@ std::uint32_t readUint32(const minidb::Pager::Page& page, std::size_t offset) {
     return value;
 }
 
-std::uint64_t readUint64(const minidb::Pager::Page& page, std::size_t offset) {
+std::uint64_t readUint64(std::span<const std::byte> page, std::size_t offset) {
     std::uint64_t value = 0;
     for (std::size_t index = 0; index < 8; ++index) {
         value |= std::to_integer<std::uint64_t>(page[offset + index]) << (index * 8U);
@@ -37,13 +39,13 @@ std::uint64_t readUint64(const minidb::Pager::Page& page, std::size_t offset) {
     return value;
 }
 
-void writeUint32(minidb::Pager::Page& page, std::size_t offset, std::uint32_t value) {
+void writeUint32(std::span<std::byte> page, std::size_t offset, std::uint32_t value) {
     for (std::size_t index = 0; index < 4; ++index) {
         page[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
     }
 }
 
-void writeUint64(minidb::Pager::Page& page, std::size_t offset, std::uint64_t value) {
+void writeUint64(std::span<std::byte> page, std::size_t offset, std::uint64_t value) {
     for (std::size_t index = 0; index < 8; ++index) {
         page[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
     }
@@ -56,17 +58,22 @@ void testEmptyHeapMetadataLayoutAndFirstInsert() {
     static_assert(minidb::tuple_heap_metadata_layout::TUPLE_COUNT_OFFSET == 24);
 
     minidb::test::TemporaryDatabase database("tuple_store_empty_layout");
-    minidb::Pager pager(database.path().string());
-    auto store = minidb::TupleStore::create(pager);
+    minidb::test::TestStorage storage(database.path(), 2, 2);
+    auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
     const auto metadataPageId = store.metadataPageId();
-    const auto& metadata = pager.getPage(metadataPageId);
+    minidb::DiskManager::Page metadata{};
+    {
+        const auto guard = minidb::requireReadPage(
+            storage.bufferPool, metadataPageId, "inspect tuple metadata layout");
+        std::copy(guard.data().begin(), guard.data().end(), metadata.begin());
+    }
     minidb::test::require(metadataPageId == 1, "Heap metadata was not first allocatable page");
     minidb::test::require(store.empty() && store.size() == 0,
                           "New tuple heap was not empty");
     minidb::test::require(store.firstPageId() == minidb::INVALID_PAGE_ID
                               && store.lastPageId() == minidb::INVALID_PAGE_ID,
                           "Empty tuple heap allocated a data page");
-    minidb::test::require(pager.pageCount() == 2,
+    minidb::test::require(storage.diskManager.pageCount() == 2,
                           "Empty tuple heap allocated more than its metadata page");
     minidb::test::require(
         std::equal(
@@ -100,8 +107,8 @@ void testEmptyHeapMetadataLayoutAndFirstInsert() {
 
 void testFirstFitUpdateDeleteScanAndSlotReuse() {
     minidb::test::TemporaryDatabase database("tuple_store_first_fit");
-    minidb::Pager pager(database.path().string());
-    auto store = minidb::TupleStore::create(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
     const auto first = makeTuple(2000, 1);
     const auto second = makeTuple(1500, 2);
     const auto third = makeTuple(1000, 3);
@@ -138,25 +145,25 @@ void testFirstFitUpdateDeleteScanAndSlotReuse() {
 
 void testNoCrossPageUpdateRelocation() {
     minidb::test::TemporaryDatabase database("tuple_store_no_relocation");
-    minidb::Pager pager(database.path().string());
-    auto store = minidb::TupleStore::create(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
     const auto original = makeTuple(100, 1);
     const auto rid = store.insert(original);
     static_cast<void>(store.insert(makeTuple(3800, 2)));
-    const auto pageCount = pager.pageCount();
+    const auto pageCount = storage.diskManager.pageCount();
     minidb::test::require(!store.tryUpdate(rid, makeTuple(300, 3)),
                           "TupleStore relocated an update that could not fit in-page");
     minidb::test::require(store.get(rid) == original,
                           "Failed TupleStore update changed the original tuple");
-    minidb::test::require(pager.pageCount() == pageCount,
+    minidb::test::require(storage.diskManager.pageCount() == pageCount,
                           "Failed TupleStore update allocated another page");
     store.validate();
 }
 
 void testEmptyPageReclamationAndEndpointRepair() {
     minidb::test::TemporaryDatabase database("tuple_store_reclaim");
-    minidb::Pager pager(database.path().string());
-    auto store = minidb::TupleStore::create(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
     const auto tuple = makeTuple(minidb::slotted_page_layout::MAX_TUPLE_SIZE, 1);
     const auto first = store.insert(tuple);
     const auto middle = store.insert(tuple);
@@ -165,16 +172,28 @@ void testEmptyPageReclamationAndEndpointRepair() {
                           "Reclamation fixture did not create three pages");
 
     store.erase(middle);
-    minidb::PageAllocator allocator(pager);
+    auto& allocator = storage.allocator;
     const auto freeAfterMiddle = allocator.freePageIds();
     minidb::test::require(
         std::find(freeAfterMiddle.begin(), freeAfterMiddle.end(), middle.pageId)
             != freeAfterMiddle.end(),
         "Empty middle tuple page was not reclaimed");
-    minidb::SlottedPage firstPage(pager, first.pageId);
-    minidb::SlottedPage lastPage(pager, last.pageId);
-    minidb::test::require(firstPage.nextPageId() == last.pageId
-                              && lastPage.previousPageId() == first.pageId,
+    minidb::PageId firstNext;
+    minidb::PageId lastPrevious;
+    {
+        const auto guard = minidb::requireReadPage(
+            storage.bufferPool, first.pageId, "inspect first tuple page link");
+        firstNext = minidb::ConstSlottedPageView(
+            guard.data(), first.pageId, storage.diskManager.pageCount()).nextPageId();
+    }
+    {
+        const auto guard = minidb::requireReadPage(
+            storage.bufferPool, last.pageId, "inspect last tuple page link");
+        lastPrevious = minidb::ConstSlottedPageView(
+            guard.data(), last.pageId, storage.diskManager.pageCount()).previousPageId();
+    }
+    minidb::test::require(firstNext == last.pageId
+                              && lastPrevious == first.pageId,
                           "Middle-page reclamation did not repair both links");
 
     store.erase(first);
@@ -204,29 +223,29 @@ void testReopenPersistenceAndRepeatedMutation() {
     auto firstTuple = makeTuple(53, 1);
     auto secondTuple = makeTuple(1700, 2);
     {
-        minidb::Pager pager(database.path().string());
-        auto store = minidb::TupleStore::create(pager);
+        minidb::test::TestStorage storage(database.path());
+        auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
         metadataPageId = store.metadataPageId();
         first = store.insert(firstTuple);
         second = store.insert(secondTuple);
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        minidb::PageAllocator allocator(pager);
+        minidb::test::TestStorage storage(database.path());
+        auto& allocator = storage.allocator;
         allocator.validate();
-        auto store = minidb::TupleStore::open(pager, metadataPageId);
+        auto store = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId);
         minidb::test::require(store.get(first) == firstTuple && store.get(second) == secondTuple,
                               "Tuple bytes or RIDs did not persist across reopen");
         firstTuple = makeTuple(400, 3);
         minidb::test::require(store.tryUpdate(first, firstTuple),
                               "Update after reopen failed");
         store.erase(second);
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto store = minidb::TupleStore::open(pager, metadataPageId);
+        minidb::test::TestStorage storage(database.path());
+        auto store = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, metadataPageId);
         minidb::test::require(store.size() == 1 && store.get(first) == firstTuple,
                               "Reopened update/delete state was incorrect");
         minidb::test::requireThrows<std::runtime_error>(
@@ -238,9 +257,9 @@ void testReopenPersistenceAndRepeatedMutation() {
 
 void testHeapOwnershipAndInvalidRids() {
     minidb::test::TemporaryDatabase database("tuple_store_ownership");
-    minidb::Pager pager(database.path().string());
-    auto first = minidb::TupleStore::create(pager);
-    auto second = minidb::TupleStore::create(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto first = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
+    auto second = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
     const auto firstRid = first.insert(makeTuple(10, 1));
     const auto secondRid = second.insert(makeTuple(10, 2));
     minidb::test::requireThrows<std::out_of_range>(
@@ -258,11 +277,11 @@ void testHeapOwnershipAndInvalidRids() {
 
 void testCrossComponentPageReuse() {
     minidb::test::TemporaryDatabase database("tuple_store_cross_reuse");
-    minidb::Pager pager(database.path().string());
-    auto heap = minidb::TupleStore::create(pager);
-    minidb::PageAllocator allocator(pager);
+    minidb::test::TestStorage storage(database.path(), 2, 2);
+    auto heap = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
+    auto& allocator = storage.allocator;
     const auto recordPageId = allocator.allocatePage();
-    auto tree = minidb::PersistentBPlusTree::create(pager, 3, 3);
+    auto tree = minidb::PersistentBPlusTree::create(storage.bufferPool, storage.diskManager, storage.allocator, 3, 3);
     const minidb::RecordId indexedRid{recordPageId, 1};
     static_cast<void>(tree.insert(7, indexedRid));
     const auto formerLeafPageId = tree.rootPageId();
@@ -282,16 +301,19 @@ void testCrossComponentPageReuse() {
 template <typename Mutator>
 void requireMetadataCorruption(std::string_view name, Mutator&& mutate, bool insert = false) {
     minidb::test::TemporaryDatabase database(name);
-    minidb::Pager pager(database.path().string());
-    auto store = minidb::TupleStore::create(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
     if (insert) {
         static_cast<void>(store.insert(makeTuple(20, 1)));
     }
-    auto& metadata = pager.getPage(store.metadataPageId());
-    mutate(pager, store, metadata);
-    pager.markDirty(store.metadataPageId());
+    {
+        auto guard = minidb::requireWritePage(
+            storage.bufferPool, store.metadataPageId(), "corrupt tuple metadata");
+        auto bytes = guard.data();
+        mutate(storage, store, bytes);
+    }
     minidb::test::requireThrows<std::runtime_error>(
-        [&] { static_cast<void>(minidb::TupleStore::open(pager, store.metadataPageId())); },
+        [&] { static_cast<void>(minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, store.metadataPageId())); },
         "TupleStore accepted corrupt heap metadata");
 }
 
@@ -305,15 +327,15 @@ void testMetadataAndChainCorruption() {
             minidb::tuple_heap_metadata_layout::LAYOUT_VERSION_OFFSET,
             minidb::tuple_heap_metadata_layout::CURRENT_VERSION + 1);
     });
-    requireMetadataCorruption("tuple_heap_dangling_first", [](auto& pager, auto&, auto& metadata) {
+    requireMetadataCorruption("tuple_heap_dangling_first", [](auto& storage, auto&, auto metadata) {
         writeUint32(
             metadata,
             minidb::tuple_heap_metadata_layout::FIRST_PAGE_ID_OFFSET,
-            pager.pageCount() + 5);
+            storage.diskManager.pageCount() + 5);
         writeUint32(
             metadata,
             minidb::tuple_heap_metadata_layout::LAST_PAGE_ID_OFFSET,
-            pager.pageCount() + 5);
+            storage.diskManager.pageCount() + 5);
         writeUint64(metadata, minidb::tuple_heap_metadata_layout::TUPLE_COUNT_OFFSET, 1);
     });
     requireMetadataCorruption("tuple_heap_count_mismatch", [](auto&, auto& store, auto& metadata) {
@@ -326,16 +348,18 @@ void testMetadataAndChainCorruption() {
     for (const bool corruptNext : {true, false}) {
         minidb::test::TemporaryDatabase database(
             corruptNext ? "tuple_heap_dangling_next" : "tuple_heap_dangling_previous");
-        minidb::Pager pager(database.path().string());
-        auto store = minidb::TupleStore::create(pager);
+        minidb::test::TestStorage storage(database.path());
+        auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
         const auto rid = store.insert(makeTuple(20, 1));
-        auto& page = pager.getPage(rid.pageId);
-        writeUint32(
-            page,
-            corruptNext ? minidb::slotted_page_layout::NEXT_PAGE_ID_OFFSET
-                        : minidb::slotted_page_layout::PREVIOUS_PAGE_ID_OFFSET,
-            pager.pageCount() + 10);
-        pager.markDirty(rid.pageId);
+        {
+            auto guard = minidb::requireWritePage(
+                storage.bufferPool, rid.pageId, "corrupt tuple page link");
+            writeUint32(
+                guard.data(),
+                corruptNext ? minidb::slotted_page_layout::NEXT_PAGE_ID_OFFSET
+                            : minidb::slotted_page_layout::PREVIOUS_PAGE_ID_OFFSET,
+                storage.diskManager.pageCount() + 10);
+        }
         minidb::test::requireThrows<std::runtime_error>(
             [&] { store.validate(); },
             "TupleStore accepted a dangling heap-page link");
@@ -343,13 +367,18 @@ void testMetadataAndChainCorruption() {
 
     {
         minidb::test::TemporaryDatabase database("tuple_heap_inconsistent_links");
-        minidb::Pager pager(database.path().string());
-        auto store = minidb::TupleStore::create(pager);
+        minidb::test::TestStorage storage(database.path());
+        auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
         const auto tuple = makeTuple(minidb::slotted_page_layout::MAX_TUPLE_SIZE, 1);
         const auto first = store.insert(tuple);
         const auto second = store.insert(tuple);
-        minidb::SlottedPage secondPage(pager, second.pageId);
-        secondPage.setPreviousPageId(minidb::INVALID_PAGE_ID);
+        {
+            auto guard = minidb::requireWritePage(
+                storage.bufferPool, second.pageId, "corrupt tuple backward link");
+            minidb::SlottedPageView secondPage(
+                guard.data(), second.pageId, storage.diskManager.pageCount());
+            secondPage.setPreviousPageId(minidb::INVALID_PAGE_ID);
+        }
         minidb::test::requireThrows<std::runtime_error>(
             [&] { store.validate(); },
             "TupleStore accepted inconsistent backward links");
@@ -357,16 +386,26 @@ void testMetadataAndChainCorruption() {
     }
     {
         minidb::test::TemporaryDatabase database("tuple_heap_cycle");
-        minidb::Pager pager(database.path().string());
-        auto store = minidb::TupleStore::create(pager);
+        minidb::test::TestStorage storage(database.path());
+        auto store = minidb::TupleStore::create(storage.bufferPool, storage.diskManager, storage.allocator);
         const auto tuple = makeTuple(minidb::slotted_page_layout::MAX_TUPLE_SIZE, 1);
         const auto first = store.insert(tuple);
         static_cast<void>(store.insert(tuple));
         const auto third = store.insert(tuple);
-        minidb::SlottedPage firstPage(pager, first.pageId);
-        minidb::SlottedPage thirdPage(pager, third.pageId);
-        thirdPage.setNextPageId(first.pageId);
-        firstPage.setPreviousPageId(third.pageId);
+        {
+            auto guard = minidb::requireWritePage(
+                storage.bufferPool, third.pageId, "corrupt tuple forward cycle");
+            minidb::SlottedPageView thirdPage(
+                guard.data(), third.pageId, storage.diskManager.pageCount());
+            thirdPage.setNextPageId(first.pageId);
+        }
+        {
+            auto guard = minidb::requireWritePage(
+                storage.bufferPool, first.pageId, "corrupt tuple backward cycle");
+            minidb::SlottedPageView firstPage(
+                guard.data(), first.pageId, storage.diskManager.pageCount());
+            firstPage.setPreviousPageId(third.pageId);
+        }
         minidb::test::requireThrows<std::runtime_error>(
             [&] { store.validate(); },
             "TupleStore accepted a cyclic page chain");

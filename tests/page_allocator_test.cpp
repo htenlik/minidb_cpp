@@ -1,4 +1,8 @@
 #include "minidb/page_allocator.hpp"
+#include "minidb/page_access.hpp"
+#include "minidb/storage_error.hpp"
+
+#include "test_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -39,15 +43,15 @@ void require(bool condition, std::string_view message) {
 }
 
 void writeUint32(
-    minidb::Pager& pager,
+    minidb::BufferPoolManager& bufferPool,
     minidb::PageId pageId,
     std::size_t offset,
     std::uint32_t value) {
-    auto& page = pager.getPage(pageId);
+    auto guard = minidb::requireWritePage(bufferPool, pageId, "corrupt free page");
+    auto page = guard.data();
     for (std::size_t index = 0; index < 4; ++index) {
         page[offset + index] = static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
     }
-    pager.markDirty(pageId);
 }
 
 void writeFileUint32(
@@ -78,13 +82,13 @@ void requireThrows(Function&& function, std::string_view message) {
 
 void testAppendReleaseAndLifoReuse() {
     TemporaryDatabase database("reuse");
-    minidb::Pager pager(database.path().string());
-    minidb::PageAllocator allocator(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto& allocator = storage.allocator;
 
     const auto first = allocator.allocatePage();
     const auto second = allocator.allocatePage();
     require(first == 1 && second == 2, "Fresh allocation did not append normal data pages");
-    const auto pageCount = pager.pageCount();
+    const auto pageCount = storage.diskManager.pageCount();
 
     allocator.releasePage(first);
     allocator.releasePage(second);
@@ -92,7 +96,7 @@ void testAppendReleaseAndLifoReuse() {
             "Released pages were not linked in LIFO order");
     require(allocator.allocatePage() == second, "Allocator did not reuse the free-list head");
     require(allocator.allocatePage() == first, "Allocator did not reuse the remaining page");
-    require(pager.pageCount() == pageCount, "Reuse unexpectedly grew the database file");
+    require(storage.diskManager.pageCount() == pageCount, "Reuse unexpectedly grew the database file");
     require(allocator.freePageIds().empty(), "Free list was not empty after both pages were reused");
 }
 
@@ -101,18 +105,18 @@ void testFreeListPersistsAcrossReopen() {
     minidb::PageId first = minidb::INVALID_PAGE_ID;
     minidb::PageId second = minidb::INVALID_PAGE_ID;
     {
-        minidb::Pager pager(database.path().string());
-        minidb::PageAllocator allocator(pager);
+        minidb::test::TestStorage storage(database.path());
+        auto& allocator = storage.allocator;
         first = allocator.allocatePage();
         second = allocator.allocatePage();
         allocator.releasePage(first);
         allocator.releasePage(second);
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        minidb::PageAllocator allocator(pager);
-        require(pager.databaseHeader().freeListRootPageId == second,
+        minidb::test::TestStorage storage(database.path());
+        auto& allocator = storage.allocator;
+        require(storage.diskManager.databaseHeader().freeListRootPageId == second,
                 "Free-list root did not persist in database metadata");
         require(allocator.allocatePage() == second, "Reopened allocator did not pop persisted head");
         require(allocator.allocatePage() == first, "Reopened allocator lost persisted next link");
@@ -121,8 +125,8 @@ void testFreeListPersistsAcrossReopen() {
 
 void testInvalidReleaseAndDoubleFreeAreRejected() {
     TemporaryDatabase database("invalid_release");
-    minidb::Pager pager(database.path().string());
-    minidb::PageAllocator allocator(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto& allocator = storage.allocator;
     const auto pageId = allocator.allocatePage();
     allocator.releasePage(pageId);
 
@@ -136,24 +140,25 @@ void testInvalidReleaseAndDoubleFreeAreRejected() {
         [&] { allocator.releasePage(minidb::INVALID_PAGE_ID); },
         "Allocator accepted INVALID_PAGE_ID");
     requireThrows(
-        [&] { allocator.releasePage(pager.pageCount()); },
+        [&] { allocator.releasePage(storage.diskManager.pageCount()); },
         "Allocator accepted a nonexistent page");
 }
 
 void testReusedPageIsZeroed() {
     TemporaryDatabase database("zeroed");
-    minidb::Pager pager(database.path().string());
-    minidb::PageAllocator allocator(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto& allocator = storage.allocator;
     const auto pageId = allocator.allocatePage();
-    auto& page = pager.getPage(pageId);
-    page.fill(std::byte{0xA5});
-    pager.markDirty(pageId);
+    {
+        auto guard = minidb::requireWritePage(storage.bufferPool, pageId, "seed allocated page");
+        std::fill(guard.data().begin(), guard.data().end(), std::byte{0xA5});
+    }
 
     allocator.releasePage(pageId);
     require(allocator.allocatePage() == pageId, "Released page was not reused");
+    const auto guard = minidb::requireReadPage(storage.bufferPool, pageId, "read reused page");
     require(std::all_of(
-                pager.getPage(pageId).begin(),
-                pager.getPage(pageId).end(),
+                guard.data().begin(), guard.data().end(),
                 [](std::byte value) { return value == std::byte{0}; }),
             "Reused page retained its free-page or former payload bytes");
 }
@@ -161,11 +166,11 @@ void testReusedPageIsZeroed() {
 template <typename Mutator>
 void requireCorruptFreePageRejected(std::string_view name, Mutator&& mutate) {
     TemporaryDatabase database(name);
-    minidb::Pager pager(database.path().string());
-    minidb::PageAllocator allocator(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto& allocator = storage.allocator;
     const auto pageId = allocator.allocatePage();
     allocator.releasePage(pageId);
-    mutate(pager, pageId);
+    mutate(storage, pageId);
     requireThrows([&] { allocator.validate(); }, "Allocator accepted a corrupt free page");
 }
 
@@ -173,81 +178,141 @@ void testInvalidFreeListRootsAreRejected() {
     for (const auto root : {minidb::database_format::METADATA_PAGE_ID, minidb::PageId{99}}) {
         TemporaryDatabase database(root == 0 ? "root_zero" : "root_beyond_file");
         {
-            minidb::Pager pager(database.path().string());
-            static_cast<void>(pager.allocatePage());
-            pager.flushAll();
+            minidb::test::TestStorage storage(database.path());
+            static_cast<void>(storage.allocator.allocatePage());
+            storage.bufferPool.flushAll();
         }
         writeFileUint32(
             database.path(),
             minidb::database_format::FREE_LIST_ROOT_PAGE_ID_OFFSET,
             root);
-        minidb::Pager pager(database.path().string());
+        minidb::DiskManager diskManager(database.path().string());
+        minidb::BufferPoolManager bufferPool(diskManager, 8);
         requireThrows(
-            [&] { static_cast<void>(minidb::PageAllocator(pager)); },
+            [&] { static_cast<void>(minidb::PageAllocator(bufferPool, diskManager)); },
             "Allocator accepted an invalid persisted free-list root");
     }
 }
 
 void testFreePageCorruptionIsRejected() {
-    requireCorruptFreePageRejected("bad_magic", [](auto& pager, auto pageId) {
-        auto& page = pager.getPage(pageId);
+    requireCorruptFreePageRejected("bad_magic", [](auto& storage, auto pageId) {
+        auto guard = minidb::requireWritePage(storage.bufferPool, pageId, "corrupt magic");
+        auto page = guard.data();
         page[minidb::free_page_layout::MAGIC_OFFSET] = std::byte{'X'};
-        pager.markDirty(pageId);
     });
-    requireCorruptFreePageRejected("bad_version", [](auto& pager, auto pageId) {
+    requireCorruptFreePageRejected("bad_version", [](auto& storage, auto pageId) {
         writeUint32(
-            pager,
+            storage.bufferPool,
             pageId,
             minidb::free_page_layout::LAYOUT_VERSION_OFFSET,
             minidb::free_page_layout::CURRENT_VERSION + 1);
     });
-    requireCorruptFreePageRejected("bad_header", [](auto& pager, auto pageId) {
+    requireCorruptFreePageRejected("bad_header", [](auto& storage, auto pageId) {
         writeUint32(
-            pager,
+            storage.bufferPool,
             pageId,
             minidb::free_page_layout::HEADER_SIZE_OFFSET,
             minidb::free_page_layout::HEADER_SIZE + 1);
     });
-    requireCorruptFreePageRejected("next_zero", [](auto& pager, auto pageId) {
+    requireCorruptFreePageRejected("next_zero", [](auto& storage, auto pageId) {
         writeUint32(
-            pager,
+            storage.bufferPool,
             pageId,
             minidb::free_page_layout::NEXT_FREE_PAGE_ID_OFFSET,
             minidb::database_format::METADATA_PAGE_ID);
     });
-    requireCorruptFreePageRejected("next_beyond", [](auto& pager, auto pageId) {
+    requireCorruptFreePageRejected("next_beyond", [](auto& storage, auto pageId) {
         writeUint32(
-            pager,
+            storage.bufferPool,
             pageId,
             minidb::free_page_layout::NEXT_FREE_PAGE_ID_OFFSET,
-            pager.pageCount() + 10);
+            storage.diskManager.pageCount() + 10);
     });
-    requireCorruptFreePageRejected("self_loop", [](auto& pager, auto pageId) {
+    requireCorruptFreePageRejected("self_loop", [](auto& storage, auto pageId) {
         writeUint32(
-            pager,
+            storage.bufferPool,
             pageId,
             minidb::free_page_layout::NEXT_FREE_PAGE_ID_OFFSET,
             pageId);
     });
-    requireCorruptFreePageRejected("reserved_bytes", [](auto& pager, auto pageId) {
-        auto& page = pager.getPage(pageId);
+    requireCorruptFreePageRejected("reserved_bytes", [](auto& storage, auto pageId) {
+        auto guard = minidb::requireWritePage(storage.bufferPool, pageId, "corrupt reserved byte");
+        auto page = guard.data();
         page[minidb::free_page_layout::RESERVED_OFFSET] = std::byte{1};
-        pager.markDirty(pageId);
     });
 
     TemporaryDatabase database("two_page_cycle");
-    minidb::Pager pager(database.path().string());
-    minidb::PageAllocator allocator(pager);
+    minidb::test::TestStorage storage(database.path());
+    auto& allocator = storage.allocator;
     const auto first = allocator.allocatePage();
     const auto second = allocator.allocatePage();
     allocator.releasePage(first);
     allocator.releasePage(second);
     writeUint32(
-        pager,
+        storage.bufferPool,
         first,
         minidb::free_page_layout::NEXT_FREE_PAGE_ID_OFFSET,
         second);
     requireThrows([&] { allocator.validate(); }, "Allocator accepted a multi-page free-list cycle");
+}
+
+void testPinnedReleaseAndEvictedFreeList() {
+    TemporaryDatabase database("pinned_and_evicted");
+    minidb::test::TestStorage storage(database.path(), 2, 2);
+    std::vector<minidb::PageId> pages;
+    for (std::size_t index = 0; index < 24; ++index) {
+        pages.push_back(storage.allocator.allocatePage());
+    }
+
+    auto retained = minidb::requireWritePage(
+        storage.bufferPool, pages.front(), "retain page during release test");
+    requireThrows(
+        [&] { storage.allocator.releasePage(pages.front()); },
+        "Allocator released a page retained by another guard");
+    require(storage.diskManager.databaseHeader().freeListRootPageId == minidb::INVALID_PAGE_ID,
+            "Failed pinned release changed the free-list root");
+    retained.drop();
+
+    for (const auto pageId : pages) {
+        storage.allocator.releasePage(pageId);
+        storage.bufferPool.validate();
+    }
+    storage.bufferPool.flushAll();
+    minidb::test::requireBufferClean(storage);
+
+    const auto expected = std::vector<minidb::PageId>(pages.rbegin(), pages.rend());
+    require(storage.allocator.freePageIds() == expected,
+            "Tiny-pool free-list traversal lost LIFO order under eviction");
+    for (const auto expectedPageId : expected) {
+        require(storage.allocator.allocatePage() == expectedPageId,
+                "Tiny-pool free-list pop returned the wrong PageId");
+        storage.bufferPool.validate();
+    }
+    require(storage.allocator.freePageIds().empty(),
+            "Tiny-pool free list was not empty after every pop");
+    minidb::test::requireBufferClean(storage);
+}
+
+void testNoFrameAvailableIsReportedWithoutAllocating() {
+    TemporaryDatabase database("no_frame_available");
+    minidb::test::TestStorage storage(database.path(), 1, 2);
+    const auto pageId = storage.allocator.allocatePage();
+    const auto pageCount = storage.diskManager.pageCount();
+    auto retained = minidb::requireReadPage(
+        storage.bufferPool, pageId, "retain sole frame");
+    try {
+        static_cast<void>(storage.allocator.allocatePage());
+        throw std::runtime_error("Allocator accepted allocation with no evictable frame");
+    } catch (const minidb::StorageError& error) {
+        require(
+            error.kind() == minidb::StorageErrorKind::NoFrameAvailable,
+            "Allocator reported the wrong storage error for frame exhaustion");
+    }
+    require(
+        storage.diskManager.pageCount() == pageCount,
+        "Failed buffered allocation appended an unreachable disk page");
+    retained.drop();
+    minidb::test::requireBufferClean(storage);
 }
 
 } // namespace
@@ -259,5 +324,7 @@ int main() {
     testReusedPageIsZeroed();
     testInvalidFreeListRootsAreRejected();
     testFreePageCorruptionIsRejected();
+    testPinnedReleaseAndEvictedFreeList();
+    testNoFrameAvailableIsReportedWithoutAllocating();
     return 0;
 }

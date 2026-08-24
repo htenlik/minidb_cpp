@@ -6,19 +6,27 @@
 
 namespace minidb {
 
-Table Table::open(Pager& pager, TableDefinition definition) {
+Table Table::open(
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager,
+    PageAllocator& allocator,
+    TableDefinition definition) {
     static_cast<void>(encodeTableDefinition(definition));
-    if (definition.heapMetadataPageId >= pager.pageCount()) {
+    if (definition.heapMetadataPageId >= diskManager.pageCount()) {
         throw std::out_of_range("Table heap metadata PageId does not exist.");
     }
-    auto heap = TupleStore::open(pager, definition.heapMetadataPageId);
+    auto heap = TupleStore::open(
+        bufferPool, diskManager, allocator, definition.heapMetadataPageId);
     std::optional<PersistentBPlusTree> index;
     if (definition.primaryIndexMetadataPageId != INVALID_PAGE_ID) {
-        if (definition.primaryIndexMetadataPageId >= pager.pageCount()) {
+        if (definition.primaryIndexMetadataPageId >= diskManager.pageCount()) {
             throw std::out_of_range("Table primary-index metadata PageId does not exist.");
         }
         index.emplace(PersistentBPlusTree::open(
-            pager, definition.primaryIndexMetadataPageId));
+            bufferPool,
+            diskManager,
+            allocator,
+            definition.primaryIndexMetadataPageId));
     }
     return Table(std::move(definition), std::move(heap), std::move(index));
 }

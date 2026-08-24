@@ -36,8 +36,8 @@ void testPrimaryTableInsertLookupEraseAndReopen() {
     minidb::RecordId firstRid{};
     minidb::TableId tableId = minidb::INVALID_TABLE_ID;
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.createTable("Users", userSchema(64));
         tableId = table.id();
         firstRid = table.insert(userRow(42, "alice"));
@@ -64,11 +64,11 @@ void testPrimaryTableInsertLookupEraseAndReopen() {
                               "Erased primary key remained visible");
         table.validate();
         catalog.validate();
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::open(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.openTable(tableId);
         minidb::test::require(table.findByPrimaryKey(42)->recordId == firstRid,
                               "Primary-key RID did not survive reopen");
@@ -82,8 +82,8 @@ void testPrimaryTableInsertLookupEraseAndReopen() {
 
 void testNoPrimaryKeyTableAndIsolation() {
     minidb::test::TemporaryDatabase database("table_no_pk");
-    minidb::Pager pager(database.path().string());
-    auto catalog = minidb::Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     const auto schema = minidb::Schema::create({
         {"text", minidb::DataType::VARCHAR, true, false, 32},
     });
@@ -112,8 +112,8 @@ void testInPageAndRelocatingUpdates() {
     minidb::PageId metadataPageId = minidb::INVALID_PAGE_ID;
     minidb::RecordId relocatedRid{};
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.createTable("users", userSchema());
         metadataPageId = table.definition().heapMetadataPageId;
         const auto originalRid = table.insert(userRow(1, "short"));
@@ -152,11 +152,11 @@ void testInPageAndRelocatingUpdates() {
             "Old RID remained live after relocating update");
         table.validate();
         catalog.validate();
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::open(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.openTable("users");
         minidb::test::require(table.definition().heapMetadataPageId == metadataPageId
                                   && table.findByPrimaryKey(4)->recordId == relocatedRid
@@ -170,12 +170,15 @@ void testInPageAndRelocatingUpdates() {
 void testTableIntegrityCorruptionDetection() {
     {
         minidb::test::TemporaryDatabase database("table_missing_index");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.createTable("users", userSchema(32));
         static_cast<void>(table.insert(userRow(7, "seven")));
         auto index = minidb::PersistentBPlusTree::open(
-            pager, table.definition().primaryIndexMetadataPageId);
+            storage.bufferPool,
+            storage.diskManager,
+            storage.allocator,
+            table.definition().primaryIndexMetadataPageId);
         minidb::test::require(index.erase(7), "Integrity fixture could not erase index key");
         minidb::test::requireThrows<std::runtime_error>(
             [&] { table.validate(); },
@@ -183,12 +186,15 @@ void testTableIntegrityCorruptionDetection() {
     }
     {
         minidb::test::TemporaryDatabase database("table_mismatched_index");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.createTable("users", userSchema(32));
         const auto rid = table.insert(userRow(8, "eight"));
         auto index = minidb::PersistentBPlusTree::open(
-            pager, table.definition().primaryIndexMetadataPageId);
+            storage.bufferPool,
+            storage.diskManager,
+            storage.allocator,
+            table.definition().primaryIndexMetadataPageId);
         minidb::test::require(index.erase(8) && index.insert(9, rid),
                               "Integrity fixture could not create mismatched index key");
         minidb::test::requireThrows<std::runtime_error>(
@@ -197,11 +203,11 @@ void testTableIntegrityCorruptionDetection() {
     }
     {
         minidb::test::TemporaryDatabase database("table_dangling_index");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         auto table = catalog.createTable("users", userSchema(32));
         const auto rid = table.insert(userRow(10, "ten"));
-        auto heap = minidb::TupleStore::open(pager, table.definition().heapMetadataPageId);
+        auto heap = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, table.definition().heapMetadataPageId);
         heap.erase(rid);
         minidb::test::requireThrows<std::runtime_error>(
             [&] { table.validate(); },

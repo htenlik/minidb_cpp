@@ -264,8 +264,8 @@ void runSeed(std::uint64_t seed) {
     Model model;
     for (std::size_t batchStart = 0; batchStart < OPERATIONS_PER_SEED;
          batchStart += REOPEN_CADENCE) {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         minidb::sql::SqlEngine engine(catalog);
         if (!catalog.findTable("accounts").has_value()) {
             static_cast<void>(engine.execute(
@@ -280,11 +280,13 @@ void runSeed(std::uint64_t seed) {
                     compareAll(engine, model);
                     auto table = catalog.openTable("accounts");
                     table.validate();
-                    minidb::PageAllocator allocator(pager);
+                    auto& allocator = storage.allocator;
                     allocator.validate();
+                    minidb::test::requireBufferClean(storage);
                 }
                 if (operation % 200U == 0) {
                     catalog.validate();
+                    minidb::test::requireBufferClean(storage);
                 }
             } catch (const std::exception& error) {
                 throw std::runtime_error(
@@ -295,14 +297,16 @@ void runSeed(std::uint64_t seed) {
         }
         compareAll(engine, model);
         catalog.validate();
-        pager.flushAll();
+        minidb::test::requireBufferClean(storage);
+        storage.bufferPool.flushAll();
     }
 
-    minidb::Pager pager(database.path().string());
-    auto catalog = minidb::Catalog::open(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = minidb::Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator);
     minidb::sql::SqlEngine engine(catalog);
     compareAll(engine, model);
     catalog.validate();
+    minidb::test::requireBufferClean(storage);
 }
 
 } // namespace

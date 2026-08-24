@@ -1,7 +1,12 @@
 #pragma once
 
 #include "minidb/row.hpp"
+#include "minidb/buffer_pool_manager.hpp"
+#include "minidb/disk_manager.hpp"
+#include "minidb/page_allocator.hpp"
+#include "minidb/page_access.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -33,6 +38,43 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+class TestStorage {
+public:
+    explicit TestStorage(
+        const std::filesystem::path& path,
+        std::size_t bufferFrames = 128,
+        std::size_t lruK = 2)
+        : diskManager(path.string()),
+          bufferPool(diskManager, bufferFrames, lruK),
+          allocator(bufferPool, diskManager) {}
+
+    DiskManager diskManager;
+    BufferPoolManager bufferPool;
+    PageAllocator allocator;
+};
+
+inline DiskManager::Page readPageCopy(TestStorage& storage, PageId pageId) {
+    const auto guard = requireReadPage(storage.bufferPool, pageId, "copy test page");
+    DiskManager::Page result{};
+    std::copy(guard.data().begin(), guard.data().end(), result.begin());
+    return result;
+}
+
+template <typename Function>
+void mutatePage(TestStorage& storage, PageId pageId, Function&& function) {
+    auto guard = requireWritePage(storage.bufferPool, pageId, "mutate test page");
+    auto bytes = guard.data();
+    function(bytes);
+}
+
+inline void requireBufferClean(TestStorage& storage) {
+    storage.bufferPool.validate();
+    storage.bufferPool.validateReplacer();
+    if (storage.bufferPool.stats().pinnedFrames != 0) {
+        throw std::runtime_error("Completed operation leaked a buffer-frame pin");
+    }
+}
 
 inline void require(bool condition, std::string_view message) {
     if (!condition) {

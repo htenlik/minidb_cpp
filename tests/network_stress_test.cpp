@@ -41,7 +41,8 @@ void testSequentialRequestAndReconnectStress() {
     std::array<bool, 101> live{};
     std::array<bool, 101> active{};
     {
-        DatabaseServer server(database.path().string(), ServerConfig{"127.0.0.1", 0, 8});
+        DatabaseServer server(
+            database.path().string(), ServerConfig{"127.0.0.1", 0, 8, 3, 2});
         server.start();
         std::exception_ptr serverError;
         std::thread serverThread([&] {
@@ -155,12 +156,17 @@ void testSequentialRequestAndReconnectStress() {
         serverThread.join();
         if (serverError) std::rethrow_exception(serverError);
         if (workError) std::rethrow_exception(workError);
+        minidb::test::require(
+            server.bufferPool().stats().pinnedFrames == 0,
+            "TCP request processing leaked page pins");
+        server.bufferPool().validate();
     }
 
     // Reopen the complete owner once after the eight client reconnects.
     {
-        Pager pager(database.path().string());
-        auto catalog = Catalog::open(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = Catalog::open(
+            storage.bufferPool, storage.diskManager, storage.allocator);
         sql::SqlEngine engine(catalog);
         const auto& rows = selection(engine.execute("SELECT * FROM stress"));
         std::array<bool, 101> reopenedLive{};

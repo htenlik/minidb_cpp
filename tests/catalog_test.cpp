@@ -32,21 +32,21 @@ void testBootstrapLayoutAndReopen() {
     minidb::PageId catalogPageId = minidb::INVALID_PAGE_ID;
     minidb::PageId entriesHeapId = minidb::INVALID_PAGE_ID;
     {
-        minidb::Pager pager(database.path().string());
+        minidb::test::TestStorage storage(database.path(), 3, 2);
         minidb::test::require(
-            pager.databaseHeader().catalogRootPageId == minidb::INVALID_PAGE_ID,
+            storage.diskManager.databaseHeader().catalogRootPageId == minidb::INVALID_PAGE_ID,
             "New database unexpectedly bootstrapped a catalog");
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         catalogPageId = catalog.metadataPageId();
         entriesHeapId = catalog.entriesHeapMetadataPageId();
         minidb::test::require(catalogPageId == 1 && entriesHeapId == 2,
                               "Catalog bootstrap did not allocate through PageAllocator");
-        minidb::test::require(pager.databaseHeader().catalogRootPageId == catalogPageId,
+        minidb::test::require(storage.diskManager.databaseHeader().catalogRootPageId == catalogPageId,
                               "Catalog root was not installed in database metadata");
         minidb::test::require(catalog.tableCount() == 0 && catalog.listTables().empty(),
                               "New catalog was not empty");
 
-        const auto& page = pager.getPage(catalogPageId);
+        const auto page = minidb::test::readPageCopy(storage, catalogPageId);
         using namespace minidb::catalog_metadata_layout;
         minidb::test::require(std::equal(MAGIC.begin(), MAGIC.end(), page.begin()),
                               "Catalog metadata magic was not encoded");
@@ -59,11 +59,11 @@ void testBootstrapLayoutAndReopen() {
                 && minidb::byte_codec::readUint64(page, TABLE_COUNT_OFFSET) == 0,
             "Catalog metadata fields were not encoded little-endian");
         catalog.validate();
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::open(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator);
         minidb::test::require(catalog.metadataPageId() == catalogPageId
                                   && catalog.entriesHeapMetadataPageId() == entriesHeapId,
                               "Catalog stable identities did not survive reopen");
@@ -129,8 +129,8 @@ void testCreateFindListAndPersistence() {
     minidb::PageId usersHeap = minidb::INVALID_PAGE_ID;
     minidb::PageId usersIndex = minidb::INVALID_PAGE_ID;
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         auto users = catalog.createTable("Users", primarySchema());
         auto logs = catalog.createTable("LOGS", heapSchema());
         usersId = users.id();
@@ -157,11 +157,11 @@ void testCreateFindListAndPersistence() {
                                   && catalog.findTable(logsId)->schema == heapSchema(),
                               "Catalog lookup lost a persisted schema");
         catalog.validate();
-        pager.flushAll();
+        storage.bufferPool.flushAll();
     }
     {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         minidb::test::require(catalog.tableCount() == 2,
                               "Catalog table count did not survive reopen");
         const auto users = catalog.findTable(usersId);
@@ -181,13 +181,13 @@ void testCreateFindListAndPersistence() {
 template <typename Mutator>
 void requireCatalogMetadataCorruption(std::string_view name, Mutator&& mutate) {
     minidb::test::TemporaryDatabase database(name);
-    minidb::Pager pager(database.path().string());
-    auto catalog = minidb::Catalog::openOrCreate(pager);
-    auto& page = pager.getPage(catalog.metadataPageId());
-    mutate(pager, catalog, page);
-    pager.markDirty(catalog.metadataPageId());
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
+    minidb::test::mutatePage(storage, catalog.metadataPageId(), [&](auto page) {
+        mutate(storage, catalog, page);
+    });
     minidb::test::requireThrows<std::runtime_error>(
-        [&] { static_cast<void>(minidb::Catalog::open(pager)); },
+        [&] { static_cast<void>(minidb::Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator)); },
         "Catalog accepted corrupt metadata");
 }
 
@@ -199,11 +199,11 @@ void testCatalogCorruptionDetection() {
         minidb::byte_codec::writeUint32(
             page, minidb::catalog_metadata_layout::VERSION_OFFSET, 2);
     });
-    requireCatalogMetadataCorruption("catalog_dangling_entries", [](auto& pager, auto&, auto& page) {
+    requireCatalogMetadataCorruption("catalog_dangling_entries", [](auto& storage, auto&, auto& page) {
         minidb::byte_codec::writeUint32(
             page,
             minidb::catalog_metadata_layout::ENTRIES_HEAP_METADATA_PAGE_ID_OFFSET,
-            pager.pageCount() + 5);
+            storage.diskManager.pageCount() + 5);
     });
     requireCatalogMetadataCorruption("catalog_count_mismatch", [](auto&, auto&, auto& page) {
         minidb::byte_codec::writeUint64(
@@ -211,10 +211,10 @@ void testCatalogCorruptionDetection() {
     });
 
     minidb::test::TemporaryDatabase database("catalog_bad_definition");
-    minidb::Pager pager(database.path().string());
-    auto catalog = minidb::Catalog::openOrCreate(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
     static_cast<void>(catalog.createTable("users", primarySchema()));
-    auto entries = minidb::TupleStore::open(pager, catalog.entriesHeapMetadataPageId());
+    auto entries = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, catalog.entriesHeapMetadataPageId());
     const auto entry = entries.scan().front();
     auto corrupt = entry.second;
     corrupt[minidb::table_definition_layout::MAGIC_OFFSET] = std::byte{'X'};
@@ -228,11 +228,11 @@ void testCatalogCorruptionDetection() {
 void testCatalogEntryIdentityAndReferenceCorruption() {
     {
         minidb::test::TemporaryDatabase database("catalog_duplicate_id");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         static_cast<void>(catalog.createTable("alpha", heapSchema()));
         static_cast<void>(catalog.createTable("bravo", heapSchema()));
-        auto entries = minidb::TupleStore::open(pager, catalog.entriesHeapMetadataPageId());
+        auto entries = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, catalog.entriesHeapMetadataPageId());
         auto records = entries.scan();
         auto duplicate = records[1].second;
         const auto firstDefinition = minidb::decodeTableDefinition(records[0].second);
@@ -247,11 +247,11 @@ void testCatalogEntryIdentityAndReferenceCorruption() {
     }
     {
         minidb::test::TemporaryDatabase database("catalog_duplicate_name");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         static_cast<void>(catalog.createTable("alpha", heapSchema()));
         static_cast<void>(catalog.createTable("bravo", heapSchema()));
-        auto entries = minidb::TupleStore::open(pager, catalog.entriesHeapMetadataPageId());
+        auto entries = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, catalog.entriesHeapMetadataPageId());
         auto records = entries.scan();
         auto duplicate = records[1].second;
         const std::string replacement = "alpha";
@@ -267,15 +267,15 @@ void testCatalogEntryIdentityAndReferenceCorruption() {
     }
     {
         minidb::test::TemporaryDatabase database("catalog_dangling_heap");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         static_cast<void>(catalog.createTable("alpha", heapSchema()));
-        auto entries = minidb::TupleStore::open(pager, catalog.entriesHeapMetadataPageId());
+        auto entries = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, catalog.entriesHeapMetadataPageId());
         auto record = entries.scan().front();
         minidb::byte_codec::writeUint32(
             record.second,
             minidb::table_definition_layout::HEAP_METADATA_PAGE_ID_OFFSET,
-            pager.pageCount() + 10);
+            storage.diskManager.pageCount() + 10);
         minidb::test::require(entries.tryUpdate(record.first, record.second),
                               "Dangling-heap corruption fixture update failed");
         minidb::test::requireThrows<std::out_of_range>(
@@ -284,15 +284,15 @@ void testCatalogEntryIdentityAndReferenceCorruption() {
     }
     {
         minidb::test::TemporaryDatabase database("catalog_dangling_index");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         static_cast<void>(catalog.createTable("alpha", primarySchema()));
-        auto entries = minidb::TupleStore::open(pager, catalog.entriesHeapMetadataPageId());
+        auto entries = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, catalog.entriesHeapMetadataPageId());
         auto record = entries.scan().front();
         minidb::byte_codec::writeUint32(
             record.second,
             minidb::table_definition_layout::PRIMARY_INDEX_METADATA_PAGE_ID_OFFSET,
-            pager.pageCount() + 10);
+            storage.diskManager.pageCount() + 10);
         minidb::test::require(entries.tryUpdate(record.first, record.second),
                               "Dangling-index corruption fixture update failed");
         minidb::test::requireThrows<std::out_of_range>(
@@ -301,10 +301,10 @@ void testCatalogEntryIdentityAndReferenceCorruption() {
     }
     {
         minidb::test::TemporaryDatabase database("catalog_index_schema_mismatch");
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         static_cast<void>(catalog.createTable("alpha", primarySchema()));
-        auto entries = minidb::TupleStore::open(pager, catalog.entriesHeapMetadataPageId());
+        auto entries = minidb::TupleStore::open(storage.bufferPool, storage.diskManager, storage.allocator, catalog.entriesHeapMetadataPageId());
         auto record = entries.scan().front();
         minidb::byte_codec::writeUint32(
             record.second,

@@ -20,7 +20,11 @@ struct TableRow {
 
 class Table {
 public:
-    [[nodiscard]] static Table open(Pager& pager, TableDefinition definition);
+    [[nodiscard]] static Table open(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        PageAllocator& allocator,
+        TableDefinition definition);
 
     Table(const Table&) = delete;
     Table& operator=(const Table&) = delete;

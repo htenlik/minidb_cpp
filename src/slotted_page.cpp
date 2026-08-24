@@ -1,5 +1,8 @@
 #include "minidb/slotted_page.hpp"
 
+#include "minidb/byte_codec.hpp"
+#include "minidb/storage_error.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -8,148 +11,130 @@
 namespace minidb {
 namespace {
 
-constexpr std::size_t BITS_PER_BYTE = 8;
-
-void writeUint16(Pager::Page& page, std::size_t offset, std::uint16_t value) noexcept {
-    for (std::size_t index = 0; index < 2; ++index) {
-        page[offset + index] =
-            static_cast<std::byte>((value >> (index * BITS_PER_BYTE)) & 0xFFU);
-    }
-}
-
-void writeUint32(Pager::Page& page, std::size_t offset, std::uint32_t value) noexcept {
-    for (std::size_t index = 0; index < 4; ++index) {
-        page[offset + index] =
-            static_cast<std::byte>((value >> (index * BITS_PER_BYTE)) & 0xFFU);
-    }
-}
-
-std::uint16_t readUint16(const Pager::Page& page, std::size_t offset) noexcept {
-    std::uint16_t value = 0;
-    for (std::size_t index = 0; index < 2; ++index) {
-        value |= static_cast<std::uint16_t>(
-            std::to_integer<std::uint16_t>(page[offset + index])
-            << (index * BITS_PER_BYTE));
-    }
-    return value;
-}
-
-std::uint32_t readUint32(const Pager::Page& page, std::size_t offset) noexcept {
-    std::uint32_t value = 0;
-    for (std::size_t index = 0; index < 4; ++index) {
-        value |= std::to_integer<std::uint32_t>(page[offset + index])
-            << (index * BITS_PER_BYTE);
-    }
-    return value;
-}
-
 void requireExistingDataPage(
-    const Pager& pager,
+    PageId pageCount,
     PageId pageId,
     PageId excludedPageId,
     const char* description) {
     if (pageId == database_format::METADATA_PAGE_ID || pageId == INVALID_PAGE_ID
-        || pageId == excludedPageId || pageId >= pager.pageCount()) {
-        throw std::runtime_error(std::string(description) + " is not a legal data-page reference.");
+        || pageId == excludedPageId || pageId >= pageCount) {
+        throw StorageError(
+            StorageErrorKind::InvalidPage,
+            std::string(description) + " is not a legal data-page reference.");
     }
 }
 
 } // namespace
 
-void SlottedPage::initialize(
-    Pager& pager,
+void SlottedPageView::initialize(
+    std::span<std::byte, database_format::PAGE_SIZE> bytes,
     PageId pageId,
+    PageId pageCount,
     PageId heapMetadataPageId,
     PageId nextPageId,
     PageId previousPageId) {
-    requireExistingDataPage(pager, pageId, heapMetadataPageId, "Slotted page ID");
-    requireExistingDataPage(pager, heapMetadataPageId, pageId, "Heap metadata page ID");
+    requireExistingDataPage(pageCount, pageId, heapMetadataPageId, "Slotted page ID");
+    requireExistingDataPage(pageCount, heapMetadataPageId, pageId, "Heap metadata page ID");
     const auto validateLink = [&](PageId link, const char* description) {
         if (link != INVALID_PAGE_ID) {
-            requireExistingDataPage(pager, link, pageId, description);
+            requireExistingDataPage(pageCount, link, pageId, description);
             if (link == heapMetadataPageId) {
-                throw std::runtime_error(std::string(description) + " references heap metadata.");
+                throw StorageError(
+                    StorageErrorKind::InvalidPage,
+                    std::string(description) + " references heap metadata.");
             }
         }
     };
     validateLink(nextPageId, "Next slotted-page ID");
     validateLink(previousPageId, "Previous slotted-page ID");
     if (nextPageId != INVALID_PAGE_ID && nextPageId == previousPageId) {
-        throw std::runtime_error("Slotted page next and previous links are identical.");
+        throw StorageError(
+            StorageErrorKind::InvalidPage,
+            "Slotted page next and previous links are identical.");
     }
 
-    auto& page = pager.getPage(pageId);
-    page.fill(std::byte{0});
     using namespace slotted_page_layout;
-    std::copy(MAGIC.begin(), MAGIC.end(), page.begin() + MAGIC_OFFSET);
-    writeUint32(page, LAYOUT_VERSION_OFFSET, CURRENT_VERSION);
-    writeUint32(page, HEADER_SIZE_OFFSET, static_cast<std::uint32_t>(HEADER_SIZE));
-    writeUint16(page, SLOT_COUNT_OFFSET, 0);
-    writeUint16(page, LIVE_COUNT_OFFSET, 0);
-    writeUint16(page, LOWER_BOUNDARY_OFFSET, static_cast<std::uint16_t>(HEADER_SIZE));
-    writeUint16(page, UPPER_BOUNDARY_OFFSET, static_cast<std::uint16_t>(Pager::PAGE_SIZE));
-    writeUint32(page, NEXT_PAGE_ID_OFFSET, nextPageId);
-    writeUint32(page, PREVIOUS_PAGE_ID_OFFSET, previousPageId);
-    writeUint32(page, HEAP_METADATA_PAGE_ID_OFFSET, heapMetadataPageId);
-    pager.markDirty(pageId);
+    std::fill(bytes.begin(), bytes.end(), std::byte{0});
+    std::copy(MAGIC.begin(), MAGIC.end(), bytes.begin() + MAGIC_OFFSET);
+    byte_codec::writeUint32(bytes, LAYOUT_VERSION_OFFSET, CURRENT_VERSION);
+    byte_codec::writeUint32(bytes, HEADER_SIZE_OFFSET, static_cast<std::uint32_t>(HEADER_SIZE));
+    byte_codec::writeUint16(bytes, SLOT_COUNT_OFFSET, 0);
+    byte_codec::writeUint16(bytes, LIVE_COUNT_OFFSET, 0);
+    byte_codec::writeUint16(bytes, LOWER_BOUNDARY_OFFSET, static_cast<std::uint16_t>(HEADER_SIZE));
+    byte_codec::writeUint16(
+        bytes, UPPER_BOUNDARY_OFFSET, static_cast<std::uint16_t>(database_format::PAGE_SIZE));
+    byte_codec::writeUint32(bytes, NEXT_PAGE_ID_OFFSET, nextPageId);
+    byte_codec::writeUint32(bytes, PREVIOUS_PAGE_ID_OFFSET, previousPageId);
+    byte_codec::writeUint32(bytes, HEAP_METADATA_PAGE_ID_OFFSET, heapMetadataPageId);
 }
 
-SlottedPage::SlottedPage(Pager& pager, PageId pageId)
-    : pager_(pager), pageId_(pageId), bytes_(pager.getPage(pageId)) {
+ConstSlottedPageView::ConstSlottedPageView(
+    std::span<const std::byte, database_format::PAGE_SIZE> bytes,
+    PageId pageId,
+    PageId pageCount)
+    : bytes_(bytes), pageId_(pageId), pageCount_(pageCount) {
     validate();
 }
 
-PageId SlottedPage::heapMetadataPageId() const noexcept {
-    return readUint32(bytes_, slotted_page_layout::HEAP_METADATA_PAGE_ID_OFFSET);
+SlottedPageView::SlottedPageView(
+    std::span<std::byte, database_format::PAGE_SIZE> bytes,
+    PageId pageId,
+    PageId pageCount)
+    : ConstSlottedPageView(bytes, pageId, pageCount), mutableBytes_(bytes) {}
+
+PageId ConstSlottedPageView::heapMetadataPageId() const noexcept {
+    return byte_codec::readUint32(bytes_, slotted_page_layout::HEAP_METADATA_PAGE_ID_OFFSET);
 }
 
-PageId SlottedPage::nextPageId() const noexcept {
-    return readUint32(bytes_, slotted_page_layout::NEXT_PAGE_ID_OFFSET);
+PageId ConstSlottedPageView::nextPageId() const noexcept {
+    return byte_codec::readUint32(bytes_, slotted_page_layout::NEXT_PAGE_ID_OFFSET);
 }
 
-PageId SlottedPage::previousPageId() const noexcept {
-    return readUint32(bytes_, slotted_page_layout::PREVIOUS_PAGE_ID_OFFSET);
+PageId ConstSlottedPageView::previousPageId() const noexcept {
+    return byte_codec::readUint32(bytes_, slotted_page_layout::PREVIOUS_PAGE_ID_OFFSET);
 }
 
-void SlottedPage::setNextPageId(PageId pageId) {
+void SlottedPageView::setNextPageId(PageId pageId) {
     validateLink(pageId);
     if (pageId != INVALID_PAGE_ID && pageId == previousPageId()) {
-        throw std::runtime_error("Slotted page next and previous links cannot match.");
+        throw StorageError(
+            StorageErrorKind::InvalidPage,
+            "Slotted page next and previous links cannot match.");
     }
-    writeUint32(bytes_, slotted_page_layout::NEXT_PAGE_ID_OFFSET, pageId);
-    pager_.markDirty(pageId_);
+    byte_codec::writeUint32(mutableBytes_, slotted_page_layout::NEXT_PAGE_ID_OFFSET, pageId);
 }
 
-void SlottedPage::setPreviousPageId(PageId pageId) {
+void SlottedPageView::setPreviousPageId(PageId pageId) {
     validateLink(pageId);
     if (pageId != INVALID_PAGE_ID && pageId == nextPageId()) {
-        throw std::runtime_error("Slotted page next and previous links cannot match.");
+        throw StorageError(
+            StorageErrorKind::InvalidPage,
+            "Slotted page next and previous links cannot match.");
     }
-    writeUint32(bytes_, slotted_page_layout::PREVIOUS_PAGE_ID_OFFSET, pageId);
-    pager_.markDirty(pageId_);
+    byte_codec::writeUint32(mutableBytes_, slotted_page_layout::PREVIOUS_PAGE_ID_OFFSET, pageId);
 }
 
-std::uint16_t SlottedPage::slotCount() const noexcept {
-    return readUint16(bytes_, slotted_page_layout::SLOT_COUNT_OFFSET);
+std::uint16_t ConstSlottedPageView::slotCount() const noexcept {
+    return byte_codec::readUint16(bytes_, slotted_page_layout::SLOT_COUNT_OFFSET);
 }
 
-std::uint16_t SlottedPage::liveCount() const noexcept {
-    return readUint16(bytes_, slotted_page_layout::LIVE_COUNT_OFFSET);
+std::uint16_t ConstSlottedPageView::liveCount() const noexcept {
+    return byte_codec::readUint16(bytes_, slotted_page_layout::LIVE_COUNT_OFFSET);
 }
 
-std::uint16_t SlottedPage::lowerBoundary() const noexcept {
-    return readUint16(bytes_, slotted_page_layout::LOWER_BOUNDARY_OFFSET);
+std::uint16_t ConstSlottedPageView::lowerBoundary() const noexcept {
+    return byte_codec::readUint16(bytes_, slotted_page_layout::LOWER_BOUNDARY_OFFSET);
 }
 
-std::uint16_t SlottedPage::upperBoundary() const noexcept {
-    return readUint16(bytes_, slotted_page_layout::UPPER_BOUNDARY_OFFSET);
+std::uint16_t ConstSlottedPageView::upperBoundary() const noexcept {
+    return byte_codec::readUint16(bytes_, slotted_page_layout::UPPER_BOUNDARY_OFFSET);
 }
 
-std::size_t SlottedPage::freeSpace() const noexcept {
+std::size_t ConstSlottedPageView::freeSpace() const noexcept {
     return static_cast<std::size_t>(upperBoundary() - lowerBoundary());
 }
 
-bool SlottedPage::canFit(std::size_t tupleSize) const noexcept {
+bool ConstSlottedPageView::canFit(std::size_t tupleSize) const noexcept {
     if (tupleSize == 0 || tupleSize > slotted_page_layout::MAX_TUPLE_SIZE) {
         return false;
     }
@@ -164,12 +149,12 @@ bool SlottedPage::canFit(std::size_t tupleSize) const noexcept {
     return required <= freeSpace();
 }
 
-bool SlottedPage::isOccupied(SlotId slotId) const {
+bool ConstSlottedPageView::isOccupied(SlotId slotId) const {
     validateSlotId(slotId);
     return readSlot(slotId).flags == slotted_page_layout::SLOT_LIVE;
 }
 
-SlotId SlottedPage::insert(std::span<const std::byte> tuple) {
+SlotId SlottedPageView::insert(std::span<const std::byte> tuple) {
     validateTupleSize(tuple.size());
     if (!canFit(tuple.size())) {
         throw std::overflow_error("Slotted page has insufficient space for tuple and slot.");
@@ -188,31 +173,32 @@ SlotId SlottedPage::insert(std::span<const std::byte> tuple) {
             throw std::overflow_error("Slotted page slot directory is full.");
         }
         slotId = slotCount();
-        writeUint16(bytes_, slotted_page_layout::SLOT_COUNT_OFFSET, slotCount() + 1);
-        writeUint16(
-            bytes_,
+        byte_codec::writeUint16(
+            mutableBytes_, slotted_page_layout::SLOT_COUNT_OFFSET, slotCount() + 1);
+        byte_codec::writeUint16(
+            mutableBytes_,
             slotted_page_layout::UPPER_BOUNDARY_OFFSET,
             static_cast<std::uint16_t>(upperBoundary() - slotted_page_layout::SLOT_SIZE));
     }
 
     const auto tupleOffset = lowerBoundary();
-    std::copy(tuple.begin(), tuple.end(), bytes_.begin() + tupleOffset);
+    std::copy(tuple.begin(), tuple.end(), mutableBytes_.begin() + tupleOffset);
     writeSlot(slotId, SlotEntry{
         tupleOffset,
         static_cast<std::uint16_t>(tuple.size()),
         slotted_page_layout::SLOT_LIVE,
         0,
     });
-    writeUint16(
-        bytes_,
+    byte_codec::writeUint16(
+        mutableBytes_,
         slotted_page_layout::LOWER_BOUNDARY_OFFSET,
         static_cast<std::uint16_t>(tupleOffset + tuple.size()));
-    writeUint16(bytes_, slotted_page_layout::LIVE_COUNT_OFFSET, liveCount() + 1);
-    pager_.markDirty(pageId_);
+    byte_codec::writeUint16(
+        mutableBytes_, slotted_page_layout::LIVE_COUNT_OFFSET, liveCount() + 1);
     return slotId;
 }
 
-TupleBytes SlottedPage::get(SlotId slotId) const {
+TupleBytes ConstSlottedPageView::get(SlotId slotId) const {
     validateSlotId(slotId);
     const auto slot = readSlot(slotId);
     if (slot.flags != slotted_page_layout::SLOT_LIVE) {
@@ -223,7 +209,7 @@ TupleBytes SlottedPage::get(SlotId slotId) const {
         bytes_.begin() + slot.tupleOffset + slot.tupleLength);
 }
 
-bool SlottedPage::tryUpdate(SlotId slotId, std::span<const std::byte> tuple) {
+bool SlottedPageView::tryUpdate(SlotId slotId, std::span<const std::byte> tuple) {
     validateTupleSize(tuple.size());
     validateSlotId(slotId);
     const auto slot = readSlot(slotId);
@@ -234,12 +220,11 @@ bool SlottedPage::tryUpdate(SlotId slotId, std::span<const std::byte> tuple) {
         return false;
     }
     if (tuple.size() == slot.tupleLength) {
-        std::copy(tuple.begin(), tuple.end(), bytes_.begin() + slot.tupleOffset);
-        pager_.markDirty(pageId_);
+        std::copy(tuple.begin(), tuple.end(), mutableBytes_.begin() + slot.tupleOffset);
         return true;
     }
 
-    auto tuples = snapshotLiveTuples();
+    auto tuples = liveTuples();
     for (auto& [candidate, bytes] : tuples) {
         if (candidate == slotId) {
             bytes.assign(tuple.begin(), tuple.end());
@@ -250,56 +235,63 @@ bool SlottedPage::tryUpdate(SlotId slotId, std::span<const std::byte> tuple) {
     return true;
 }
 
-void SlottedPage::erase(SlotId slotId) {
+void SlottedPageView::erase(SlotId slotId) {
     validateSlotId(slotId);
     const auto slot = readSlot(slotId);
     if (slot.flags != slotted_page_layout::SLOT_LIVE) {
         throw std::runtime_error("Slotted-page slot is not occupied.");
     }
     writeSlot(slotId, SlotEntry{0, 0, slotted_page_layout::SLOT_FREE, 0});
-    writeUint16(bytes_, slotted_page_layout::LIVE_COUNT_OFFSET, liveCount() - 1);
+    byte_codec::writeUint16(
+        mutableBytes_, slotted_page_layout::LIVE_COUNT_OFFSET, liveCount() - 1);
     compact();
 }
 
-void SlottedPage::compact() {
-    rewritePayload(snapshotLiveTuples());
+void SlottedPageView::compact() {
+    rewritePayload(liveTuples());
 }
 
-SlottedPage::SlotEntry SlottedPage::readSlot(SlotId slotId) const noexcept {
+ConstSlottedPageView::SlotEntry ConstSlottedPageView::readSlot(SlotId slotId) const noexcept {
     const auto offset = slotted_page_layout::slotOffset(slotId);
     return SlotEntry{
-        readUint16(bytes_, offset + slotted_page_layout::SLOT_TUPLE_OFFSET_OFFSET),
-        readUint16(bytes_, offset + slotted_page_layout::SLOT_TUPLE_LENGTH_OFFSET),
-        readUint16(bytes_, offset + slotted_page_layout::SLOT_FLAGS_OFFSET),
-        readUint16(bytes_, offset + slotted_page_layout::SLOT_RESERVED_OFFSET),
+        byte_codec::readUint16(bytes_, offset + slotted_page_layout::SLOT_TUPLE_OFFSET_OFFSET),
+        byte_codec::readUint16(bytes_, offset + slotted_page_layout::SLOT_TUPLE_LENGTH_OFFSET),
+        byte_codec::readUint16(bytes_, offset + slotted_page_layout::SLOT_FLAGS_OFFSET),
+        byte_codec::readUint16(bytes_, offset + slotted_page_layout::SLOT_RESERVED_OFFSET),
     };
 }
 
-void SlottedPage::writeSlot(SlotId slotId, const SlotEntry& slot) noexcept {
+void SlottedPageView::writeSlot(SlotId slotId, const SlotEntry& slot) noexcept {
     const auto offset = slotted_page_layout::slotOffset(slotId);
-    writeUint16(bytes_, offset + slotted_page_layout::SLOT_TUPLE_OFFSET_OFFSET, slot.tupleOffset);
-    writeUint16(bytes_, offset + slotted_page_layout::SLOT_TUPLE_LENGTH_OFFSET, slot.tupleLength);
-    writeUint16(bytes_, offset + slotted_page_layout::SLOT_FLAGS_OFFSET, slot.flags);
-    writeUint16(bytes_, offset + slotted_page_layout::SLOT_RESERVED_OFFSET, slot.reserved);
+    byte_codec::writeUint16(
+        mutableBytes_, offset + slotted_page_layout::SLOT_TUPLE_OFFSET_OFFSET, slot.tupleOffset);
+    byte_codec::writeUint16(
+        mutableBytes_, offset + slotted_page_layout::SLOT_TUPLE_LENGTH_OFFSET, slot.tupleLength);
+    byte_codec::writeUint16(
+        mutableBytes_, offset + slotted_page_layout::SLOT_FLAGS_OFFSET, slot.flags);
+    byte_codec::writeUint16(
+        mutableBytes_, offset + slotted_page_layout::SLOT_RESERVED_OFFSET, slot.reserved);
 }
 
-void SlottedPage::validateSlotId(SlotId slotId) const {
+void ConstSlottedPageView::validateSlotId(SlotId slotId) const {
     if (slotId >= slotCount()) {
         throw std::out_of_range("Slot ID is outside the slotted-page directory.");
     }
 }
 
-void SlottedPage::validateLink(PageId linkedPageId) const {
+void ConstSlottedPageView::validateLink(PageId linkedPageId) const {
     if (linkedPageId == INVALID_PAGE_ID) {
         return;
     }
-    requireExistingDataPage(pager_, linkedPageId, pageId_, "Slotted-page link");
+    requireExistingDataPage(pageCount_, linkedPageId, pageId_, "Slotted-page link");
     if (linkedPageId == heapMetadataPageId()) {
-        throw std::runtime_error("Slotted-page link references heap metadata.");
+        throw StorageError(
+            StorageErrorKind::InvalidPage,
+            "Slotted-page link references heap metadata.");
     }
 }
 
-void SlottedPage::validateTupleSize(std::size_t tupleSize) {
+void ConstSlottedPageView::validateTupleSize(std::size_t tupleSize) {
     if (tupleSize == 0) {
         throw std::invalid_argument("Zero-length tuples are not supported.");
     }
@@ -309,7 +301,7 @@ void SlottedPage::validateTupleSize(std::size_t tupleSize) {
     }
 }
 
-std::vector<std::pair<SlotId, TupleBytes>> SlottedPage::snapshotLiveTuples() const {
+std::vector<std::pair<SlotId, TupleBytes>> ConstSlottedPageView::liveTuples() const {
     std::vector<std::pair<SlotId, TupleBytes>> tuples;
     tuples.reserve(liveCount());
     for (std::size_t index = 0; index < slotCount(); ++index) {
@@ -321,15 +313,15 @@ std::vector<std::pair<SlotId, TupleBytes>> SlottedPage::snapshotLiveTuples() con
     return tuples;
 }
 
-void SlottedPage::rewritePayload(
+void SlottedPageView::rewritePayload(
     const std::vector<std::pair<SlotId, TupleBytes>>& tuples) {
     std::fill(
-        bytes_.begin() + slotted_page_layout::HEADER_SIZE,
-        bytes_.begin() + upperBoundary(),
+        mutableBytes_.begin() + slotted_page_layout::HEADER_SIZE,
+        mutableBytes_.begin() + upperBoundary(),
         std::byte{0});
     std::size_t cursor = slotted_page_layout::HEADER_SIZE;
     for (const auto& [slotId, tuple] : tuples) {
-        std::copy(tuple.begin(), tuple.end(), bytes_.begin() + cursor);
+        std::copy(tuple.begin(), tuple.end(), mutableBytes_.begin() + cursor);
         writeSlot(slotId, SlotEntry{
             static_cast<std::uint16_t>(cursor),
             static_cast<std::uint16_t>(tuple.size()),
@@ -338,49 +330,59 @@ void SlottedPage::rewritePayload(
         });
         cursor += tuple.size();
     }
-    writeUint16(
-        bytes_,
+    byte_codec::writeUint16(
+        mutableBytes_,
         slotted_page_layout::LOWER_BOUNDARY_OFFSET,
         static_cast<std::uint16_t>(cursor));
-    pager_.markDirty(pageId_);
 }
 
-void SlottedPage::validate() const {
+void ConstSlottedPageView::validate() const {
     using namespace slotted_page_layout;
     if (!std::equal(MAGIC.begin(), MAGIC.end(), bytes_.begin() + MAGIC_OFFSET)) {
-        throw std::runtime_error("Invalid slotted-page magic/type.");
+        throw StorageError(StorageErrorKind::CorruptPage, "Invalid slotted-page magic/type.");
     }
-    const auto version = readUint32(bytes_, LAYOUT_VERSION_OFFSET);
+    const auto version = byte_codec::readUint32(bytes_, LAYOUT_VERSION_OFFSET);
     if (version != CURRENT_VERSION) {
-        throw std::runtime_error("Unsupported slotted-page layout version "
-                                 + std::to_string(version) + ".");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Unsupported slotted-page layout version " + std::to_string(version) + ".");
     }
-    if (readUint32(bytes_, HEADER_SIZE_OFFSET) != HEADER_SIZE) {
-        throw std::runtime_error("Slotted page has an invalid header size.");
+    if (byte_codec::readUint32(bytes_, HEADER_SIZE_OFFSET) != HEADER_SIZE) {
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted page has an invalid header size.");
     }
     if (!std::all_of(
             bytes_.begin() + RESERVED_OFFSET,
             bytes_.begin() + HEADER_SIZE,
             [](std::byte value) { return value == std::byte{0}; })) {
-        throw std::runtime_error("Slotted-page reserved header bytes are not zero.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted-page reserved header bytes are not zero.");
     }
 
-    requireExistingDataPage(pager_, heapMetadataPageId(), pageId_, "Heap metadata page ID");
+    requireExistingDataPage(pageCount_, heapMetadataPageId(), pageId_, "Heap metadata page ID");
     validateLink(nextPageId());
     validateLink(previousPageId());
     if (nextPageId() != INVALID_PAGE_ID && nextPageId() == previousPageId()) {
-        throw std::runtime_error("Slotted page has identical next and previous links.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted page has identical next and previous links.");
     }
 
     if (slotCount() > MAX_SLOT_COUNT || liveCount() > slotCount()) {
-        throw std::runtime_error("Slotted page has invalid slot/live counts.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted page has invalid slot/live counts.");
     }
-    const auto expectedUpper = Pager::PAGE_SIZE
+    const auto expectedUpper = database_format::PAGE_SIZE
         - (static_cast<std::size_t>(slotCount()) * SLOT_SIZE);
     if (upperBoundary() != expectedUpper
         || lowerBoundary() < HEADER_SIZE
         || lowerBoundary() > upperBoundary()) {
-        throw std::runtime_error("Slotted page has invalid free-space boundaries.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted page has invalid free-space boundaries.");
     }
 
     std::size_t observedLiveCount = 0;
@@ -390,40 +392,54 @@ void SlottedPage::validate() const {
         const auto slot = readSlot(static_cast<SlotId>(index));
         if (slot.flags == SLOT_FREE) {
             if (slot.tupleOffset != 0 || slot.tupleLength != 0 || slot.reserved != 0) {
-                throw std::runtime_error("Slotted page contains a malformed free slot.");
+                throw StorageError(
+                    StorageErrorKind::CorruptPage,
+                    "Slotted page contains a malformed free slot.");
             }
             continue;
         }
         if (slot.flags != SLOT_LIVE || slot.reserved != 0 || slot.tupleLength == 0) {
-            throw std::runtime_error("Slotted page contains an invalid live slot.");
+            throw StorageError(
+                StorageErrorKind::CorruptPage,
+                "Slotted page contains an invalid live slot.");
         }
         const auto begin = static_cast<std::size_t>(slot.tupleOffset);
         const auto end = begin + slot.tupleLength;
         if (begin < HEADER_SIZE || end > lowerBoundary() || end > upperBoundary()) {
-            throw std::runtime_error("Slotted-page tuple range is outside the payload area.");
+            throw StorageError(
+                StorageErrorKind::CorruptPage,
+                "Slotted-page tuple range is outside the payload area.");
         }
         ranges.emplace_back(begin, end);
         ++observedLiveCount;
     }
     if (observedLiveCount != liveCount()) {
-        throw std::runtime_error("Slotted-page live count disagrees with slot states.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted-page live count disagrees with slot states.");
     }
     std::sort(ranges.begin(), ranges.end());
     std::size_t cursor = HEADER_SIZE;
     for (const auto& [begin, end] : ranges) {
         if (begin != cursor) {
-            throw std::runtime_error("Slotted-page tuple payloads overlap or are not compact.");
+            throw StorageError(
+                StorageErrorKind::CorruptPage,
+                "Slotted-page tuple payloads overlap or are not compact.");
         }
         cursor = end;
     }
     if (cursor != lowerBoundary()) {
-        throw std::runtime_error("Slotted-page lower boundary disagrees with tuple payloads.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted-page lower boundary disagrees with tuple payloads.");
     }
     if (!std::all_of(
             bytes_.begin() + lowerBoundary(),
             bytes_.begin() + upperBoundary(),
             [](std::byte value) { return value == std::byte{0}; })) {
-        throw std::runtime_error("Slotted-page contiguous free space is not zero-filled.");
+        throw StorageError(
+            StorageErrorKind::CorruptPage,
+            "Slotted-page contiguous free space is not zero-filled.");
     }
 }
 

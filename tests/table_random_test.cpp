@@ -105,8 +105,8 @@ void runSeed(std::uint64_t seed) {
 
     for (std::size_t batchStart = 0; batchStart < OPERATIONS_PER_SEED;
          batchStart += REOPEN_CADENCE) {
-        minidb::Pager pager(database.path().string());
-        auto catalog = minidb::Catalog::openOrCreate(pager);
+        minidb::test::TestStorage storage(database.path(), 3, 2);
+        auto catalog = minidb::Catalog::openOrCreate(storage.bufferPool, storage.diskManager, storage.allocator);
         if (accountTableId == minidb::INVALID_TABLE_ID) {
             auto accountTable = catalog.createTable("accounts", accountSchema());
             auto eventTable = catalog.createTable("events", eventSchema());
@@ -195,11 +195,13 @@ void runSeed(std::uint64_t seed) {
                     compareEvents(eventTable, events);
                     accountTable.validate();
                     eventTable.validate();
-                    minidb::PageAllocator allocator(pager);
+                    auto& allocator = storage.allocator;
                     allocator.validate();
+                    minidb::test::requireBufferClean(storage);
                 }
                 if (operation % 300U == 0) {
                     catalog.validate();
+                    minidb::test::requireBufferClean(storage);
                 }
             } catch (const std::exception& error) {
                 throw std::runtime_error(
@@ -215,16 +217,18 @@ void runSeed(std::uint64_t seed) {
         accountTable.validate();
         eventTable.validate();
         catalog.validate();
-        pager.flushAll();
+        minidb::test::requireBufferClean(storage);
+        storage.bufferPool.flushAll();
     }
 
-    minidb::Pager pager(database.path().string());
-    auto catalog = minidb::Catalog::open(pager);
+    minidb::test::TestStorage storage(database.path(), 3, 2);
+    auto catalog = minidb::Catalog::open(storage.bufferPool, storage.diskManager, storage.allocator);
     auto accountTable = catalog.openTable("accounts");
     auto eventTable = catalog.openTable("events");
     compareAccounts(accountTable, accounts);
     compareEvents(eventTable, events);
     catalog.validate();
+    minidb::test::requireBufferClean(storage);
 }
 
 } // namespace
