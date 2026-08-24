@@ -72,6 +72,22 @@ void testCorruptFileSizeRejected() {
     std::filesystem::remove(path);
 }
 
+void testCorruptMagicRejected() {
+    minidb::test::TemporaryDatabase database("disk_manager_bad_magic");
+    {
+        DiskManager disk(database.path().string());
+    }
+    {
+        std::fstream file(database.path(), std::ios::in | std::ios::out | std::ios::binary);
+        const char corrupt = 'X';
+        file.seekp(0, std::ios::beg);
+        file.write(&corrupt, 1);
+    }
+    minidb::test::requireThrows<std::runtime_error>(
+        [&] { DiskManager disk(database.path().string()); },
+        "DiskManager accepted corrupt database magic");
+}
+
 } // namespace
 
 int main() {
@@ -79,6 +95,7 @@ int main() {
         testCreateAppendReadWriteAndReopen();
         testProtectionAndInvalidIds();
         testCorruptFileSizeRejected();
+        testCorruptMagicRejected();
         std::cout << "DiskManager tests passed\n";
         return 0;
     } catch (const std::exception& error) {

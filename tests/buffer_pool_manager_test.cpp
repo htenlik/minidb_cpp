@@ -46,6 +46,15 @@ void testConstructionFetchAndCapacity() {
         [&] { BufferPoolManager invalid(disk, 0); }, "zero-frame buffer pool was accepted");
 
     BufferPoolManager pool(disk, 1, 2);
+    minidb::test::requireThrows<std::invalid_argument>(
+        [&] { static_cast<void>(pool.fetchPageRead(0)); },
+        "buffer pool exposed metadata page through read fetch");
+    minidb::test::requireThrows<std::invalid_argument>(
+        [&] { static_cast<void>(pool.fetchPageWrite(0)); },
+        "buffer pool exposed metadata page through write fetch");
+    minidb::test::requireThrows<std::out_of_range>(
+        [&] { static_cast<void>(pool.fetchPageRead(minidb::INVALID_PAGE_ID)); },
+        "buffer pool accepted invalid PageId");
     {
         auto first = pool.fetchPageRead(pages[0]);
         require(first.has_value() && first->data()[0] == std::byte{1},
@@ -168,11 +177,33 @@ void testPinPressure() {
     require(a.has_value() && b.has_value(), "pin-pressure setup failed");
     require(!pool.fetchPageRead(pages[2]).has_value(),
             "all-pinned buffer did not return NoFrameAvailable");
+    const auto pageCount = disk.pageCount();
+    require(!pool.newPageWrite().has_value() && disk.pageCount() == pageCount,
+            "all-pinned newPageWrite appended a page without an available frame");
     a->drop();
     auto c = pool.fetchPageRead(pages[2]);
     require(c.has_value() && pool.isResident(pages[1]) && pool.pinCount(pages[1]) == 1,
             "released frame was not reused or pinned peer was evicted");
     pool.validate();
+}
+
+void testDestructorAttemptsDirtyFlush() {
+    minidb::test::TemporaryDatabase database("buffer_destructor_flush");
+    PageId pageId = minidb::INVALID_PAGE_ID;
+    {
+        DiskManager disk(database.path().string());
+        pageId = disk.appendPage();
+        {
+            BufferPoolManager pool(disk, 1);
+            auto page = pool.fetchPageWrite(pageId);
+            require(page.has_value(), "destructor-flush setup fetch failed");
+            page->data()[222] = std::byte{0x9A};
+        }
+        DiskManager::Page persisted{};
+        disk.readPage(pageId, persisted);
+        require(persisted[222] == std::byte{0x9A},
+                "BufferPoolManager destructor did not attempt dirty flush");
+    }
 }
 
 void testNewPageFlushesAndReset() {
@@ -265,6 +296,7 @@ int main() {
         testPinPressure();
         testNewPageFlushesAndReset();
         testExactLRU2VictimThroughPool();
+        testDestructorAttemptsDirtyFlush();
         std::cout << "BufferPoolManager and page-guard tests passed\n";
         return 0;
     } catch (const std::exception& error) {
