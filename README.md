@@ -52,14 +52,19 @@ The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
 ### Advanced database-systems roadmap
 
 9. **Benchmarking and storage-observability baseline** ✅
-10. **Bounded buffer pool and replacement policy** — next
+10A. **DiskManager, bounded buffer pool, page guards, and LRU-K** ✅
+10B. **Engine-wide buffer-pool migration** — next
 11. **WAL and recovery foundation** — planned
 12. **Transactions and concurrency** — planned
 13. **Experimental and paper-driven work** — later
 
-Milestone 9 measures the existing design; it does not add eviction or change persistent
-formats. See [docs/benchmarking.md](docs/benchmarking.md) for methodology and
-[benchmarks/README.md](benchmarks/README.md) for commands.
+Milestone 10A adds a separately tested bounded BufferPoolManager without migrating the
+production storage path or changing persistent formats. The current TupleStore, index,
+Catalog, SQL, and TCP layers still use the legacy Pager. See
+[docs/disk-manager.md](docs/disk-manager.md),
+[docs/buffer-pool.md](docs/buffer-pool.md),
+[docs/benchmarking.md](docs/benchmarking.md), and
+[benchmarks/README.md](benchmarks/README.md).
 
 **Milestone 2.5 — versioned database metadata page** ✅
 

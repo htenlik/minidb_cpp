@@ -13,7 +13,8 @@ configuration, and seed.
 This cache has no capacity limit, replacement policy, pin/unpin protocol, eviction,
 dirty-victim flushing, or page guards. It is therefore not a database buffer pool.
 Touching distinct pages causes `residentPages` to grow until the Pager is destroyed.
-Milestone 10 can use the same workloads to compare this baseline with a bounded cache.
+Milestone 10A retains these workloads and adds separately labeled standalone bounded
+BufferPoolManager workloads. Full-engine comparison waits for the 10B migration.
 
 Instrumentation excludes the database metadata page read performed by Pager startup.
 It does not change allocation, loading, dirtying, or flushing behavior. `PagerStats`
@@ -86,12 +87,13 @@ comparisons.
 
 ## Workload definitions
 
-The executable supports family aliases (`pager`, `bplus`, `tuple`, `sql`, `tcp`, and
-`mixed`) and these named workloads:
+The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sql`,
+`tcp`, and `mixed`) and these named workloads:
 
 | Family | Workloads and measured region |
 | --- | --- |
 | Pager | `pager_sequential`, `pager_random`, `pager_hot`: reads of pre-created pages; hot preloads its working set |
+| Bounded buffer | `buffer_sequential`, `buffer_random`, `buffer_hotset`, `buffer_scan_resistance` |
 | Persistent B+ tree | `bplus_insert_sequential`, `bplus_insert_random`, `bplus_find_hit`, `bplus_find_miss`, `bplus_range`, `bplus_mixed` |
 | TupleStore | `tuple_insert`, `tuple_lookup`, `tuple_update`, `tuple_erase`, `tuple_scan`, `tuple_fragmentation` |
 | Local SQL | `sql_pk_lookup`, `sql_heap_scan`, `sql_insert`, `sql_update`, `sql_delete`, `sql_mixed`, `sql_pk_vs_heap` |
@@ -134,11 +136,11 @@ All workloads validate their relevant storage/tree/catalog/model after measureme
 Both `quick` and `baseline` contain:
 
 ```text
-pager_sequential  pager_random  bplus_find_hit  tuple_lookup
+pager_sequential  pager_random  buffer_random  bplus_find_hit  tuple_lookup
 sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup
 ```
 
-`quick` caps rows at 32, operations/pages at 24, warmup at 8, and reopen cadence at 12.
+`quick` caps rows at 32, operations/pages at 24, warmup/buffer frames at 8, and reopen cadence at 12.
 `baseline` uses the supplied values (defaults are 1000 rows, operations, and pages).
 
 ```bash
@@ -165,9 +167,11 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 
 - `benchmark`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
-  repetitions, mode, and tuple sizes;
+  repetitions, buffer frames, LRU-K K, mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
 - `pager`: all nine Pager statistics;
+- `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
+  evictions, pin activity, appended pages, resident/pinned/evictable gauges, and capacity;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;
 - `execution`: average rows examined and index lookups;
 - `environment`: version context, configured Git commit, compiler, build type, platform,
@@ -193,5 +197,6 @@ machine/build configurations.
 - No automatic cross-run comparison or timing-regression threshold is included.
 
 The next storage milestone should keep these metric definitions stable where possible
-and explicitly define buffer-pool requests, hits, misses, evictions, pins, dirty victims,
-and resident-capacity behavior before making baseline comparisons.
+when migrating engine components. The legacy unbounded Pager and standalone bounded pool
+are not equivalent memory configurations. See [buffer-pool.md](buffer-pool.md) for exact
+LRU-K, guard, flush, metric, and scan-resistance definitions.

@@ -15,8 +15,9 @@ Page 2: allocatable storage
 ...
 ```
 
-Page 0 is not accessible through the Pager's normal data-page operations. The Pager's
-physical page count includes this metadata page. A newly initialized database therefore
+Page 0 is not accessible through DiskManager, Pager, or BufferPoolManager normal
+data-page operations. Their physical page count includes this metadata page. A newly
+initialized database therefore
 has a page count of 1, and its first normal page allocation returns page ID 1.
 
 `PageId` is an unsigned 32-bit integer. `0xFFFFFFFF` is `INVALID_PAGE_ID` and represents
