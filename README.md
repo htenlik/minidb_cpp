@@ -40,8 +40,8 @@ Record Store <-> Pager
 7. **Variable-length tuple heap / slotted pages (Milestone 5A)** ✅
 8. **Schema, catalog, and table layer (Milestone 5B)** ✅
 9. **SQL lexer/parser/AST (Milestone 6)** ✅
-10. Query execution (next)
-11. TCP server/client protocol
+10. **SQL semantic analysis/query execution (Milestone 7)** ✅
+11. TCP server/client protocol (next)
 12. Benchmarks, tests, architecture documentation
 
 **Milestone 2.5 — versioned database metadata page** ✅
@@ -134,6 +134,11 @@ Milestone 6 adds a separate database-independent `minidb_sql` library with a han
 lexer, structured source diagnostics, move-only AST, and recursive-descent parser for
 CREATE TABLE, INSERT, SELECT, UPDATE, and DELETE. It performs no Catalog lookup and no
 execution. See [docs/sql-parser.md](docs/sql-parser.md) for the exact dialect and grammar.
+
+Milestone 7 adds source-aware semantic binding and execution for that existing grammar.
+It performs strict schema-directed literal conversion, SQL three-valued WHERE logic,
+structured results/statistics, primary-key equality lookups, and heap-scan fallback
+through Catalog and Table. See [docs/sql-execution.md](docs/sql-execution.md).
 
 ## Build
 

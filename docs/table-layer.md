@@ -25,6 +25,9 @@ RowValues --TupleCodec--> TupleStore
 - `eraseByPrimaryKey(key)` removes the index entry before erasing the tuple and attempts
   to restore the index mapping if the heap step unexpectedly fails.
 - `erase(RID)` is also available and coordinates the primary index when present.
+- `update(RID, values)` is the common higher-layer mutation boundary. On indexed tables
+  it verifies the RID/key mapping and delegates to coordinated primary-key update logic.
+  On no-PK tables it updates in-page or performs compensated cross-page replacement.
 - `updateByPrimaryKey(oldKey, values)` validates first and rejects duplicate replacement
   keys without mutation. It preserves the RID when TupleStore can update in-page. When
   the replacement cannot fit that page, Table inserts it elsewhere, installs the new
