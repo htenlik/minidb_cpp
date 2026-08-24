@@ -130,9 +130,9 @@ void testInsertProjectionWhereAndIndexStats() {
     command(
         engine.execute("INSERT INTO users VALUES (1, 'alice', 'a@x', 100, TRUE)"),
         CommandKind::Insert);
-    const auto& second = command(
-        engine.execute("INSERT INTO users (active, username, id) VALUES (FALSE, 'bob', 2)"),
-        CommandKind::Insert);
+    const auto secondResult = engine.execute(
+        "INSERT INTO users (active, username, id) VALUES (FALSE, 'bob', 2)");
+    const auto& second = command(secondResult, CommandKind::Insert);
     minidb::test::require(second.affectedRows == 1 && second.insertedRecordId.has_value(),
                           "INSERT result omitted affected row/RID");
 
