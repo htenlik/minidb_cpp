@@ -71,6 +71,10 @@ add_executable(pager_test tests/pager_test.cpp)
 target_link_libraries(pager_test PRIVATE minidb_core)
 add_test(NAME pager_test COMMAND pager_test)
 
+add_executable(pager_stats_test tests/pager_stats_test.cpp)
+target_link_libraries(pager_stats_test PRIVATE minidb_core)
+add_test(NAME pager_stats_test COMMAND pager_stats_test)
+
 add_executable(row_test tests/row_test.cpp)
 target_link_libraries(row_test PRIVATE minidb_core)
 add_test(NAME row_test COMMAND row_test)

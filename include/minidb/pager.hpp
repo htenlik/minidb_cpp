@@ -4,12 +4,27 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <unordered_map>
 
 namespace minidb {
+
+struct PagerStats {
+    std::uint64_t pageRequests = 0;
+    std::uint64_t cacheHits = 0;
+    std::uint64_t cacheMisses = 0;
+    std::uint64_t physicalPageReads = 0;
+    std::uint64_t physicalPageWrites = 0;
+    std::uint64_t dirtyMarks = 0;
+    std::uint64_t flushCalls = 0;
+    std::uint64_t appendedPages = 0;
+    std::uint64_t residentPages = 0;
+
+    bool operator==(const PagerStats&) const = default;
+};
 
 class Pager {
 public:
@@ -30,6 +45,10 @@ public:
     void updateCatalogRootPageId(PageId pageId);
     void updateFreeListRootPageId(PageId pageId);
 
+    [[nodiscard]] PagerStats stats() const noexcept;
+    void resetStats() noexcept;
+    [[nodiscard]] std::size_t residentPageCount() const noexcept { return cache_.size(); }
+
     [[nodiscard]] PageId pageCount() const noexcept { return pageCount_; }
     [[nodiscard]] const database_format::DatabaseHeader& databaseHeader() const noexcept {
         return databaseHeader_;
@@ -46,6 +65,7 @@ private:
     PageId pageCount_ = 0;
     database_format::DatabaseHeader databaseHeader_{};
     std::unordered_map<PageId, std::unique_ptr<Frame>> cache_;
+    PagerStats stats_{};
 
     void openOrCreate();
     void initializeDatabase();
