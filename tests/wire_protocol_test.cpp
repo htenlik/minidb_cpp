@@ -157,6 +157,16 @@ void testSelectValuesAndError() {
     minidb::test::require(frame.header.requestId == 999
                               && frame.header.messageType == MessageType::ErrorResponse,
                           "ErrorResponse request ID/type changed");
+    requireProtocolError(
+        [] { static_cast<void>(encodeErrorResponsePayload(ErrorResponse{
+            static_cast<ErrorCategory>(99), "bad", std::nullopt,
+        })); },
+        "unknown ErrorResponse category was encoded");
+    requireProtocolError(
+        [] { static_cast<void>(encodeErrorResponsePayload(ErrorResponse{
+            ErrorCategory::Parser, "bad span", sql::SourceSpan{{5, 0, 1}, {4, 1, 1}},
+        })); },
+        "invalid source span was encoded");
 }
 
 void testMalformedInput() {

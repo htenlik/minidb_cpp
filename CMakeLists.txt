@@ -159,6 +159,10 @@ add_executable(network_stress_test tests/network_stress_test.cpp)
 target_link_libraries(network_stress_test PRIVATE minidb_network)
 add_test(NAME network_stress_test COMMAND network_stress_test)
 
+add_executable(cli_format_test tests/cli_format_test.cpp)
+target_link_libraries(cli_format_test PRIVATE minidb_network)
+add_test(NAME cli_format_test COMMAND cli_format_test)
+
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)
 add_test(NAME bplus_tree_test COMMAND bplus_tree_test)

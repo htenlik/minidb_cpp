@@ -284,6 +284,24 @@ std::uint32_t checkedLocation(std::size_t value) {
     return static_cast<std::uint32_t>(value);
 }
 
+std::uint64_t checkedOffset(std::size_t value) {
+    if constexpr (sizeof(std::size_t) > sizeof(std::uint64_t)) {
+        if (value > std::numeric_limits<std::uint64_t>::max()) {
+            throw ProtocolError("source offset exceeds wire range");
+        }
+    }
+    return static_cast<std::uint64_t>(value);
+}
+
+std::size_t decodeOffset(std::uint64_t value) {
+    if constexpr (sizeof(std::size_t) < sizeof(std::uint64_t)) {
+        if (value > std::numeric_limits<std::size_t>::max()) {
+            throw ProtocolError("wire source offset exceeds host range");
+        }
+    }
+    return static_cast<std::size_t>(value);
+}
+
 } // namespace
 
 RemoteSqlError::RemoteSqlError(std::uint64_t requestId, ErrorResponse response)
@@ -545,13 +563,22 @@ sql::QueryResult decodeQueryResultFrame(const Frame& frame) {
 }
 
 WireBytes encodeErrorResponsePayload(const ErrorResponse& error) {
+    if (!knownErrorCategory(static_cast<std::uint16_t>(error.category))) {
+        throw ProtocolError("cannot encode unknown ErrorResponse category");
+    }
+    if (error.span.has_value()
+        && (error.span->begin.line == 0 || error.span->begin.column == 0
+            || error.span->end.line == 0 || error.span->end.column == 0
+            || error.span->end.offset < error.span->begin.offset)) {
+        throw ProtocolError("cannot encode invalid ErrorResponse source span");
+    }
     Writer writer;
     writer.uint16(static_cast<std::uint16_t>(error.category));
     writer.uint16(error.span.has_value() ? FLAG_PRESENT : 0);
     writer.string(error.message);
     if (error.span.has_value()) {
-        writer.uint64(error.span->begin.offset);
-        writer.uint64(error.span->end.offset);
+        writer.uint64(checkedOffset(error.span->begin.offset));
+        writer.uint64(checkedOffset(error.span->end.offset));
         writer.uint32(checkedLocation(error.span->begin.line));
         writer.uint32(checkedLocation(error.span->begin.column));
         writer.uint32(checkedLocation(error.span->end.line));
@@ -588,10 +615,10 @@ ErrorResponse decodeErrorResponsePayload(std::span<const std::byte> payload) {
         }
         result.span = sql::SourceSpan{
             sql::SourceLocation{
-                static_cast<std::size_t>(beginOffset), beginLine, beginColumn,
+                decodeOffset(beginOffset), beginLine, beginColumn,
             },
             sql::SourceLocation{
-                static_cast<std::size_t>(endOffset), endLine, endColumn,
+                decodeOffset(endOffset), endLine, endColumn,
             },
         };
     }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <variant>
@@ -71,6 +72,9 @@ std::string formatQueryResult(const sql::QueryResult& result, bool includeStats)
             widths.push_back(column.size());
         }
         for (const auto& row : selection.rows) {
+            if (row.size() != selection.columns.size()) {
+                throw std::invalid_argument("SELECT row width disagrees with its columns");
+            }
             auto& formatted = rows.emplace_back();
             formatted.reserve(row.size());
             for (std::size_t index = 0; index < row.size(); ++index) {
