@@ -72,5 +72,6 @@ its metadata and reachable node PageIds are disjoint from the free-list set.
 
 The free list and tree survive successful explicit buffer/DiskManager flushes and clean close/reopen
 cycles. They are not crash-atomic: reclamation and tree rebalancing can dirty multiple
-pages and both metadata structures. Without WAL/recovery, a process or machine failure
-between writes may leave inconsistent state. No transactional durability is claimed.
+pages and both metadata structures. Without production mutation logging/recovery, a
+process or machine failure between writes may leave inconsistent state. No transactional
+durability is claimed.

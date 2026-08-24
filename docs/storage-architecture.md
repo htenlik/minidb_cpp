@@ -100,8 +100,27 @@ No persistent offset, width, magic, version, tuple encoding, catalog encoding, S
 grammar, or wire byte changed in 10B. A database assembled through the legacy Pager
 formats is opened and queried by the active buffer-backed engine in compatibility tests.
 
-The engine remains single-threaded. Read/write guards express access mode, pin lifetime,
-and dirty permission—not locks or latches. There is no WAL, transaction atomicity,
-recovery, `fsync` guarantee, or synchronization protocol. Dirty eviction can persist
-pages in an order unrelated to a logical multi-page operation. A future WAL must enforce
-write-ahead ordering before dirty transactional pages may be written.
+Milestone 11A adds a separate optional logging path without altering a persistent
+database-page format:
+
+```text
+explicit test / future recovery mutation
+        |                    |
+        | log record         | page bytes + assigned LSN
+        v                    v
+   LogManager <------ BufferPoolManager ------> DiskManager
+        |              force WAL first               |
+        v                                             v
+ database.db.wal                                database.db
+```
+
+The buffer pool enforces WAL durability before writing a dirty frame with a valid
+volatile pageLSN. The production ownership graph does not attach LogManager yet because
+TupleStore, allocator, tree, Catalog, and Table mutations do not emit complete recovery
+records; ordinary production construction therefore creates no meaningless WAL.
+
+The engine remains single-threaded. Guards are not locks or latches. There is no
+persistent pageLSN, analysis/redo/undo, statement atomicity, transaction protocol,
+checkpoint policy, or recovery. Dirty unlogged pages can still reach disk in an order
+unrelated to a logical multi-page operation. See [wal.md](wal.md) for the exact format,
+ordering guarantee, and 11B boundary.

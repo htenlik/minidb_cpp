@@ -21,6 +21,9 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--reopen-interval N` | 250 | Operations per reopen segment |
 | `--buffer-frames N` | 64 | Bounded capacity for buffer and active engine workloads |
 | `--lru-k N` | 2 | LRU-K history length for buffer and active engine workloads (`K >= 1`) |
+| `--wal-payload-bytes N` | 128 | Opaque bytes per standalone WAL record |
+| `--wal-batch-size N` | 10 | Records between forces in `wal_batch_flush` |
+| `--wal-buffer-bytes N` | 65536 | LogManager memory-buffer capacity |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |
 | `--seed N` | 12345 | Deterministic workload seed |
 | `--repetitions N` | 1 | Fresh-database repetitions per workload |
@@ -35,5 +38,8 @@ workload distributions, output schema, and interpretation caveats.
 
 JSON identifies each result with `storage_backend`: `buffer_pool` for active B+ tree,
 TupleStore, SQL, TCP, mixed, and standalone buffer workloads; `legacy_pager` only for
-the historical low-level Pager family. The same configuration object records frame
-capacity and K for controlled comparisons.
+the historical low-level Pager family; and `wal` for the standalone logging substrate.
+The WAL workloads are `wal_append_buffered`, `wal_append_flush_each`, and
+`wal_batch_flush`; they report records/payload throughput, append/force latency, encoded
+bytes, buffer drains, writes, and fsyncs. The same configuration object records frame/K
+and WAL payload/batch/buffer controls for controlled comparisons.

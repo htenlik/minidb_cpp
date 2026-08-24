@@ -19,6 +19,7 @@ BufferFrame
     uint32 pin count
     dirty flag
     valid flag
+    pageLSN (volatile; INVALID when unlogged)
 ```
 
 Construction requires a positive frame capacity and positive LRU-K `K` (default 2).
@@ -184,9 +185,14 @@ policy, concurrency control, or adaptive K.
 - The destructor attempts `flushAll()` and suppresses errors because destructors cannot
   reliably report them. Explicit `flushAll()` is the error-reporting persistence API.
 
-None of these rules provides crash consistency. Without WAL, dirty pages may reach disk
-in arbitrary eviction order. A transactional design must enforce write-ahead logging
-before dirty data-page writes and provide recovery.
+With an optional WAL provider, a dirty frame carrying a valid volatile `pageLSN` cannot
+be written until the provider is durable through that LSN. Dirty eviction and
+`flushPage()` force first and preserve the mapped dirty frame if forcing fails;
+`flushAll()` forces the maximum required pageLSN once before its database-page writes.
+The destructor uses the same path but retains its historical error-suppression policy.
+Unlogged `INVALID_LSN` pages retain the old transitional behavior. pageLSNs reset on
+frame reuse/reload and are not persistent, so these rules alone do not provide crash
+recovery. See [wal.md](wal.md).
 
 ## Statistics and validation
 
@@ -201,6 +207,7 @@ before dirty data-page writes and provide recovery.
 | `evictions` / `dirtyEvictions` | Completed frame identity replacements / those whose victims were dirty |
 | `pinOperations` / `unpinOperations` | Successful guard pin acquisitions/releases |
 | `appendedPages` | Successful `newPageWrite()` physical appends |
+| `walFlushRequests` | WAL force calls initiated before logged database-page writes |
 
 Current gauges are `residentPages`, `pinnedFrames`, `evictableFrames`, and `capacity`.
 `resetStats()` clears event counters without clearing frames, histories, or gauges. Hit
@@ -234,8 +241,8 @@ their unbounded and bounded memory configurations are not apples-to-apples engin
 ```
 
 The BufferPoolManager and migrated engine remain single-threaded. No mutex, latch, wait
-queue, or blocking pin protocol exists in 10B. Guards express access mode and lifetime,
-not synchronization.
+queue, or blocking pin protocol exists. Guards express access mode and lifetime, not
+synchronization. Production storage mutations do not assign pageLSNs until 11B.
 
 ## Reference
 

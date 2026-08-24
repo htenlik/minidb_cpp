@@ -31,12 +31,12 @@ TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Exec
                                                         |
                                                         v
                                              BufferPoolManager / LRU-K
-                                                        |
-                                                        v
-                                                   DiskManager
-                                                        |
-                                                        v
-                                                   database.db
+                                                /               \
+                                               v                 v
+                                      optional LogManager    DiskManager
+                                               |                 |
+                                               v                 v
+                                        database.db.wal      database.db
 ```
 
 ## Milestones
@@ -57,9 +57,15 @@ The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
 9. **Benchmarking and storage-observability baseline** ✅
 10A. **DiskManager, bounded buffer pool, page guards, and LRU-K** ✅
 10B. **Engine-wide buffer-pool migration** ✅
-11. **WAL and recovery foundation** — next
+11A. **WAL foundation and buffer-pool write-ahead ordering** ✅
+11B. **Crash recovery and statement atomicity** — next
 12. **Transactions and concurrency** — planned
 13. **Experimental and paper-driven work** — later
+
+Milestone 11A adds an independent versioned `database.db.wal`, byte-offset LSNs,
+buffered append plus `fsync`, corruption/tail detection, volatile frame pageLSNs, and
+WAL-before-database-page enforcement. Production mutations remain deliberately unlogged,
+so this is not crash recovery; 11B is next. See [docs/wal.md](docs/wal.md).
 
 Milestone 10B routes the active TupleStore, persistent index, Catalog/Table, SQL, and TCP
 paths through move-only page guards, the bounded BufferPoolManager, and DiskManager.

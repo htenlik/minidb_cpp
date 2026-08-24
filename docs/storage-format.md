@@ -7,6 +7,8 @@ never written directly to disk.
 Milestone 10B changes only the in-memory access path (guards, bounded buffer pool, and
 DiskManager). Every magic, version, offset, width, byte order, and encoded value described
 here remains byte-identical.
+Milestone 11A likewise changes no database-page byte: its independent sidecar format is
+documented in [wal.md](wal.md), and pageLSN is volatile buffer-frame metadata only.
 
 ## Physical page layout
 

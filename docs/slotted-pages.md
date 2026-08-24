@@ -177,5 +177,5 @@ repaired automatically.
 
 Successful flush and clean close/reopen persistence is supported. Operations that touch
 heap metadata, neighbor links, a reclaimed page, and PageAllocator metadata are not
-crash-atomic. There is no WAL or recovery protocol, and no transactional durability is
-claimed.
+crash-atomic. The 11A WAL substrate is not wired to tuple mutations and there is no
+recovery protocol, so no transactional durability is claimed.

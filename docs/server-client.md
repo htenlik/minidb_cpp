@@ -90,7 +90,8 @@ calls `BufferPoolManager::flushAll()` and then `DiskManager::flush()`, and only 
 the success response. Operation guards have already left scope at this boundary. Thus a
 successful response means dirty resident pages were written through the current C++ file
 stream, and clean close/reopen tests are deterministic. This is not crash-safe durability:
-there is no `fsync`, WAL, transaction atomicity, or recovery, and dirty eviction may
+the server does not attach the 11A WAL substrate to mutations; there is no database-file
+`fsync`, transaction atomicity, or recovery, and unlogged dirty eviction may
 persist parts of a multi-page change in any order.
 
 A client connection can carry many sequential requests. A normal SQL error does not end

@@ -1,8 +1,9 @@
 # Benchmarking and storage observability
 
 Milestone 9 established the repeatable post-`v0.1.0` baseline; 10A added standalone
-buffer workloads; 10B migrates active persistent B+ tree, TupleStore, SQL, TCP, and mixed
-workloads to the bounded pool. The harness reports measurements, not performance claims.
+buffer workloads; 10B migrated active engine workloads to the bounded pool; 11A adds
+standalone WAL append/force experiments. The harness reports measurements, not
+performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
 
@@ -20,6 +21,8 @@ Only `pager_*` workloads use this historical backend. They are labeled
 Standalone `buffer_*` and active B+ tree, TupleStore, SQL, TCP, and mixed workloads use
 BufferPoolManager + DiskManager and are labeled `storage_backend = "buffer_pool"`.
 Their resident set is capped by `--buffer-frames`, and `--lru-k` controls replacement.
+Standalone `wal_*` workloads use only LogManager and are labeled
+`storage_backend = "wal"`; they are not full transactions or SQL operations.
 
 Instrumentation excludes the database metadata page read performed by Pager startup.
 It does not change allocation, loading, dirtying, or flushing behavior. `PagerStats`
@@ -66,6 +69,9 @@ Every operation is timed independently using `std::chrono::steady_clock`. Report
 sum. The timer-call overhead is therefore present, and nanosecond values should not be
 interpreted as precision guarantees. No workload currently uses batch-derived latency.
 
+WAL operations separately retain append and synchronous force samples. Their overall
+record latency includes the force selected by the workload; a final force is charged to
+the final record so records/s and payload bytes/s include clean durability completion.
 Latency percentiles use nearest rank: sort `N` samples, compute
 `rank = ceil(percent * N / 100)`, constrain rank to `1..N`, and return element
 `rank - 1`. The tool reports count, total, operations/second, mean, p50, p95, p99,
@@ -94,7 +100,7 @@ pages fit within frame capacity and a memory-bound run where they do not.
 ## Workload definitions
 
 The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sql`,
-`tcp`, and `mixed`) and these named workloads:
+`tcp`, `mixed`, and `wal`) and these named workloads:
 
 | Family | Workloads and measured region |
 | --- | --- |
@@ -105,6 +111,16 @@ The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sq
 | Local SQL | `sql_pk_lookup`, `sql_heap_scan`, `sql_insert`, `sql_update`, `sql_delete`, `sql_mixed`, `sql_pk_vs_heap` |
 | TCP loopback | `tcp_pk_lookup`, `tcp_heap_scan`, `tcp_insert`, `tcp_mixed` |
 | Mixed profiles | `mixed_read_heavy`, `mixed_write_heavy` (local SQL) |
+| WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush` |
+
+`wal_append_buffered` appends all records then performs one final synchronous force.
+`wal_append_flush_each` forces every record. `wal_batch_flush` forces every
+`--wal-batch-size N` records plus any final partial batch. `--wal-payload-bytes N`
+controls opaque payload size (up to the 1 MiB record limit), and `--wal-buffer-bytes N`
+controls LogManager's memory buffer. Useful payload experiments include 32, 128, 512,
+4096, and 8192 bytes. A record larger than the configured buffer exercises the direct
+write path. These numbers characterize the WAL substrate only and must not be presented
+as transaction throughput or evidence for a future logical/full-page logging choice.
 
 B+ insertion uses deterministic unique 32-bit keys and valid synthetic RIDs; the other
 B+ workloads populate the persistent tree first. Tuple fragmentation alternates
@@ -143,7 +159,7 @@ Both `quick` and `baseline` contain:
 
 ```text
 pager_sequential  pager_random  buffer_random  bplus_find_hit  tuple_lookup
-sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup
+sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffered
 ```
 
 `quick` caps rows at 32, operations/pages at 24, warmup/buffer frames at 8, and reopen cadence at 12.
@@ -163,6 +179,14 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup
   --json benchmarks/results/pager-random.json
 ./build-release/minidb_bench --benchmark sql_pk_vs_heap --rows 100000 \
   --operations 50000 --seed 12345
+
+# Synchronous WAL batch-size comparison (same payload/count/build/machine)
+./build-release/minidb_bench --benchmark wal_batch_flush --operations 10000 \
+  --wal-payload-bytes 128 --wal-batch-size 1
+./build-release/minidb_bench --benchmark wal_batch_flush --operations 10000 \
+  --wal-payload-bytes 128 --wal-batch-size 10
+./build-release/minidb_bench --benchmark wal_batch_flush --operations 10000 \
+  --wal-payload-bytes 128 --wal-batch-size 100
 ```
 
 See [the benchmark command reference](../benchmarks/README.md) for every option.
@@ -173,11 +197,13 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 
 - `benchmark`, explicit `storage_backend`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
-  repetitions, buffer frames, LRU-K K, mode, and tuple sizes;
+  repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer sizes, mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
 - `pager`: all nine Pager statistics;
 - `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
-  evictions, pin activity, appended pages, resident/pinned/evictable gauges, and capacity;
+  evictions, pin activity, appended pages, WAL force requests, gauges, and capacity;
+- `wal`: record/payload counts, payload throughput, encoded bytes written, physical
+  writes, buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;
 - `execution`: average rows examined and index lookups;
 - `environment`: version context, configured Git commit, compiler, build type, platform,
@@ -193,6 +219,7 @@ machine/build configurations.
 ## Limitations and interpretation
 
 - This harness is single-process and single-client; it is not a concurrency benchmark.
+- WAL batch forcing is synchronous and single-threaded; it is not group commit.
 - Per-operation timer overhead matters for very cheap cache hits.
 - Reopen mode cannot bypass the OS page cache.
 - The unbounded cache can consume memory proportional to distinct pages accessed.

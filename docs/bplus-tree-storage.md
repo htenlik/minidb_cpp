@@ -225,11 +225,11 @@ Corruption is rejected; no automatic repair is attempted.
 
 The educational fixed RecordStore still uses legacy Pager's append-only allocation
 primitive. The Milestone 5B Catalog stores
-stable index metadata identities, but concurrency, transactions, WAL, and recovery are
-not implemented.
+stable index metadata identities, but concurrency, transactions, automatic B+ tree
+logging, and recovery are not implemented.
 
 Persistence is guaranteed only after a successful buffer/DiskManager flush or clean close. A split,
 merge, or root shrink can modify several nodes plus index and database metadata, and
-there is no WAL or atomic multi-page commit. A crash between physical writes can leave
-an inconsistent tree or free list. Write ordering alone is not claimed as crash
-consistency; recovery belongs to a later transaction/WAL design.
+there is no B+ tree mutation logging or atomic multi-page commit. A crash between
+physical writes can leave an inconsistent tree or free list. Write ordering alone is not
+claimed as crash consistency; recovery belongs to a later transaction/WAL design.
