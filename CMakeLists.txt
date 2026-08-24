@@ -8,6 +8,7 @@ add_library(minidb_core
     src/catalog.cpp
     src/database_format.cpp
     src/disk_manager.cpp
+    src/lru_k_replacer.cpp
     src/page_allocator.cpp
     src/pager.cpp
     src/persistent_bplus_tree.cpp
@@ -104,6 +105,10 @@ add_test(NAME pager_stats_test COMMAND pager_stats_test)
 add_executable(disk_manager_test tests/disk_manager_test.cpp)
 target_link_libraries(disk_manager_test PRIVATE minidb_core)
 add_test(NAME disk_manager_test COMMAND disk_manager_test)
+
+add_executable(lru_k_replacer_test tests/lru_k_replacer_test.cpp)
+target_link_libraries(lru_k_replacer_test PRIVATE minidb_core)
+add_test(NAME lru_k_replacer_test COMMAND lru_k_replacer_test)
 
 add_executable(row_test tests/row_test.cpp)
 target_link_libraries(row_test PRIVATE minidb_core)
