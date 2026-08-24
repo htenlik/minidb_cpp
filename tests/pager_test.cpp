@@ -26,6 +26,7 @@ int main() {
         auto& page = pager.getPage(1);
         assert(page[0] == std::byte{0x2A});
         assert(page[4095] == std::byte{0x7F});
+        static_cast<void>(page); // Assertions are compiled out in Release builds.
     }
     std::filesystem::remove(path);
     std::cout << "pager_test passed\n";
