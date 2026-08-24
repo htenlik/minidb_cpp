@@ -43,24 +43,29 @@ target_include_directories(minidb_sql_execution PUBLIC include)
 target_link_libraries(minidb_sql_execution PUBLIC minidb_sql_semantics)
 
 add_library(minidb_wire
-    src/cli_format.cpp
-    src/database_server.cpp
-    src/minidb_client.cpp
-    src/tcp_server.cpp
-    src/tcp_transport.cpp
     src/wire_protocol.cpp
 )
 target_include_directories(minidb_wire PUBLIC include)
 target_link_libraries(minidb_wire PUBLIC minidb_sql_execution)
 
+add_library(minidb_network
+    src/cli_format.cpp
+    src/database_server.cpp
+    src/minidb_client.cpp
+    src/tcp_server.cpp
+    src/tcp_transport.cpp
+)
+target_include_directories(minidb_network PUBLIC include)
+target_link_libraries(minidb_network PUBLIC minidb_wire)
+
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
 
 add_executable(minidb_server src/server_main.cpp)
-target_link_libraries(minidb_server PRIVATE minidb_wire)
+target_link_libraries(minidb_server PRIVATE minidb_network)
 
 add_executable(minidb_client src/client_main.cpp)
-target_link_libraries(minidb_client PRIVATE minidb_wire)
+target_link_libraries(minidb_client PRIVATE minidb_network)
 enable_testing()
 add_executable(pager_test tests/pager_test.cpp)
 target_link_libraries(pager_test PRIVATE minidb_core)
@@ -143,15 +148,15 @@ target_link_libraries(wire_protocol_test PRIVATE minidb_wire)
 add_test(NAME wire_protocol_test COMMAND wire_protocol_test)
 
 add_executable(tcp_transport_test tests/tcp_transport_test.cpp)
-target_link_libraries(tcp_transport_test PRIVATE minidb_wire)
+target_link_libraries(tcp_transport_test PRIVATE minidb_network)
 add_test(NAME tcp_transport_test COMMAND tcp_transport_test)
 
 add_executable(network_protocol_test tests/network_protocol_test.cpp)
-target_link_libraries(network_protocol_test PRIVATE minidb_wire)
+target_link_libraries(network_protocol_test PRIVATE minidb_network)
 add_test(NAME network_protocol_test COMMAND network_protocol_test)
 
 add_executable(network_stress_test tests/network_stress_test.cpp)
-target_link_libraries(network_stress_test PRIVATE minidb_wire)
+target_link_libraries(network_stress_test PRIVATE minidb_network)
 add_test(NAME network_stress_test COMMAND network_stress_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
