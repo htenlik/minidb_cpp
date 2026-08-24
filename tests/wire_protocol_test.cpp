@@ -48,6 +48,15 @@ void testHeaderAndFrames() {
     }
     minidb::test::require(decodeFrameHeader(bytes) == header,
                           "frame header failed round-trip");
+    for (const auto type : {
+             MessageType::Hello, MessageType::ExecuteSql, MessageType::HelloAck,
+             MessageType::CommandResult, MessageType::SelectResult,
+             MessageType::ErrorResponse,
+         }) {
+        const FrameHeader known{type, 7, MAX_FRAME_PAYLOAD};
+        minidb::test::require(decodeFrameHeader(encodeFrameHeader(known)) == known,
+                              "known message type or maximum payload was rejected");
+    }
 
     const auto hello = makeHelloFrame();
     minidb::test::require(hello.header.messageType == MessageType::Hello
@@ -59,6 +68,10 @@ void testHeaderAndFrames() {
     minidb::test::require(decodeExecuteSqlPayload(decodeFrame(encodeFrame(execute)))
                               == "SELECT 1",
                           "EXECUTE_SQL did not preserve SQL bytes");
+    minidb::test::require(execute.payload.size() == 8
+                              && octet(execute.payload[0]) == 'S'
+                              && octet(execute.payload[7]) == '1',
+                          "EXECUTE_SQL payload is not the exact raw SQL byte sequence");
 }
 
 void testCommandResult() {
@@ -99,6 +112,25 @@ void testSelectValuesAndError() {
         sql::ExecutionStats{sql::AccessPath::HeapScan, 7, 1, 0},
     };
     const auto payload = encodeSelectResultPayload(input);
+    minidb::test::require(payload.size() == 124
+                              && octet(payload[3]) == 5
+                              && octet(payload[11]) == 1
+                              && octet(payload[15]) == 1
+                              && octet(payload[17]) == 1
+                              && octet(payload[82]) == 0
+                              && octet(payload[85]) == 17
+                              && octet(payload[87]) == 9
+                              && octet(payload[93]) == 5
+                              && octet(payload[94]) == 0
+                              && octet(payload[95]) == 1
+                              && octet(payload[96]) == 0xFF
+                              && octet(payload[100]) == 2
+                              && octet(payload[101]) == 0x80
+                              && octet(payload[109]) == 3
+                              && octet(payload[110]) == 1
+                              && octet(payload[111]) == 4
+                              && octet(payload[115]) == 8,
+                          "SelectResult/Value/RID exact wire layout changed");
     minidb::test::require(decodeSelectResultPayload(payload) == input,
                           "SelectResult values/RID/stats failed round-trip");
     const sql::QueryResult query = input;
@@ -111,7 +143,15 @@ void testSelectValuesAndError() {
         "expected expression",
         sql::SourceSpan{{4, 2, 3}, {9, 2, 8}},
     };
-    minidb::test::require(decodeErrorResponsePayload(encodeErrorResponsePayload(error)) == error,
+    const auto errorPayload = encodeErrorResponsePayload(error);
+    minidb::test::require(errorPayload.size() == 59
+                              && octet(errorPayload[1]) == 3
+                              && octet(errorPayload[3]) == 1
+                              && octet(errorPayload[7]) == 19
+                              && octet(errorPayload[34]) == 4
+                              && octet(errorPayload[42]) == 9,
+                          "ErrorResponse exact byte layout changed");
+    minidb::test::require(decodeErrorResponsePayload(errorPayload) == error,
                           "ErrorResponse category/message/span failed round-trip");
     const auto frame = makeErrorFrame(999, error);
     minidb::test::require(frame.header.requestId == 999
