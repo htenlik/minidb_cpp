@@ -158,6 +158,7 @@ void testNoCrossPageUpdateRelocation() {
     minidb::test::require(storage.diskManager.pageCount() == pageCount,
                           "Failed TupleStore update allocated another page");
     store.validate();
+    minidb::test::requireBufferClean(storage);
 }
 
 void testEmptyPageReclamationAndEndpointRepair() {
@@ -273,6 +274,7 @@ void testHeapOwnershipAndInvalidRids() {
         "TupleStore accepted a SlotId outside the page directory");
     minidb::test::require(first.get(firstRid) == makeTuple(10, 1),
                           "Invalid-RID checks mutated the owning heap");
+    minidb::test::requireBufferClean(storage);
 }
 
 void testCrossComponentPageReuse() {

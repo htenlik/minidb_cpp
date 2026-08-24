@@ -315,6 +315,54 @@ void testNoFrameAvailableIsReportedWithoutAllocating() {
     minidb::test::requireBufferClean(storage);
 }
 
+void testEvictedFreeListPersistsAcrossTinyPoolReopens() {
+    TemporaryDatabase database("evicted_reopen");
+    std::vector<minidb::PageId> pages;
+    {
+        minidb::test::TestStorage storage(database.path(), 2, 2);
+        for (std::size_t index = 0; index < 24; ++index) {
+            pages.push_back(storage.allocator.allocatePage());
+        }
+        for (const auto pageId : pages) {
+            storage.allocator.releasePage(pageId);
+        }
+        storage.allocator.validate();
+        storage.bufferPool.flushAll();
+        minidb::test::requireBufferClean(storage);
+    }
+
+    const std::vector<minidb::PageId> expected(pages.rbegin(), pages.rend());
+    {
+        minidb::test::TestStorage storage(database.path(), 2, 2);
+        require(
+            storage.allocator.freePageIds() == expected,
+            "Reopened tiny-pool allocator lost the evicted free-list order");
+        for (std::size_t index = 0; index < 7; ++index) {
+            require(
+                storage.allocator.allocatePage() == expected[index],
+                "Reopened tiny-pool allocator popped the wrong free page");
+        }
+        storage.bufferPool.flushAll();
+        minidb::test::requireBufferClean(storage);
+    }
+
+    {
+        minidb::test::TestStorage storage(database.path(), 2, 2);
+        const std::vector<minidb::PageId> remaining(expected.begin() + 7, expected.end());
+        require(
+            storage.allocator.freePageIds() == remaining,
+            "Second reopen did not preserve the partially consumed free list");
+        for (const auto pageId : remaining) {
+            require(
+                storage.allocator.allocatePage() == pageId,
+                "Second reopen popped a free page out of LIFO order");
+        }
+        require(storage.allocator.freePageIds().empty(),
+                "Reopened free list was not empty after every page was reused");
+        minidb::test::requireBufferClean(storage);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -326,5 +374,6 @@ int main() {
     testFreePageCorruptionIsRejected();
     testPinnedReleaseAndEvictedFreeList();
     testNoFrameAvailableIsReportedWithoutAllocating();
+    testEvictedFreeListPersistsAcrossTinyPoolReopens();
     return 0;
 }
