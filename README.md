@@ -2,31 +2,32 @@
 
 A small educational database engine written from scratch in C++20.
 
-The end goal is a TCP-accessible database that accepts a deliberately small SQL subset,
-stores records persistently on disk, and uses a B+ tree index for efficient key lookup
-and range scans.
+The original end-to-end goal is implemented: a TCP-accessible database accepts a
+deliberately small SQL subset, stores tuples persistently, and uses a B+ tree primary
+index for efficient key lookup and range scans.
 
 ## Architecture
 
 ```text
-TCP client
-    |
-    v
-TCP server
-    |
-    v
-Lexer / Parser
-    |
-    v
-Executor
-    |
-    +------> B+ Tree
-    |           |
-    v           v
-Record Store <-> Pager
-                |
-                v
-            minidb.db
+TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Executor
+                                                               |
+                                                               v
+                                                        Catalog / Table
+                                                         /           \
+                                                        v             v
+                                                   TupleStore      B+ Tree
+                                                        |
+                                                        v
+                                                   SlottedPage
+                                                        |
+                                                        v
+                                                   PageAllocator
+                                                        |
+                                                        v
+                                                      Pager
+                                                        |
+                                                        v
+                                                   database.db
 ```
 
 ## Milestones
@@ -34,15 +35,15 @@ Record Store <-> Pager
 1. **Pager / fixed-size disk pages** ✅
 2. **Row serialization/deserialization** ✅
 3. **Persistent RID-based record storage** ✅
-4. **In-memory B+ tree primary index (Milestone 4A)** ✅
-5. **Persistent B+ tree insertion/read (Milestone 4B.1)** ✅
-6. **Persistent B+ tree deletion/reclamation (Milestone 4B.2)** ✅
-7. **Variable-length tuple heap / slotted pages (Milestone 5A)** ✅
-8. **Schema, catalog, and table layer (Milestone 5B)** ✅
-9. **SQL lexer/parser/AST (Milestone 6)** ✅
-10. **SQL semantic analysis/query execution (Milestone 7)** ✅
-11. TCP server/client protocol (next)
-12. Benchmarks, tests, architecture documentation
+4. **In-memory and persistent B+ tree (Milestones 4A–4B.2)** ✅
+5. **Variable-length storage and relational layer (Milestones 5A–5B)** ✅
+6. **SQL lexer/parser/AST (Milestone 6)** ✅
+7. **SQL semantic analysis/query execution (Milestone 7)** ✅
+8. **TCP server/client protocol (Milestone 8)** ✅
+
+The original MiniDB++ end-to-end MVP is complete. Advanced database-systems work—such
+as transactions/WAL, a buffer pool, concurrency, richer query processing, and protocol
+security—remains a future roadmap and requires separate designs.
 
 **Milestone 2.5 — versioned database metadata page** ✅
 
@@ -126,7 +127,6 @@ catalog rooted through database metadata, and schema-aware tables that coordinat
 TupleStore with an optional `UINT32` primary-key B+ tree. See
 [docs/schema-and-tuples.md](docs/schema-and-tuples.md),
 [docs/catalog.md](docs/catalog.md), and [docs/table-layer.md](docs/table-layer.md).
-Query execution remains a later milestone.
 
 ## SQL front end
 
@@ -140,6 +140,18 @@ It performs strict schema-directed literal conversion, SQL three-valued WHERE lo
 structured results/statistics, primary-key equality lookups, and heap-scan fallback
 through Catalog and Table. See [docs/sql-execution.md](docs/sql-execution.md).
 
+## TCP server and client
+
+Milestone 8 adds a big-endian, versioned binary protocol and POSIX TCP server/client.
+Structured command results, SELECT values/RIDs/statistics, and source-aware errors survive
+the network round trip. Database execution is serial, successful statements are flushed
+before their responses, and the server binds `127.0.0.1:7432` by default. See
+[docs/wire-protocol.md](docs/wire-protocol.md) and
+[docs/server-client.md](docs/server-client.md).
+
+Protocol v1 is plaintext and has no authentication or authorization. It is for trusted
+local development, not untrusted networks.
+
 ## Build
 
 ```bash
@@ -147,6 +159,8 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/minidb demo.db
+./build/minidb_server demo.db --port 7432
+./build/minidb_client --port 7432 --execute "SELECT * FROM users;"
 ```
 
 Example:
