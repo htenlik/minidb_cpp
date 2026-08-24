@@ -4,12 +4,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(minidb_core
+    src/buffer_pool_manager.cpp
     src/bplus_tree.cpp
     src/catalog.cpp
     src/database_format.cpp
     src/disk_manager.cpp
     src/lru_k_replacer.cpp
     src/page_allocator.cpp
+    src/page_guard.cpp
     src/pager.cpp
     src/persistent_bplus_tree.cpp
     src/record_page.cpp
@@ -109,6 +111,10 @@ add_test(NAME disk_manager_test COMMAND disk_manager_test)
 add_executable(lru_k_replacer_test tests/lru_k_replacer_test.cpp)
 target_link_libraries(lru_k_replacer_test PRIVATE minidb_core)
 add_test(NAME lru_k_replacer_test COMMAND lru_k_replacer_test)
+
+add_executable(buffer_pool_manager_test tests/buffer_pool_manager_test.cpp)
+target_link_libraries(buffer_pool_manager_test PRIVATE minidb_core)
+add_test(NAME buffer_pool_manager_test COMMAND buffer_pool_manager_test)
 
 add_executable(row_test tests/row_test.cpp)
 target_link_libraries(row_test PRIVATE minidb_core)
