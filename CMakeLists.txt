@@ -30,6 +30,12 @@ add_library(minidb_sql
 )
 target_include_directories(minidb_sql PUBLIC include)
 
+add_library(minidb_sql_semantics
+    src/sql_semantics.cpp
+)
+target_include_directories(minidb_sql_semantics PUBLIC include)
+target_link_libraries(minidb_sql_semantics PUBLIC minidb_sql minidb_core)
+
 add_executable(minidb src/main.cpp)
 target_link_libraries(minidb PRIVATE minidb_core)
 enable_testing()
@@ -96,6 +102,10 @@ add_test(NAME sql_parser_test COMMAND sql_parser_test)
 add_executable(sql_parser_robustness_test tests/sql_parser_robustness_test.cpp)
 target_link_libraries(sql_parser_robustness_test PRIVATE minidb_sql)
 add_test(NAME sql_parser_robustness_test COMMAND sql_parser_robustness_test)
+
+add_executable(sql_semantics_test tests/sql_semantics_test.cpp)
+target_link_libraries(sql_semantics_test PRIVATE minidb_sql_semantics)
+add_test(NAME sql_semantics_test COMMAND sql_semantics_test)
 
 add_executable(bplus_tree_test tests/bplus_tree_test.cpp)
 target_link_libraries(bplus_tree_test PRIVATE minidb_core)

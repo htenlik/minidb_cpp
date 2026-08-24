@@ -134,7 +134,7 @@ CreateTableStatement Parser::parseCreateTable() {
         columns.push_back(parseColumnSpecification());
     }
     consume(TokenKind::RightParen, "expected ')' after column definitions");
-    return CreateTableStatement{table.value, std::move(columns)};
+    return CreateTableStatement{table.value, std::move(columns), table.span};
 }
 
 ColumnSpecification Parser::parseColumnSpecification() {
@@ -204,18 +204,28 @@ SqlTypeSpecification Parser::parseTypeSpecification() {
     failAt(peek(), "expected UINT32, INT64, BOOLEAN, or VARCHAR type");
 }
 
-std::vector<std::string> Parser::parseIdentifierList(std::string context) {
+std::vector<std::string> Parser::parseIdentifierList(
+    std::string context,
+    std::vector<SourceSpan>* spans) {
     if (check(TokenKind::RightParen)) {
         failAt(peek(), context + " cannot be empty");
     }
     std::vector<std::string> identifiers;
-    identifiers.push_back(consume(TokenKind::Identifier, "expected identifier in " + context).value);
+    const auto& first = consume(TokenKind::Identifier, "expected identifier in " + context);
+    identifiers.push_back(first.value);
+    if (spans != nullptr) {
+        spans->push_back(first.span);
+    }
     while (match(TokenKind::Comma)) {
         if (check(TokenKind::RightParen)) {
             failAt(peek(), "trailing comma is not allowed in " + context);
         }
-        identifiers.push_back(
-            consume(TokenKind::Identifier, "expected identifier after comma in " + context).value);
+        const auto& identifier = consume(
+            TokenKind::Identifier, "expected identifier after comma in " + context);
+        identifiers.push_back(identifier.value);
+        if (spans != nullptr) {
+            spans->push_back(identifier.span);
+        }
     }
     return identifiers;
 }
@@ -239,33 +249,46 @@ InsertStatement Parser::parseInsert() {
     consume(TokenKind::Into, "expected INTO after INSERT");
     const auto& table = consume(TokenKind::Identifier, "expected table name after INSERT INTO");
     std::optional<std::vector<std::string>> columns;
+    std::optional<std::vector<SourceSpan>> columnSpans;
     if (match(TokenKind::LeftParen)) {
-        columns = parseIdentifierList("INSERT column list");
+        columnSpans.emplace();
+        columns = parseIdentifierList("INSERT column list", &*columnSpans);
         consume(TokenKind::RightParen, "expected ')' after INSERT column list");
     }
     consume(TokenKind::Values, "expected VALUES in INSERT statement");
     consume(TokenKind::LeftParen, "expected '(' before VALUES list");
     auto values = parseLiteralList();
     consume(TokenKind::RightParen, "expected ')' after VALUES list");
-    return InsertStatement{table.value, std::move(columns), std::move(values)};
+    return InsertStatement{
+        table.value,
+        std::move(columns),
+        std::move(values),
+        table.span,
+        std::move(columnSpans),
+    };
 }
 
 SelectStatement Parser::parseSelect() {
     bool selectAll = false;
     std::vector<std::string> columns;
+    std::vector<SourceSpan> columnSpans;
     if (match(TokenKind::Star)) {
         selectAll = true;
     } else {
         if (!check(TokenKind::Identifier)) {
             failAt(peek(), "expected '*' or column identifier after SELECT");
         }
-        columns.push_back(advance().value);
+        const auto& first = advance();
+        columns.push_back(first.value);
+        columnSpans.push_back(first.span);
         while (match(TokenKind::Comma)) {
             if (check(TokenKind::Star)) {
                 failAt(peek(), "cannot mix '*' with named SELECT projections");
             }
-            columns.push_back(
-                consume(TokenKind::Identifier, "expected column identifier after comma").value);
+            const auto& column = consume(
+                TokenKind::Identifier, "expected column identifier after comma");
+            columns.push_back(column.value);
+            columnSpans.push_back(column.span);
         }
     }
     consume(TokenKind::From, "expected FROM after SELECT projection");
@@ -274,7 +297,14 @@ SelectStatement Parser::parseSelect() {
     if (match(TokenKind::Where)) {
         where = parseExpression();
     }
-    return SelectStatement{selectAll, std::move(columns), table.value, std::move(where)};
+    return SelectStatement{
+        selectAll,
+        std::move(columns),
+        table.value,
+        std::move(where),
+        table.span,
+        std::move(columnSpans),
+    };
 }
 
 UpdateStatement Parser::parseUpdate() {
@@ -292,6 +322,7 @@ UpdateStatement Parser::parseUpdate() {
             column.value,
             std::move(value),
             SourceSpan{column.span.begin, previous().span.end},
+            column.span,
         });
         if (!match(TokenKind::Comma)) {
             break;
@@ -304,7 +335,12 @@ UpdateStatement Parser::parseUpdate() {
     if (match(TokenKind::Where)) {
         where = parseExpression();
     }
-    return UpdateStatement{table.value, std::move(assignments), std::move(where)};
+    return UpdateStatement{
+        table.value,
+        std::move(assignments),
+        std::move(where),
+        table.span,
+    };
 }
 
 DeleteStatement Parser::parseDelete() {
@@ -314,7 +350,7 @@ DeleteStatement Parser::parseDelete() {
     if (match(TokenKind::Where)) {
         where = parseExpression();
     }
-    return DeleteStatement{table.value, std::move(where)};
+    return DeleteStatement{table.value, std::move(where), table.span};
 }
 
 SqlLiteral Parser::parseLiteral() {

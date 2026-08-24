@@ -72,6 +72,8 @@ void testCreateTableAst() {
         statement, "CREATE TABLE produced wrong statement kind");
     minidb::test::require(create.tableName == "Users" && create.columns.size() == 4,
                           "CREATE TABLE did not preserve name/columns");
+    minidb::test::require(create.tableNameSpan.begin.column == 14,
+                          "CREATE table identifier span was not retained");
     const auto& id = create.columns[0];
     minidb::test::require(id.name == "id" && id.type.kind == SqlTypeKind::Uint32
                               && id.primaryKey
@@ -137,6 +139,10 @@ void testInsertAstAndLiteralBoundaries() {
     minidb::test::require(explicitInsert.columns == std::optional<std::vector<std::string>>{
                               {"id", "userName", "id"}},
                           "Explicit INSERT columns were not preserved in source spelling/order");
+    minidb::test::require(explicitInsert.tableNameSpan.begin.column == 13
+                              && explicitInsert.columnSpans->size() == 3
+                              && (*explicitInsert.columnSpans)[1].begin.column == 24,
+                          "INSERT identifier spans were not retained");
     minidb::test::require(
         minidb::sql::toDebugString(explicitColumns)
             == "Insert(table=UsErS, columns=[id,userName,id], "
@@ -160,6 +166,10 @@ void testSelectProjectionAndExpressionPrecedence() {
                               && select.columns == std::vector<std::string>{"id", "UserName"}
                               && select.tableName == "MissingTable",
                           "Named SELECT projection was incorrect");
+    minidb::test::require(select.columnSpans.size() == 2
+                              && select.columnSpans[1].begin.column == 12
+                              && select.tableNameSpan.begin.column == 26,
+                          "SELECT identifier spans were not retained");
     minidb::test::require(
         minidb::sql::toDebugString(*select.where)
             == "Or(Eq(Id(a),Int(1)),And(Eq(Id(b),Int(2)),Eq(Id(c),Int(3))))",

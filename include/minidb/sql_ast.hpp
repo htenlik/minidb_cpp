@@ -120,12 +120,15 @@ struct ColumnSpecification {
 struct CreateTableStatement {
     std::string tableName;
     std::vector<ColumnSpecification> columns;
+    SourceSpan tableNameSpan{};
 };
 
 struct InsertStatement {
     std::string tableName;
     std::optional<std::vector<std::string>> columns;
     std::vector<SqlLiteral> values;
+    SourceSpan tableNameSpan{};
+    std::optional<std::vector<SourceSpan>> columnSpans;
 };
 
 struct SelectStatement {
@@ -133,23 +136,28 @@ struct SelectStatement {
     std::vector<std::string> columns;
     std::string tableName;
     std::unique_ptr<Expression> where;
+    SourceSpan tableNameSpan{};
+    std::vector<SourceSpan> columnSpans;
 };
 
 struct Assignment {
     std::string columnName;
     SqlLiteral value;
     SourceSpan span{};
+    SourceSpan columnNameSpan{};
 };
 
 struct UpdateStatement {
     std::string tableName;
     std::vector<Assignment> assignments;
     std::unique_ptr<Expression> where;
+    SourceSpan tableNameSpan{};
 };
 
 struct DeleteStatement {
     std::string tableName;
     std::unique_ptr<Expression> where;
+    SourceSpan tableNameSpan{};
 };
 
 using StatementNode = std::variant<

@@ -40,7 +40,9 @@ private:
     [[nodiscard]] DeleteStatement parseDelete();
     [[nodiscard]] ColumnSpecification parseColumnSpecification();
     [[nodiscard]] SqlTypeSpecification parseTypeSpecification();
-    [[nodiscard]] std::vector<std::string> parseIdentifierList(std::string context);
+    [[nodiscard]] std::vector<std::string> parseIdentifierList(
+        std::string context,
+        std::vector<SourceSpan>* spans);
     [[nodiscard]] std::vector<SqlLiteral> parseLiteralList();
     [[nodiscard]] SqlLiteral parseLiteral();
 
