@@ -2,9 +2,15 @@
 
 A small educational database engine written from scratch in C++20.
 
-The original end-to-end goal is implemented: a TCP-accessible database accepts a
+The `v0.1.0` end-to-end MVP is implemented: a TCP-accessible database accepts a
 deliberately small SQL subset, stores tuples persistently, and uses a B+ tree primary
 index for efficient key lookup and range scans.
+
+## v0.1.0 MVP
+
+The frozen MVP contains a persistent slotted-page heap, persistent B+ tree, reusable
+page allocator, schema/catalog/table layer, SQL parser and executor with primary-key
+access, versioned TCP protocol/server/client, and structural validation and tests.
 
 ## Architecture
 
@@ -41,9 +47,19 @@ TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Exec
 7. **SQL semantic analysis/query execution (Milestone 7)** ✅
 8. **TCP server/client protocol (Milestone 8)** ✅
 
-The original MiniDB++ end-to-end MVP is complete. Advanced database-systems work—such
-as transactions/WAL, a buffer pool, concurrency, richer query processing, and protocol
-security—remains a future roadmap and requires separate designs.
+The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
+
+### Advanced database-systems roadmap
+
+9. **Benchmarking and storage-observability baseline** ✅
+10. **Bounded buffer pool and replacement policy** — next
+11. **WAL and recovery foundation** — planned
+12. **Transactions and concurrency** — planned
+13. **Experimental and paper-driven work** — later
+
+Milestone 9 measures the existing design; it does not add eviction or change persistent
+formats. See [docs/benchmarking.md](docs/benchmarking.md) for methodology and
+[benchmarks/README.md](benchmarks/README.md) for commands.
 
 **Milestone 2.5 — versioned database metadata page** ✅
 
@@ -162,6 +178,16 @@ ctest --test-dir build --output-on-failure
 ./build/minidb_server demo.db --port 7432
 ./build/minidb_client --port 7432 --execute "SELECT * FROM users;"
 ```
+
+For representative benchmarks, configure a Release build and run the curated suite:
+
+```bash
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release
+./build-release/minidb_bench --suite baseline --json benchmarks/results/baseline.json
+```
+
+Machine-specific benchmark results are intentionally not committed.
 
 Example:
 
