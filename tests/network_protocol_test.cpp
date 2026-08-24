@@ -165,7 +165,7 @@ void testEndToEndAndErrors() {
 
 void testHandshakeAndBadClientIsolation() {
     minidb::test::TemporaryDatabase database("network_bad_clients");
-    runServer(database.path().string(), 5, [&](std::uint16_t port) {
+    runServer(database.path().string(), 7, [&](std::uint16_t port) {
         {
             auto socket = connectRaw(port);
             writeFrame(socket.get(), makeExecuteSqlFrame(41, "SELECT * FROM x"));
@@ -214,6 +214,24 @@ void testHandshakeAndBadClientIsolation() {
                                       && decodeErrorResponsePayload(response->payload).category
                                           == ErrorCategory::Protocol,
                                   "over-limit declared payload was not rejected before allocation");
+        }
+        {
+            auto socket = connectRaw(port);
+            const auto bytes = encodeFrame(makeHelloFrame());
+            writeAll(socket.get(), std::span(bytes).first(10));
+            socket.reset();
+        }
+        {
+            auto socket = connectRaw(port);
+            writeFrame(socket.get(), makeHelloFrame());
+            minidb::test::require(readFrame(socket.get()).has_value(),
+                                  "valid HELLO did not receive HELLO_ACK");
+            writeFrame(socket.get(), makeHelloFrame());
+            const auto response = readFrame(socket.get());
+            minidb::test::require(response.has_value()
+                                      && decodeErrorResponsePayload(response->payload).category
+                                          == ErrorCategory::Protocol,
+                                  "repeated HELLO was not a fatal protocol error");
         }
         {
             MiniDbClient good("127.0.0.1", port);
