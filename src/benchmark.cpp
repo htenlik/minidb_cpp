@@ -165,6 +165,12 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
         } else if (argument == "--wal-buffer-bytes") {
             result.config.walBufferBytes = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
+        } else if (argument == "--checkpoint-wal-bytes") {
+            result.config.checkpointWalBytes = parseUnsigned(
+                requireValue(arguments, index, argument), argument);
+        } else if (argument == "--checkpoint-statements") {
+            result.config.checkpointStatements = parseUnsigned(
+                requireValue(arguments, index, argument), argument);
         } else if (argument == "--seed") {
             result.config.seed = parseUnsigned(requireValue(arguments, index, argument), argument);
         } else if (argument == "--repetitions") {
@@ -210,6 +216,8 @@ std::string usageText() {
         "  --wal-payload-bytes N WAL payload bytes per record (default 128)\n"
         "  --wal-batch-size N    records per synchronous batch flush (default 10)\n"
         "  --wal-buffer-bytes N  in-memory WAL buffer capacity (default 65536)\n"
+        "  --checkpoint-wal-bytes N automatic checkpoint WAL-growth bytes; 0 disables\n"
+        "  --checkpoint-statements N automatic checkpoint commit count; 0 disables\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
         "  --seed N              deterministic seed (default 12345)\n"
         "  --repetitions N       repeat each workload (default 1)\n"
@@ -234,6 +242,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "mixed", "mixed_read_heavy", "mixed_write_heavy",
         "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
         "txn_insert", "txn_update", "txn_delete", "txn_mixed", "recovery_full_scan",
+        "checkpoint_latency", "recovery_checkpoint_compare",
     };
 }
 
@@ -355,6 +364,11 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_payload_bytes\":" << config.walPayloadBytes
                << ",\"wal_batch_size\":" << config.walBatchSize
                << ",\"wal_buffer_bytes\":" << config.walBufferBytes
+               << ",\"checkpoint_wal_bytes\":" << config.checkpointWalBytes
+               << ",\"checkpoint_statements\":" << config.checkpointStatements
+               << ",\"checkpoint_enabled\":"
+               << ((config.checkpointWalBytes != 0 || config.checkpointStatements != 0)
+                   ? "true" : "false")
                << ",\"cache_mode\":\""
                << (config.cacheMode == CacheMode::Hot ? "hot" : "reopen")
                << "\",\"tuple_sizes\":\"" << escapeJson(config.tupleSizes) << "\"}"
@@ -404,7 +418,27 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"analysis_ns\":" << result.recovery.recovery.analysisNs
                << ",\"redo_ns\":" << result.recovery.recovery.redoNs
                << ",\"undo_ns\":" << result.recovery.recovery.undoNs
-               << ",\"total_ns\":" << result.recovery.recovery.totalNs << '}';
+               << ",\"total_ns\":" << result.recovery.recovery.totalNs
+               << ",\"checkpoint_used\":"
+               << (result.recovery.recovery.checkpointUsed ? "true" : "false")
+               << ",\"wal_bytes_skipped\":" << result.recovery.recovery.walBytesSkipped
+               << ",\"wal_bytes_scanned\":" << result.recovery.recovery.walBytesScanned
+               << ",\"full_scan_records_analyzed\":"
+               << result.recovery.fullScanRecovery.recordsAnalyzed
+               << ",\"full_scan_wal_bytes_scanned\":"
+               << result.recovery.fullScanRecovery.walBytesScanned
+               << ",\"full_scan_total_ns\":"
+               << result.recovery.fullScanRecovery.totalNs << '}';
+        output << ",\"checkpoint\":{\"checkpoint_count\":"
+               << result.checkpoint.checkpointsCompleted
+               << ",\"checkpoint_total_ns\":" << result.checkpoint.checkpointDurationNs
+               << ",\"checkpoint_max_ns\":" << result.checkpoint.checkpointMaxDurationNs
+               << ",\"dirty_pages_flushed\":" << result.checkpoint.dirtyPagesFlushed
+               << ",\"database_writes\":" << result.checkpoint.databaseWrites
+               << ",\"wal_forces\":" << result.checkpoint.walForces
+               << ",\"database_syncs\":" << result.checkpoint.databaseSyncs
+               << ",\"control_file_syncs\":" << result.checkpoint.controlFileSyncs
+               << '}';
         output << ",\"storage\":{\"before\":";
         writeStorageJson(output, result.storageBefore);
         output << ",\"after\":";
@@ -485,6 +519,18 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.recovery.recovery.pagesRedone << '/'
            << result.recovery.recovery.pagesUndone << '/'
            << result.recovery.recovery.totalNs << '\n'
+           << "recovery checkpoint/skipped/scanned, full-scan records/ns: "
+           << (result.recovery.recovery.checkpointUsed ? 1 : 0) << '/'
+           << result.recovery.recovery.walBytesSkipped << '/'
+           << result.recovery.recovery.walBytesScanned << '/'
+           << result.recovery.fullScanRecovery.recordsAnalyzed << '/'
+           << result.recovery.fullScanRecovery.totalNs << '\n'
+           << "checkpoint count/dirty pages/total ns/max ns/control fsyncs: "
+           << result.checkpoint.checkpointsCompleted << '/'
+           << result.checkpoint.dirtyPagesFlushed << '/'
+           << result.checkpoint.checkpointDurationNs << '/'
+           << result.checkpoint.checkpointMaxDurationNs << '/'
+           << result.checkpoint.controlFileSyncs << '\n'
            << "WAL/logical bytes and amplification: " << result.recovery.walBytes << '/'
            << result.recovery.logicalChangedBytes << '/'
            << result.recovery.loggingAmplification << '\n'
@@ -518,7 +564,7 @@ EnvironmentMetadata currentEnvironment() {
     const std::string buildType = std::string(MINIDB_BUILD_TYPE).empty()
         ? "unspecified" : MINIDB_BUILD_TYPE;
     return EnvironmentMetadata{
-        "v0.1.0 frozen MVP + Milestone 11B crash recovery",
+        "v0.1.0 frozen MVP + Milestone 11C.1 sharp checkpoints",
         MINIDB_GIT_COMMIT,
         __VERSION__,
         buildType,

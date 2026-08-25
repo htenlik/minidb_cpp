@@ -4,6 +4,7 @@
 #include "minidb/log_manager.hpp"
 #include "minidb/pager.hpp"
 #include "minidb/recovery.hpp"
+#include "minidb/checkpoint_manager.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,8 @@ struct BenchmarkConfig {
     std::uint64_t walPayloadBytes = 128;
     std::uint64_t walBatchSize = 10;
     std::uint64_t walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
+    std::uint64_t checkpointStatements = 0;
     std::uint64_t seed = 12'345;
     std::uint32_t repetitions = 1;
     std::string databasePath = "minidb_benchmark.db";
@@ -90,6 +93,7 @@ struct WalBenchmarkMetrics {
 struct RecoveryBenchmarkMetrics {
     TransactionRuntimeStats transactions{};
     RecoveryStats recovery{};
+    RecoveryStats fullScanRecovery{};
     std::uint64_t walBytes = 0;
     std::uint64_t logicalChangedBytes = 0;
     double loggingAmplification = 0.0;
@@ -106,6 +110,7 @@ struct BenchmarkResult {
     BufferPoolStats buffer;
     WalBenchmarkMetrics wal;
     RecoveryBenchmarkMetrics recovery;
+    CheckpointStats checkpoint;
     StorageMetrics storageBefore;
     StorageMetrics storageAfter;
     double averageRowsExamined = 0.0;

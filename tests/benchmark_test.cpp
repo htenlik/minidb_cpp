@@ -76,6 +76,7 @@ void testConfigurationParsing() {
         "--reopen-interval", "5", "--buffer-frames", "11", "--lru-k", "3",
         "--wal-payload-bytes", "512", "--wal-batch-size", "10",
         "--wal-buffer-bytes", "4096",
+        "--checkpoint-wal-bytes", "8192", "--checkpoint-statements", "17",
         "--seed", "99", "--repetitions", "2",
         "--db", "bench.db", "--json", "out.json", "--tuple-sizes", "medium",
         "--mode", "reopen", "--retain-db",
@@ -89,6 +90,7 @@ void testConfigurationParsing() {
             && config.bufferFrames == 11 && config.lruK == 3
             && config.walPayloadBytes == 512 && config.walBatchSize == 10
             && config.walBufferBytes == 4096
+            && config.checkpointWalBytes == 8192 && config.checkpointStatements == 17
             && config.repetitions == 2 && config.databasePath == "bench.db"
             && config.jsonPath == "out.json" && config.tupleSizes == "medium"
             && config.cacheMode == CacheMode::Reopen && config.keepDatabase,

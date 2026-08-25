@@ -52,6 +52,8 @@ void removeDatabase(const BenchmarkConfig& config) {
     if (error) throw std::runtime_error("could not remove prior benchmark database");
     std::filesystem::remove(walPathForDatabase(config.databasePath), error);
     if (error) throw std::runtime_error("could not remove prior benchmark WAL");
+    std::filesystem::remove(checkpointPathForDatabase(config.databasePath), error);
+    if (error) throw std::runtime_error("could not remove prior benchmark checkpoint control");
 }
 
 void cleanupDatabase(const BenchmarkConfig& config) {
@@ -1136,6 +1138,101 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
     return result;
 }
 
+BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    BenchmarkResult result;
+    std::vector<std::uint64_t> latency;
+    {
+        net::DatabaseServer server(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK), 0, 0});
+        createUsers(server.sqlEngine());
+        const auto count = std::max(config.rows, config.operations);
+        populateUsers(server.sqlEngine(), count);
+        static_cast<void>(server.checkpointManager().checkpoint());
+        server.checkpointManager().resetStats();
+        server.bufferPool().resetStats();
+        for (std::uint64_t key = 0; key < config.operations; ++key) {
+            static_cast<void>(server.sqlEngine().execute(
+                "UPDATE users SET score = " + std::to_string(key + 1000)
+                + " WHERE id = " + std::to_string(key)));
+        }
+        measure(latency, [&] { static_cast<void>(server.checkpointManager().checkpoint()); });
+        server.catalog().validate();
+        server.pageAllocator().validate();
+        result = finish("checkpoint_latency", config, latency, {}, {},
+                        storageMetrics(server.diskManager(), server.bufferPool(),
+                                       server.pageAllocator()),
+                        0.0, 0.0, server.bufferPool().stats());
+        result.storageBackend = "sharp_checkpoint";
+        result.checkpoint = server.checkpointManager().stats();
+        result.wal.manager = server.logManager().stats();
+    }
+    cleanupDatabase(config);
+    return result;
+}
+
+BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    constexpr std::uint64_t TAIL = 10;
+    {
+        net::DatabaseServer server(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK), 0, 0});
+        createUsers(server.sqlEngine());
+        populateUsers(server.sqlEngine(), config.operations);
+        static_cast<void>(server.checkpointManager().checkpoint());
+        for (std::uint64_t index = 0; index < TAIL; ++index) {
+            const auto key = config.operations + index;
+            static_cast<void>(server.sqlEngine().execute(
+                "INSERT INTO users VALUES (" + std::to_string(key)
+                + ", 'tail', 1, TRUE)"));
+        }
+    }
+    RecoveryStats full;
+    std::vector<std::uint64_t> fullLatency;
+    {
+        DiskManager disk(config.databasePath);
+        LogManager log(walPathForDatabase(config.databasePath));
+        measure(fullLatency, [&] { full = RecoveryManager(disk, log, nullptr, true).recover(); });
+    }
+    RecoveryStats bounded;
+    std::vector<std::uint64_t> boundedLatency;
+    {
+        DiskManager disk(config.databasePath);
+        LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
+                       LogOpenMode::DeferredRecovery);
+        CheckpointControl control(checkpointPathForDatabase(config.databasePath));
+        measure(boundedLatency, [&] { bounded = RecoveryManager(disk, log, &control).recover(); });
+    }
+    {
+        net::DatabaseServer validation(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK), 0, 0});
+        validation.catalog().validate();
+    }
+    BenchmarkResult result;
+    result.benchmark = "recovery_checkpoint_compare";
+    result.storageBackend = "sharp_checkpoint_recovery";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(boundedLatency, totalLatency(boundedLatency));
+    result.recovery.recovery = bounded;
+    result.recovery.fullScanRecovery = full;
+    result.recovery.walBytes = std::filesystem::file_size(walPathForDatabase(config.databasePath));
+    result.environment = currentEnvironment();
+    result.validationPassed = bounded.checkpointUsed
+        && bounded.recordsAnalyzed < full.recordsAnalyzed;
+    cleanupDatabase(config);
+    return result;
+}
+
 std::string canonicalName(const std::string& name) {
     if (name == "pager") return "pager_random";
     if (name == "buffer") return "buffer_random";
@@ -1153,6 +1250,10 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     if (name.starts_with("wal_")) return runWal(config, name);
     if (name.starts_with("txn_")) return runTransactional(config, name);
     if (name == "recovery_full_scan") return runRecoveryBenchmark(config);
+    if (name == "checkpoint_latency") return runCheckpointLatency(config);
+    if (name == "recovery_checkpoint_compare") {
+        return runCheckpointRecoveryComparison(config);
+    }
     if (name.starts_with("pager_")) return runPager(config, std::move(name));
     if (name.starts_with("buffer_")) return runBuffer(config, name);
     if (name.starts_with("bplus_")) return runBplus(config, name);
