@@ -71,8 +71,9 @@ with two. See [buffer-pool.md](buffer-pool.md) for the detailed pin budget.
 ## Allocation and metadata
 
 PageAllocator uses the BufferPoolManager for free-page validation, free-page rewrites,
-and append allocation, while page-0 root updates remain explicit DiskManager metadata
-operations. The persistent free-list encoding and LIFO behavior are unchanged. An
+and append allocation. Transactional page-0 root changes pass through the focused
+DatabaseMetadataManager and RecoveryCoordinator. The persistent free-list encoding and
+LIFO behavior are unchanged. An
 allocator release rejects a page if any guard other than its own still pins it.
 
 Catalog bootstrap allocates catalog metadata and its TupleStore through PageAllocator,
@@ -82,17 +83,17 @@ page changes.
 
 ## Lifecycle and statement boundary
 
-`DatabaseServer` declares owners in dependency order:
+`DatabaseServer` starts owners in dependency order:
 
 ```text
-DiskManager -> BufferPoolManager -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
+DiskManager -> LogManager -> startup RecoveryManager -> RecoveryCoordinator
+            -> BufferPoolManager -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
 ```
 
-Reverse destruction removes network/execution consumers before storage managers and
-destroys/flushes the buffer pool before DiskManager. On a successful TCP statement the
-result is materialized, the buffer pool flushes all dirty frames, DiskManager is flushed,
-and only then is the success response sent. Selected tests confirm there are no retained
-operation guards at request boundaries.
+Reverse destruction removes consumers before storage managers. A mutating SQL result is
+returned only after its COMMIT record is fsynced. Database pages are not forced, and
+SELECT performs no global flush. Selected tests confirm there are no retained operation
+guards at statement boundaries.
 
 ## Compatibility and recovery boundary
 
@@ -100,11 +101,11 @@ No persistent offset, width, magic, version, tuple encoding, catalog encoding, S
 grammar, or wire byte changed in 10B. A database assembled through the legacy Pager
 formats is opened and queried by the active buffer-backed engine in compatibility tests.
 
-Milestone 11A adds a separate optional logging path without altering a persistent
+Milestones 11A–11B add a sidecar logging/recovery path without altering a persistent
 database-page format:
 
 ```text
-explicit test / future recovery mutation
+RecoveryCoordinator
         |                    |
         | log record         | page bytes + assigned LSN
         v                    v
@@ -114,13 +115,11 @@ explicit test / future recovery mutation
  database.db.wal                                database.db
 ```
 
-The buffer pool enforces WAL durability before writing a dirty frame with a valid
-volatile pageLSN. The production ownership graph does not attach LogManager yet because
-TupleStore, allocator, tree, Catalog, and Table mutations do not emit complete recovery
-records; ordinary production construction therefore creates no meaningless WAL.
+The buffer pool captures write intent and enforces WAL durability before writing a dirty
+frame with a valid volatile pageLSN. The production graph attaches LogManager and the
+coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encoding.
 
-The engine remains single-threaded. Guards are not locks or latches. There is no
-persistent pageLSN, analysis/redo/undo, statement atomicity, transaction protocol,
-checkpoint policy, or recovery. Dirty unlogged pages can still reach disk in an order
-unrelated to a logical multi-page operation. See [wal.md](wal.md) for the exact format,
-ordering guarantee, and 11B boundary.
+The engine remains single-threaded. Guards are not locks or latches. 11B adds physical
+analysis/REDO/UNDO and one implicit recovery unit per mutating statement without changing
+database page formats. There is still no persistent pageLSN, checkpoint, CLR, lock,
+MVCC, or concurrent transaction. See [wal.md](wal.md) and [recovery.md](recovery.md).

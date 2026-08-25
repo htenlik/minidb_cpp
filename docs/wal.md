@@ -1,15 +1,16 @@
-# Write-ahead log foundation
+# Write-ahead log and recovery records
 
 Milestone 11A adds a versioned sidecar write-ahead log, byte-offset log sequence
 numbers (LSNs), buffered append and `fsync` durability, safe scanning, and write-ahead
-ordering in the buffer pool. It is a logging substrate inspired by WAL/ARIES principles;
-it is **not** ARIES recovery and does not yet make production mutations crash safe.
+ordering in the buffer pool. Milestone 11B uses that substrate for full-page physical
+before/after logging, implicit durable statement commit, and startup REDO/UNDO. It is
+not ARIES; [recovery.md](recovery.md) defines the simpler protocol.
 
 A bounded pool can evict dirty frames (the storage pressure behind a STEAL-style
 design), while logical success need not force every data page immediately (the
 motivation behind NO-FORCE). Those choices require log-before-data ordering plus
-REDO/UNDO for transaction recovery. 11A establishes only the ordering substrate; it
-does not yet define transaction commit, STEAL/NO-FORCE recovery, or atomicity.
+REDO/UNDO. 11A established the ordering substrate and 11B completes this serial,
+statement-scoped baseline.
 
 For database path `database.db`, the deterministic WAL path is `database.db.wal`.
 Database pages and WAL integers are little-endian; the independent TCP wire protocol is
@@ -53,14 +54,14 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 | 32 | 8 | previous LSN | earlier record or `INVALID_LSN` |
 | 40 | 4 | checksum | CRC32C of the complete record with these four bytes zero |
 | 44 | 4 | flags/reserved | zero in version 1 |
-| 48 | variable | payload | uninterpreted by the 11A substrate |
+| 48 | variable | payload | interpreted by recovery according to record type |
 
 Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
-`5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, and `7 CHECKPOINT_END`. These names reserve the
-format vocabulary; 11A does not generate semantic recovery records in the production
-storage path. `TransactionId` is `uint64_t`, with zero reserved as invalid/system.
-`prevLSN` supports a future per-transaction log chain but is not traversed for recovery
-yet.
+`5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, and `7 CHECKPOINT_END`. Production 11B uses the
+first four; the others remain reserved. `TransactionId` is `uint64_t`, with zero reserved
+as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
+16 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
+[recovery.md](recovery.md).
 
 The maximum complete record is 1 MiB, so the maximum payload is 1,048,528 bytes. Length
 checks happen before allocation. CRC32C uses the Castagnoli polynomial (reflected
@@ -128,13 +129,13 @@ and the frame is not reused. `flushAll` first finds the maximum valid LSN among 
 frames, forces once through that point, then writes the pages. A clean frame never forces
 WAL; it can retain a volatile LSN until reuse, when the LSN is reset.
 
-The provider is optional. With no provider, legacy/unlogged dirty pages have
-`INVALID_LSN` and preserve Milestone 10 behavior. Production storage is intentionally
-not wired to invent records, and the server does not create an empty/misleading WAL by
-default. Tests and future recovery code explicitly append and associate an LSN.
+The provider remains optional for legacy and low-level tests. With no provider,
+unlogged dirty pages have `INVALID_LSN` and preserve Milestone 10 behavior. Production
+`DatabaseServer` attaches LogManager and RecoveryCoordinator so page write intent and
+pre-persistence preparation generate records centrally.
 
 ```text
-test/future recovery layer -- record --> LogManager --> database.db.wal
+RecoveryCoordinator -- record --> LogManager --> database.db.wal
              |                              ^
              | page bytes + pageLSN         | force before page write
              v                              |
@@ -150,16 +151,12 @@ batch, and buffer sizes with `--wal-payload-bytes`, `--wal-batch-size`, and
 p95/p99 latency, encoded WAL bytes written, buffer drains, physical writes, and fsyncs.
 A batch size of 1, 10, or 100 is a synchronous experiment, not group commit.
 
-## Exact 11A boundary
+## Current boundary
 
-11A guarantees validated clean-close/reopen WAL persistence and WAL-before-database
-ordering only for dirty frames explicitly assigned a valid LSN. It does **not** provide
-automatic production mutation logging, persistent pageLSNs, analysis/redo/undo,
-checkpointing/truncation policy, statement atomicity, user transactions, WAL-based page
-allocation recovery, group commit, or crash recovery. A crash can still leave the
-database logically inconsistent. Milestone 11B must design recovery records, persist
-the pageLSN information recovery needs, connect all mutation paths, inject crashes, and
-implement REDO/UNDO before stronger durability claims are valid.
+11B guarantees statement atomicity across tested process crashes: durable-COMMIT winners
+are REDOed and a tail loser is undone. It deliberately has no checkpoint/recycling,
+persistent pageLSN, CLR, user transaction SQL, concurrency, or group commit. Valid WAL
+grows indefinitely and restart scans/replays full committed history.
 
 ## Reference
 

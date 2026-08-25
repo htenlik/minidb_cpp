@@ -43,3 +43,8 @@ The WAL workloads are `wal_append_buffered`, `wal_append_flush_each`, and
 `wal_batch_flush`; they report records/payload throughput, append/force latency, encoded
 bytes, buffer drains, writes, and fsyncs. The same configuration object records frame/K
 and WAL payload/batch/buffer controls for controlled comparisons.
+
+Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed`,
+and `recovery_full_scan`. Transaction results include full-page record counts, WAL bytes,
+fsyncs, and logging amplification; recovery reports phase timing and physical REDO/UNDO
+counts. These are deterministic baselines, not timing-gated CI assertions.

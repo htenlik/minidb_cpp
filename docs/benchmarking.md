@@ -2,7 +2,8 @@
 
 Milestone 9 established the repeatable post-`v0.1.0` baseline; 10A added standalone
 buffer workloads; 10B migrated active engine workloads to the bounded pool; 11A adds
-standalone WAL append/force experiments. The harness reports measurements, not
+standalone WAL append/force experiments; 11B adds durable transaction and full-history
+recovery experiments. The harness reports measurements, not
 performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
@@ -112,6 +113,8 @@ The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sq
 | TCP loopback | `tcp_pk_lookup`, `tcp_heap_scan`, `tcp_insert`, `tcp_mixed` |
 | Mixed profiles | `mixed_read_heavy`, `mixed_write_heavy` (local SQL) |
 | WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush` |
+| Durable statements | `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed` |
+| Recovery | `recovery_full_scan` |
 
 `wal_append_buffered` appends all records then performs one final synchronous force.
 `wal_append_flush_each` forces every record. `wal_batch_flush` forces every
@@ -147,9 +150,17 @@ scan reads, 2% inserts, 2% updates, and 1% deletes (95/5 read/write).
 15% deletes (50/50). A seeded live-key model keeps targets meaningful.
 
 TCP workloads use one loopback client at a time. Their latency includes wire framing,
-socket transfer, server execution, and the server's `BufferPoolManager::flushAll()` plus
-DiskManager flush after each successful statement. They must not be compared to local
-SQL without accounting for those semantics.
+socket transfer, server execution, and durable WAL COMMIT for mutations; database pages
+are not forced per response. They must not be compared to local SQL without accounting
+for those semantics.
+
+`txn_*` workloads use the production recovery-enabled `DatabaseServer` graph without
+TCP. They report statement percentiles, WAL/fsync and buffer counters,
+PAGE_UPDATE/full-image bytes, and WAL bytes divided by an explicit 32-byte-per-operation
+logical-change estimate. That ratio is an experiment-specific amplification indicator,
+not a universal efficiency claim. `recovery_full_scan` builds deterministic committed
+history, measures analysis/REDO/UNDO separately, and validates through normal reopen.
+There are no CI timing thresholds.
 
 All workloads validate their relevant storage/tree/catalog/model after measurement.
 
@@ -187,6 +198,10 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
   --wal-payload-bytes 128 --wal-batch-size 10
 ./build-release/minidb_bench --benchmark wal_batch_flush --operations 10000 \
   --wal-payload-bytes 128 --wal-batch-size 100
+
+# Full-page transaction and full-history recovery baselines
+./build-release/minidb_bench --benchmark txn_mixed --rows 1000 --operations 1000
+./build-release/minidb_bench --benchmark recovery_full_scan --operations 1000
 ```
 
 See [the benchmark command reference](../benchmarks/README.md) for every option.
@@ -204,6 +219,8 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
   evictions, pin activity, appended pages, WAL force requests, gauges, and capacity;
 - `wal`: record/payload counts, payload throughput, encoded bytes written, physical
   writes, buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
+- `recovery`: transaction/page-update/full-image counters, WAL/logical bytes and
+  amplification, scanned/REDO/UNDO counts, and phase/total recovery nanoseconds;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;
 - `execution`: average rows examined and index lookups;
 - `environment`: version context, configured Git commit, compiler, build type, platform,

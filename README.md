@@ -33,7 +33,7 @@ TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Exec
                                              BufferPoolManager / LRU-K
                                                 /               \
                                                v                 v
-                                      optional LogManager    DiskManager
+                                              LogManager    DiskManager
                                                |                 |
                                                v                 v
                                         database.db.wal      database.db
@@ -58,14 +58,15 @@ The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
 10A. **DiskManager, bounded buffer pool, page guards, and LRU-K** ✅
 10B. **Engine-wide buffer-pool migration** ✅
 11A. **WAL foundation and buffer-pool write-ahead ordering** ✅
-11B. **Crash recovery and statement atomicity** — next
+11B. **Crash recovery and statement atomicity** ✅
+11C. **Recovery optimization and checkpoints** — next
 12. **Transactions and concurrency** — planned
 13. **Experimental and paper-driven work** — later
 
-Milestone 11A adds an independent versioned `database.db.wal`, byte-offset LSNs,
-buffered append plus `fsync`, corruption/tail detection, volatile frame pageLSNs, and
-WAL-before-database-page enforcement. Production mutations remain deliberately unlogged,
-so this is not crash recovery; 11B is next. See [docs/wal.md](docs/wal.md).
+Milestones 11A–11B add a versioned `database.db.wal`, byte-offset LSNs, CRC32C,
+WAL-before-page ordering, implicit atomic mutating statements, full-page before/after
+images, NO-FORCE durable commit, STEAL-safe eviction, and startup REDO/UNDO. See
+[docs/wal.md](docs/wal.md) and [docs/recovery.md](docs/recovery.md).
 
 Milestone 10B routes the active TupleStore, persistent index, Catalog/Table, SQL, and TCP
 paths through move-only page guards, the bounded BufferPoolManager, and DiskManager.
@@ -176,8 +177,9 @@ through Catalog and Table. See [docs/sql-execution.md](docs/sql-execution.md).
 
 Milestone 8 adds a big-endian, versioned binary protocol and POSIX TCP server/client.
 Structured command results, SELECT values/RIDs/statistics, and source-aware errors survive
-the network round trip. Database execution is serial, successful statements are flushed
-before their responses, and the server binds `127.0.0.1:7432` by default. See
+the network round trip. Database execution is serial; mutating success is returned only
+after durable WAL COMMIT, without forcing database pages. The server binds
+`127.0.0.1:7432` by default. See
 [docs/wire-protocol.md](docs/wire-protocol.md) and
 [docs/server-client.md](docs/server-client.md).
 
