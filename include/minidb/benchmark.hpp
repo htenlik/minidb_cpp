@@ -34,6 +34,7 @@ struct BenchmarkConfig {
     std::uint64_t walPayloadBytes = 128;
     std::uint64_t walBatchSize = 10;
     std::uint64_t walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    std::uint32_t walSegmentBytes = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY;
     std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t checkpointStatements = 0;
     std::uint64_t seed = 12'345;

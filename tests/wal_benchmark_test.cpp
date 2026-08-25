@@ -46,6 +46,26 @@ int main() {
                         + std::to_string(expectedFsyncs)) != std::string::npos,
                 "standalone WAL benchmark JSON metrics were incomplete");
         }
+        for (const auto& name : {std::string{"wal_segment_rotation"},
+                                 std::string{"wal_reclamation"}}) {
+            minidb::bench::BenchmarkConfig config;
+            config.benchmark = name;
+            config.operations = 40;
+            config.walPayloadBytes = 32;
+            config.walBufferBytes = 128;
+            config.walSegmentBytes = 160;
+            config.databasePath = (std::filesystem::temp_directory_path()
+                / ("minidb_wal_benchmark_" + name + ".db")).string();
+            const auto results = minidb::bench::runConfiguredBenchmarks(config);
+            minidb::test::require(
+                results.size() == 1 && results[0].validationPassed
+                    && results[0].storageBackend == "segmented_wal"
+                    && results[0].wal.manager.segmentRotations > 0
+                    && (name != "wal_reclamation"
+                        || (results[0].wal.manager.segmentsDeleted > 0
+                            && results[0].checkpoint.walBytesReclaimed > 0)),
+                "segmented WAL benchmark did not expose rotation/reclamation metrics");
+        }
         std::cout << "WAL benchmark tests passed\n";
         return 0;
     } catch (const std::exception& error) {

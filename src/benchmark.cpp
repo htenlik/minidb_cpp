@@ -52,7 +52,8 @@ void validateConfig(const BenchmarkConfig& config) {
         || config.pages == 0
         || config.repetitions == 0 || config.reopenInterval == 0
         || config.bufferFrames == 0 || config.lruK == 0 || config.walPayloadBytes == 0
-        || config.walBatchSize == 0 || config.walBufferBytes == 0) {
+        || config.walBatchSize == 0 || config.walBufferBytes == 0
+        || config.walSegmentBytes < 128) {
         throw std::invalid_argument(
             "rows, operations, pages, repetitions, reopen interval, buffer frames, and K "
             "and WAL payload, batch, and buffer sizes must be positive");
@@ -66,6 +67,10 @@ void validateConfig(const BenchmarkConfig& config) {
     }
     if (config.walPayloadBytes > wal_record_layout::MAX_PAYLOAD_SIZE) {
         throw std::invalid_argument("WAL payload exceeds the maximum record payload");
+    }
+    if (config.walPayloadBytes + wal_record_layout::HEADER_SIZE
+        > config.walSegmentBytes) {
+        throw std::invalid_argument("WAL record does not fit configured segment payload");
     }
     if (!config.suite.empty() && config.suite != "quick" && config.suite != "baseline") {
         throw std::invalid_argument("suite must be 'quick' or 'baseline'");
@@ -168,6 +173,12 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
         } else if (argument == "--wal-buffer-bytes") {
             result.config.walBufferBytes = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
+        } else if (argument == "--wal-segment-bytes") {
+            const auto value = parseUnsigned(requireValue(arguments, index, argument), argument);
+            if (value > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("WAL segment size exceeds uint32 range");
+            }
+            result.config.walSegmentBytes = static_cast<std::uint32_t>(value);
         } else if (argument == "--checkpoint-wal-bytes") {
             result.config.checkpointWalBytes = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
@@ -219,6 +230,7 @@ std::string usageText() {
         "  --wal-payload-bytes N WAL payload bytes per record (default 128)\n"
         "  --wal-batch-size N    records per synchronous batch flush (default 10)\n"
         "  --wal-buffer-bytes N  in-memory WAL buffer capacity (default 65536)\n"
+        "  --wal-segment-bytes N fixed WAL segment payload capacity (default 16777216)\n"
         "  --checkpoint-wal-bytes N automatic checkpoint WAL-growth bytes; 0 disables\n"
         "  --checkpoint-statements N automatic checkpoint commit count; 0 disables\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
@@ -244,6 +256,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "tcp", "tcp_pk_lookup", "tcp_heap_scan", "tcp_insert", "tcp_mixed",
         "mixed", "mixed_read_heavy", "mixed_write_heavy",
         "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
+        "wal_segment_rotation", "wal_reclamation",
         "txn_insert", "txn_update", "txn_delete", "txn_mixed", "recovery_full_scan",
         "checkpoint_latency", "recovery_checkpoint_compare",
     };
@@ -367,6 +380,7 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_payload_bytes\":" << config.walPayloadBytes
                << ",\"wal_batch_size\":" << config.walBatchSize
                << ",\"wal_buffer_bytes\":" << config.walBufferBytes
+               << ",\"wal_segment_bytes\":" << config.walSegmentBytes
                << ",\"checkpoint_wal_bytes\":" << config.checkpointWalBytes
                << ",\"checkpoint_statements\":" << config.checkpointStatements
                << ",\"checkpoint_enabled\":"
@@ -397,6 +411,15 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_buffer_flushes\":" << result.wal.manager.bufferFlushes
                << ",\"wal_physical_writes\":" << result.wal.manager.physicalWrites
                << ",\"wal_flush_up_to_calls\":" << result.wal.manager.flushUpToCalls
+               << ",\"segments_created\":" << result.wal.manager.segmentsCreated
+               << ",\"segments_deleted\":" << result.wal.manager.segmentsDeleted
+               << ",\"segment_rotations\":" << result.wal.manager.segmentRotations
+               << ",\"retained_segments\":" << result.wal.manager.retainedSegments
+               << ",\"active_segment_id\":" << result.wal.manager.activeSegmentId
+               << ",\"oldest_retained_lsn\":" << result.wal.manager.oldestRetainedLsn
+               << ",\"logical_wal_end\":" << result.wal.manager.logicalWalEnd
+               << ",\"physical_wal_bytes\":" << result.wal.manager.physicalWalBytes
+               << ",\"wal_bytes_reclaimed\":" << result.wal.manager.walBytesReclaimed
                << ",\"last_appended_lsn\":" << result.wal.manager.lastAppendedLsn
                << ",\"durable_lsn\":" << result.wal.manager.durableLsn
                << ",\"append_p95_ns\":" << result.wal.appendTiming.p95Nanoseconds
@@ -441,6 +464,9 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_forces\":" << result.checkpoint.walForces
                << ",\"database_syncs\":" << result.checkpoint.databaseSyncs
                << ",\"control_file_syncs\":" << result.checkpoint.controlFileSyncs
+               << ",\"segments_reclaimed\":" << result.checkpoint.segmentsReclaimed
+               << ",\"wal_bytes_reclaimed\":" << result.checkpoint.walBytesReclaimed
+               << ",\"reclamation_ns\":" << result.checkpoint.reclamationDurationNs
                << '}';
         output << ",\"storage\":{\"before\":";
         writeStorageJson(output, result.storageBefore);

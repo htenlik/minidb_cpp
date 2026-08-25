@@ -52,8 +52,31 @@ void removeDatabase(const BenchmarkConfig& config) {
     if (error) throw std::runtime_error("could not remove prior benchmark database");
     std::filesystem::remove(walPathForDatabase(config.databasePath), error);
     if (error) throw std::runtime_error("could not remove prior benchmark WAL");
+    std::filesystem::remove_all(segmentedWalPathForDatabase(config.databasePath), error);
+    if (error) throw std::runtime_error("could not remove prior segmented benchmark WAL");
+    std::filesystem::remove_all(
+        segmentedWalPathForDatabase(config.databasePath) + ".tmp", error);
+    if (error) throw std::runtime_error("could not remove prior WAL migration temporary");
     std::filesystem::remove(checkpointPathForDatabase(config.databasePath), error);
     if (error) throw std::runtime_error("could not remove prior benchmark checkpoint control");
+}
+
+std::uint64_t walPhysicalBytes(const std::string& databasePath) {
+    std::uint64_t total = 0;
+    std::error_code error;
+    const auto legacy = walPathForDatabase(databasePath);
+    if (std::filesystem::is_regular_file(legacy, error)) {
+        total += std::filesystem::file_size(legacy, error);
+        if (error) throw std::runtime_error("could not inspect legacy benchmark WAL");
+    }
+    const auto directory = segmentedWalPathForDatabase(databasePath);
+    if (std::filesystem::is_directory(directory, error)) {
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            if (entry.is_regular_file()) total += entry.file_size();
+        }
+    }
+    if (error) throw std::runtime_error("could not inspect segmented benchmark WAL");
+    return total;
 }
 
 void cleanupDatabase(const BenchmarkConfig& config) {
@@ -212,6 +235,107 @@ BenchmarkResult runWal(const BenchmarkConfig& config, const std::string& name) {
     result.environment = currentEnvironment();
     result.validationPassed = true;
     manager.reset();
+    cleanupDatabase(config);
+    return result;
+}
+
+BenchmarkResult runWalSegmentRotation(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    LogManager manager(
+        walPathForDatabase(config.databasePath),
+        static_cast<std::size_t>(config.walBufferBytes),
+        LogOpenMode::EagerValidated,
+        WalStorageMode::Segmented,
+        config.walSegmentBytes);
+    manager.resetStats();
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    Lsn previous = INVALID_LSN;
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        measure(latencies, [&] {
+            previous = manager.append(LogRecord{
+                LogRecordType::PageUpdate,
+                operation + 1,
+                previous,
+                std::vector<std::byte>(
+                    static_cast<std::size_t>(config.walPayloadBytes),
+                    static_cast<std::byte>((config.seed + operation) & 0xFFU)),
+            });
+            manager.flushUpTo(previous);
+        });
+    }
+    manager.validate();
+    const auto stats = manager.stats();
+    if (stats.segmentRotations == 0 || manager.scan().records.size() != config.operations) {
+        throw std::runtime_error("WAL segment-rotation benchmark did not rotate/validate");
+    }
+    BenchmarkResult result;
+    result.benchmark = "wal_segment_rotation";
+    result.storageBackend = "segmented_wal";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(latencies, totalLatency(latencies));
+    result.wal.walRecords = config.operations;
+    result.wal.walPayloadBytes = config.operations * config.walPayloadBytes;
+    result.wal.manager = stats;
+    result.wal.appendTiming = result.timing;
+    result.environment = currentEnvironment();
+    result.validationPassed = true;
+    cleanupDatabase(config);
+    return result;
+}
+
+BenchmarkResult runWalReclamation(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    LogManager manager(
+        walPathForDatabase(config.databasePath),
+        static_cast<std::size_t>(config.walBufferBytes),
+        LogOpenMode::EagerValidated,
+        WalStorageMode::Segmented,
+        config.walSegmentBytes);
+    std::vector<Lsn> positions;
+    positions.reserve(static_cast<std::size_t>(config.operations));
+    Lsn previous = INVALID_LSN;
+    for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+        previous = manager.append(LogRecord{
+            LogRecordType::PageUpdate,
+            operation + 1,
+            previous,
+            std::vector<std::byte>(
+                static_cast<std::size_t>(config.walPayloadBytes),
+                static_cast<std::byte>((config.seed + operation) & 0xFFU)),
+        });
+        positions.push_back(previous);
+    }
+    manager.flushAll();
+    manager.rotateSegment();
+    const auto before = manager.stats();
+    const auto floor = positions[positions.size() * 3 / 4];
+    std::vector<std::uint64_t> latency;
+    std::uint64_t reclaimed = 0;
+    measure(latency, [&] { reclaimed = manager.reclaimSegmentsBefore(floor); });
+    manager.validate();
+    const auto after = manager.stats();
+    if (reclaimed == 0 || after.segmentsDeleted == 0
+        || after.physicalWalBytes >= before.physicalWalBytes) {
+        throw std::runtime_error("WAL reclamation benchmark did not reclaim segments");
+    }
+    BenchmarkResult result;
+    result.benchmark = "wal_reclamation";
+    result.storageBackend = "segmented_wal";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(latency, totalLatency(latency));
+    result.wal.walRecords = config.operations;
+    result.wal.walPayloadBytes = config.operations * config.walPayloadBytes;
+    result.wal.manager = after;
+    result.checkpoint.segmentsReclaimed = after.segmentsDeleted;
+    result.checkpoint.walBytesReclaimed = reclaimed;
+    result.checkpoint.reclamationDurationNs = totalLatency(latency);
+    result.storageBefore.databaseBytes = before.physicalWalBytes;
+    result.storageAfter.databaseBytes = after.physicalWalBytes;
+    result.environment = currentEnvironment();
+    result.validationPassed = true;
     cleanupDatabase(config);
     return result;
 }
@@ -1046,9 +1170,6 @@ BenchmarkResult runTransactional(
         server.logManager().resetStats();
         server.recoveryCoordinator().resetStats();
         server.checkpointManager().resetStats();
-        const auto walBefore = std::filesystem::file_size(
-            walPathForDatabase(config.databasePath));
-
         for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
             if (name == "txn_insert") {
                 measure(latencies, [&] { static_cast<void>(engine.execute(
@@ -1090,8 +1211,7 @@ BenchmarkResult runTransactional(
         result.wal.walRecords = result.wal.manager.recordsAppended;
         result.recovery.transactions = server.recoveryCoordinator().stats();
         result.checkpoint = server.checkpointManager().stats();
-        result.recovery.walBytes = std::filesystem::file_size(
-            walPathForDatabase(config.databasePath)) - walBefore;
+        result.recovery.walBytes = result.wal.manager.bytesAppended;
         result.recovery.logicalChangedBytes = config.operations * 32U;
         result.recovery.loggingAmplification =
             static_cast<double>(result.recovery.walBytes)
@@ -1112,12 +1232,13 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
     }
-    const auto walBytes = std::filesystem::file_size(walPathForDatabase(config.databasePath));
+    const auto walBytes = walPhysicalBytes(config.databasePath);
     std::vector<std::uint64_t> latency;
     RecoveryStats recovery;
     {
         DiskManager disk(config.databasePath);
-        LogManager log(walPathForDatabase(config.databasePath));
+        LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
+                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto);
         measure(latency, [&] { recovery = RecoveryManager(disk, log).recover(); });
     }
     {
@@ -1200,7 +1321,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     std::vector<std::uint64_t> fullLatency;
     {
         DiskManager disk(config.databasePath);
-        LogManager log(walPathForDatabase(config.databasePath));
+        LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
+                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto);
         measure(fullLatency, [&] { full = RecoveryManager(disk, log, nullptr, true).recover(); });
     }
     RecoveryStats bounded;
@@ -1208,7 +1330,7 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     {
         DiskManager disk(config.databasePath);
         LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
-                       LogOpenMode::DeferredRecovery);
+                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto);
         CheckpointControl control(checkpointPathForDatabase(config.databasePath));
         measure(boundedLatency, [&] { bounded = RecoveryManager(disk, log, &control).recover(); });
     }
@@ -1228,7 +1350,7 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     result.timing = summarizeTimings(boundedLatency, totalLatency(boundedLatency));
     result.recovery.recovery = bounded;
     result.recovery.fullScanRecovery = full;
-    result.recovery.walBytes = std::filesystem::file_size(walPathForDatabase(config.databasePath));
+    result.recovery.walBytes = walPhysicalBytes(config.databasePath);
     result.environment = currentEnvironment();
     result.validationPassed = bounded.checkpointUsed
         && bounded.recordsAnalyzed < full.recordsAnalyzed;
@@ -1250,6 +1372,8 @@ std::string canonicalName(const std::string& name) {
 
 BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     name = canonicalName(name);
+    if (name == "wal_segment_rotation") return runWalSegmentRotation(config);
+    if (name == "wal_reclamation") return runWalReclamation(config);
     if (name.starts_with("wal_")) return runWal(config, name);
     if (name.starts_with("txn_")) return runTransactional(config, name);
     if (name == "recovery_full_scan") return runRecoveryBenchmark(config);
