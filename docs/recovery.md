@@ -103,14 +103,18 @@ expensive ordering avoids compensation log records while statement errors are un
 
 ## Startup recovery
 
-Production startup is ordered as follows:
+Milestone 11C.1 first selects a durable sharp checkpoint when possible, so production
+startup is ordered as follows:
 
 ```text
-DiskManager -> LogManager -> tail repair -> analysis -> REDO -> UNDO -> database fsync
+DiskManager -> deferred LogManager -> checkpoint control -> tail repair -> analysis
+            -> REDO -> UNDO -> database fsync
             -> recovered-loser ABORT fsync -> BufferPool -> PageAllocator -> Catalog
 ```
 
-An incomplete final record is truncated to the last valid record boundary. Interior
+With a cross-valid control slot, analysis begins at its `recoveryStartOffset`; no earlier
+transaction record is scanned or replayed. Without one it begins at WAL byte 64. An
+incomplete final record is truncated to the last valid record boundary. Interior
 magic/version/length/checksum corruption is fatal and is never treated as a tail.
 Analysis validates one BEGIN, exact same-transaction `prevLSN` chains, terminal-record
 ordering, and the single-active-transaction model.
@@ -133,16 +137,19 @@ append/force, database writes, COMMIT, rollback, and recovery phases. Production
 the variable unset. Subprocess tests therefore bypass buffer/log destructors and exercise
 real reopen behavior.
 
-Recovery statistics report scanned records/transactions, winners/aborts/losers,
+Recovery statistics additionally report checkpoint-control presence/use, validation
+failures, full-scan fallback, recovery start, and skipped/scanned WAL bytes. They report
+scanned records/transactions, winners/aborts/losers,
 REDO/UNDO/truncation/extension, database writes/syncs, repaired tail bytes, and analysis,
 REDO, UNDO, and total nanoseconds. Runtime transaction statistics report logical begins,
 commits/rollbacks/zero-write units, first-written pages, PAGE_UPDATE count, full-image
 bytes, commit fsyncs, and rollback writes. Benchmarks report WAL bytes divided by an
 explicit logical-change estimate as logging amplification.
 
-There is no checkpoint, WAL recycling, persistent pageLSN, dirty-page table, CLR,
-concurrent transaction, lock, MVCC, isolation, or crash-safe group commit. Valid WAL is
-append-only and every startup scans/replays full history. A crash after COMMIT fsync but
+There is a quiescent sharp checkpoint, documented in [checkpoints.md](checkpoints.md).
+There is no WAL recycling, persistent pageLSN, fuzzy dirty-page table, CLR, concurrent
+transaction, lock, MVCC, isolation, or crash-safe group commit. Valid WAL remains
+append-only, but a usable checkpoint bounds startup to its tail. A crash after COMMIT fsync but
 before the response reaches a client is inherently ambiguous: the statement committed,
 but the client must reconnect and query state. Wire request IDs are not deduplication
 tokens.

@@ -3,7 +3,8 @@
 Milestone 9 established the repeatable post-`v0.1.0` baseline; 10A added standalone
 buffer workloads; 10B migrated active engine workloads to the bounded pool; 11A adds
 standalone WAL append/force experiments; 11B adds durable transaction and full-history
-recovery experiments. The harness reports measurements, not
+recovery experiments; 11C.1 adds sharp-checkpoint latency and bounded-tail recovery
+comparison. The harness reports measurements, not
 performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
@@ -202,6 +203,10 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 # Full-page transaction and full-history recovery baselines
 ./build-release/minidb_bench --benchmark txn_mixed --rows 1000 --operations 1000
 ./build-release/minidb_bench --benchmark recovery_full_scan --operations 1000
+
+# Sharp-checkpoint cost and full-scan versus checkpoint-tail recovery
+./build-release/minidb_bench --benchmark checkpoint_latency --rows 1000 --operations 256
+./build-release/minidb_bench --benchmark recovery_checkpoint_compare --operations 1000
 ```
 
 See [the benchmark command reference](../benchmarks/README.md) for every option.
@@ -220,7 +225,10 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 - `wal`: record/payload counts, payload throughput, encoded bytes written, physical
   writes, buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
 - `recovery`: transaction/page-update/full-image counters, WAL/logical bytes and
-  amplification, scanned/REDO/UNDO counts, and phase/total recovery nanoseconds;
+  amplification, checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
+  REDO/UNDO counts, and phase/total recovery nanoseconds;
+- `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, and total/
+  maximum latency; configuration records byte/statement thresholds and enablement;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;
 - `execution`: average rows examined and index lookups;
 - `environment`: version context, configured Git commit, compiler, build type, platform,

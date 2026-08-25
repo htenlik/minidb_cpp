@@ -57,8 +57,9 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 | 48 | variable | payload | interpreted by recovery according to record type |
 
 Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
-`5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, and `7 CHECKPOINT_END`. Production 11B uses the
-first four; the others remain reserved. `TransactionId` is `uint64_t`, with zero reserved
+`5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, and `7 CHECKPOINT_END`. Production uses the
+transaction records and both checkpoint records; COMPENSATION remains reserved.
+`TransactionId` is `uint64_t`, with zero reserved
 as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
 16 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
 [recovery.md](recovery.md).
@@ -85,12 +86,14 @@ beyond the requested target to the latest appended record. Repeating a request a
 covered by `durableLsn` is a no-op. There is no background logger or asynchronous/group
 commit in 11A.
 
-Opening an existing WAL validates and scans every complete record, reconstructing its
+Standalone/eager opening validates and scans every complete record, reconstructing its
 next, last-appended, and current durable positions. The standalone scanner validates
 magic, versions/types, bounded and consistent lengths, physical LSN, reserved fields,
 `prevLSN`, and checksum. A short final header or a final record whose declared length
 extends past EOF is reported as a truncated tail with the last complete byte boundary.
-Interior corruption is rejected. Opening never silently truncates; append remains
+Interior corruption is rejected. Production startup uses the deferred, checkpoint-aware
+path in [checkpoints.md](checkpoints.md), then applies the same strict scanner to the
+selected tail. Opening never silently truncates; append remains
 blocked until the caller deliberately invokes `truncateToLastValidRecord()`, which
 truncates and `fsync`s.
 
@@ -154,9 +157,11 @@ A batch size of 1, 10, or 100 is a synchronous experiment, not group commit.
 ## Current boundary
 
 11B guarantees statement atomicity across tested process crashes: durable-COMMIT winners
-are REDOed and a tail loser is undone. It deliberately has no checkpoint/recycling,
-persistent pageLSN, CLR, user transaction SQL, concurrency, or group commit. Valid WAL
-grows indefinitely and restart scans/replays full committed history.
+are REDOed and a tail loser is undone. 11C.1 adds sharp checkpoints that bound normal
+recovery analysis to the post-checkpoint tail. It deliberately has no WAL recycling,
+persistent pageLSN, fuzzy checkpoint, CLR, user transaction SQL, concurrency, or group
+commit. Valid WAL still grows indefinitely; checkpointing changes recovery work, not WAL
+disk usage.
 
 ## Reference
 

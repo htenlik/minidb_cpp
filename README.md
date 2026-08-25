@@ -59,14 +59,18 @@ The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
 10B. **Engine-wide buffer-pool migration** ✅
 11A. **WAL foundation and buffer-pool write-ahead ordering** ✅
 11B. **Crash recovery and statement atomicity** ✅
-11C. **Recovery optimization and checkpoints** — next
+11C.1. **Sharp checkpoints and bounded recovery scan** ✅
+11C.2. **WAL lifecycle and advanced recovery** — next
 12. **Transactions and concurrency** — planned
 13. **Experimental and paper-driven work** — later
 
-Milestones 11A–11B add a versioned `database.db.wal`, byte-offset LSNs, CRC32C,
+Milestones 11A–11C.1 add a versioned `database.db.wal`, byte-offset LSNs, CRC32C,
 WAL-before-page ordering, implicit atomic mutating statements, full-page before/after
-images, NO-FORCE durable commit, STEAL-safe eviction, and startup REDO/UNDO. See
-[docs/wal.md](docs/wal.md) and [docs/recovery.md](docs/recovery.md).
+images, NO-FORCE durable commit, STEAL-safe eviction, startup REDO/UNDO, and a quiescent
+checkpoint whose double-slotted `database.db.ckpt` pointer bounds normal recovery to the
+post-checkpoint WAL tail. WAL is not recycled and still grows indefinitely. See
+[docs/wal.md](docs/wal.md), [docs/recovery.md](docs/recovery.md), and
+[docs/checkpoints.md](docs/checkpoints.md).
 
 Milestone 10B routes the active TupleStore, persistent index, Catalog/Table, SQL, and TCP
 paths through move-only page guards, the bounded BufferPoolManager, and DiskManager.
@@ -193,7 +197,8 @@ cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/minidb demo.db
-./build/minidb_server demo.db --port 7432 --buffer-frames 128 --lru-k 2
+./build/minidb_server demo.db --port 7432 --buffer-frames 128 --lru-k 2 \
+  --checkpoint-wal-bytes 67108864
 ./build/minidb_client --port 7432 --execute "SELECT * FROM users;"
 ```
 

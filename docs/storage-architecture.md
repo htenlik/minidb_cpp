@@ -86,8 +86,9 @@ page changes.
 `DatabaseServer` starts owners in dependency order:
 
 ```text
-DiskManager -> LogManager -> startup RecoveryManager -> RecoveryCoordinator
-            -> BufferPoolManager -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
+DiskManager -> deferred LogManager -> CheckpointControl -> startup RecoveryManager
+            -> RecoveryCoordinator -> BufferPoolManager -> CheckpointManager
+            -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
 ```
 
 Reverse destruction removes consumers before storage managers. A mutating SQL result is
@@ -101,7 +102,7 @@ No persistent offset, width, magic, version, tuple encoding, catalog encoding, S
 grammar, or wire byte changed in 10B. A database assembled through the legacy Pager
 formats is opened and queried by the active buffer-backed engine in compatibility tests.
 
-Milestones 11A–11B add a sidecar logging/recovery path without altering a persistent
+Milestones 11A–11C.1 add sidecar logging/recovery/checkpoint paths without altering a persistent
 database-page format:
 
 ```text
@@ -120,6 +121,8 @@ frame with a valid volatile pageLSN. The production graph attaches LogManager an
 coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encoding.
 
 The engine remains single-threaded. Guards are not locks or latches. 11B adds physical
-analysis/REDO/UNDO and one implicit recovery unit per mutating statement without changing
-database page formats. There is still no persistent pageLSN, checkpoint, CLR, lock,
-MVCC, or concurrent transaction. See [wal.md](wal.md) and [recovery.md](recovery.md).
+analysis/REDO/UNDO and one implicit recovery unit per mutating statement. 11C.1 adds a
+quiescent full-buffer checkpoint and double-slotted `database.db.ckpt` recovery pointer.
+Neither changes database page formats. There is still no persistent pageLSN, fuzzy
+checkpoint, WAL recycling, CLR, lock, MVCC, or concurrent transaction. See
+[wal.md](wal.md), [recovery.md](recovery.md), and [checkpoints.md](checkpoints.md).

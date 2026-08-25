@@ -27,13 +27,19 @@ collision-free tests, and `TcpServer::port()` reports the selected port.
 ```bash
 ./build/minidb_server demo.db
 ./build/minidb_server demo.db --host 127.0.0.1 --port 7432 \
-    --buffer-frames 128 --lru-k 2
+    --buffer-frames 128 --lru-k 2 --checkpoint-wal-bytes 67108864 \
+    --checkpoint-statements 0
 ```
 
 `--buffer-frames` and `--lru-k` must both be positive. Defaults are 128 frames and
 K=2. The complete supported workflow is regression-tested with three frames and also
 passes the current two-frame stress workflow; one frame remains useful for individual
 page operations but is not the guaranteed full-engine configuration.
+`--checkpoint-wal-bytes` is the approximate WAL growth after the last completed sharp
+checkpoint (default 64 MiB), and `--checkpoint-statements` is an optional successful
+mutating-statement count. Zero disables either trigger. Policy runs only after COMMIT;
+there is no background or mandatory shutdown checkpoint. See
+[checkpoints.md](checkpoints.md).
 
 Startup prints the database path, bound address/actual port, and protocol version.
 Binding another address is an explicit operator choice.

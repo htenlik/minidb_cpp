@@ -45,6 +45,9 @@ bytes, buffer drains, writes, and fsyncs. The same configuration object records 
 and WAL payload/batch/buffer controls for controlled comparisons.
 
 Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed`,
-and `recovery_full_scan`. Transaction results include full-page record counts, WAL bytes,
-fsyncs, and logging amplification; recovery reports phase timing and physical REDO/UNDO
-counts. These are deterministic baselines, not timing-gated CI assertions.
+`recovery_full_scan`, `checkpoint_latency`, and `recovery_checkpoint_compare`.
+Transaction results include full-page record counts, WAL bytes, fsyncs, and logging
+amplification. Checkpoint results include dirty writes, required syncs, and latency; the
+comparison reports full-history versus checkpoint-tail records/bytes/time. Configure
+automatic-policy metadata with `--checkpoint-wal-bytes` and `--checkpoint-statements`
+(zero disables). These are deterministic baselines, not timing-gated CI assertions.
