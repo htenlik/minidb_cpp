@@ -5,7 +5,8 @@ namespace minidb::net {
 DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     : diskManager_(databasePath),
       logManager_(walPathForDatabase(databasePath), LogManager::DEFAULT_BUFFER_SIZE,
-                  LogOpenMode::DeferredRecovery),
+                  LogOpenMode::DeferredRecovery, WalStorageMode::Auto,
+                  config.walSegmentBytes),
       checkpointControl_(checkpointPathForDatabase(databasePath)) {
     recoveryStats_ = RecoveryManager(
         diskManager_, logManager_, &checkpointControl_).recover();
@@ -17,6 +18,10 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     checkpoints_ = std::make_unique<CheckpointManager>(
         *recovery_, *bufferPool_, diskManager_, logManager_, checkpointControl_,
         recoveryStats_, CheckpointPolicy{config.checkpointWalBytes, config.checkpointStatements});
+    if (logManager_.legacyMigrationPending()) {
+        static_cast<void>(checkpoints_->checkpoint());
+        logManager_.migrateLegacyToSegmented();
+    }
     metadataManager_ = std::make_unique<DatabaseMetadataManager>(
         diskManager_, *recovery_, logManager_);
     allocator_ = std::make_unique<PageAllocator>(

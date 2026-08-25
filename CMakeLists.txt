@@ -25,6 +25,7 @@ add_library(minidb_core
     src/recovery.cpp
     src/row.cpp
     src/schema.cpp
+    src/segmented_wal.cpp
     src/slotted_page.cpp
     src/table.cpp
     src/table_definition.cpp
@@ -147,6 +148,10 @@ add_test(NAME wal_codec_test COMMAND wal_codec_test)
 add_executable(log_manager_test tests/log_manager_test.cpp)
 target_link_libraries(log_manager_test PRIVATE minidb_core)
 add_test(NAME log_manager_test COMMAND log_manager_test)
+
+add_executable(segmented_wal_test tests/segmented_wal_test.cpp)
+target_link_libraries(segmented_wal_test PRIVATE minidb_core)
+add_test(NAME segmented_wal_test COMMAND segmented_wal_test)
 
 add_executable(recovery_log_test tests/recovery_log_test.cpp)
 target_link_libraries(recovery_log_test PRIVATE minidb_core)

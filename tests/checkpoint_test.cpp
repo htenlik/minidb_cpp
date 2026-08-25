@@ -190,10 +190,12 @@ void testTornNewestAndFullScanFallback() {
     {
         minidb::net::DatabaseServer server(database.path().string(), config());
         const auto& stats = server.startupRecoveryStats();
-        require(!stats.checkpointUsed && stats.fullScanFallback
+        require(stats.checkpointUsed && !stats.fullScanFallback
                     && stats.checkpointControlPresent
-                    && stats.checkpointValidationFailures >= 2 && rows(server) == 1,
-                "Two invalid control slots did not trigger correct full-scan fallback");
+                    && stats.checkpointValidationFailures >= 1 && rows(server) == 1,
+                "Invalid control did not discover the retained durable checkpoint");
+        require(server.checkpointControl().select(server.logManager()).slot.has_value(),
+                "Retained-WAL fallback did not rebuild checkpoint control");
     }
 }
 
@@ -278,13 +280,12 @@ void testCorruptControlHeaderCanBeRebuilt() {
     }
     corruptByte(database.path().string() + ".ckpt", 0);
     minidb::net::DatabaseServer server(database.path().string(), config());
-    require(!server.startupRecoveryStats().checkpointUsed
-                && server.startupRecoveryStats().fullScanFallback,
-            "Corrupt checkpoint header did not trigger full-scan fallback");
-    static_cast<void>(server.checkpointManager().checkpoint());
+    require(server.startupRecoveryStats().checkpointUsed
+                && !server.startupRecoveryStats().fullScanFallback,
+            "Corrupt checkpoint header did not use retained-WAL fallback");
     const auto selected = server.checkpointControl().select(server.logManager());
     require(selected.slot.has_value(),
-            "A later checkpoint could not rebuild corrupt optimization metadata");
+            "Retained-WAL fallback could not rebuild corrupt optimization metadata");
 }
 } // namespace
 

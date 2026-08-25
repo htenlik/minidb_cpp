@@ -39,6 +39,44 @@ TransactionId nextTransactionIdFrom(const WalScanResult& scan) {
     return maximum + 1;
 }
 
+std::optional<CheckpointSlot> discoverRetainedCheckpoint(const LogManager& logManager) {
+    if (!logManager.isSegmented()) return std::nullopt;
+    const auto scan = logManager.scan();
+    std::map<CheckpointId, std::pair<Lsn, CheckpointBeginLogPayload>> begins;
+    std::optional<CheckpointSlot> newest;
+    for (const auto& record : scan.records) {
+        if (record.type == LogRecordType::CheckpointBegin) {
+            validateCheckpointRecord(record);
+            const auto payload = decodeCheckpointBeginLogPayload(record.payload);
+            begins[payload.checkpointId] = {record.lsn, payload};
+            continue;
+        }
+        if (record.type != LogRecordType::CheckpointEnd) continue;
+        validateCheckpointRecord(record);
+        const auto payload = decodeCheckpointEndLogPayload(record.payload);
+        const auto begin = begins.find(payload.checkpointId);
+        const auto recordEnd = record.lsn + wal_record_layout::HEADER_SIZE
+            + record.payload.size();
+        if (begin == begins.end()
+            || begin->second.first != payload.checkpointBeginLsn
+            || payload.recoveryStartOffset != recordEnd) {
+            continue;
+        }
+        if (!newest.has_value() || payload.checkpointId > newest->checkpointId) {
+            newest = CheckpointSlot{
+                1,
+                payload.checkpointId,
+                record.lsn,
+                payload.recoveryStartOffset,
+                payload.databasePageCount,
+                payload.nextTransactionId,
+                payload.recoveryStartOffset,
+            };
+        }
+    }
+    return newest;
+}
+
 } // namespace
 
 void recoveryFailPoint(std::string_view name) {
@@ -53,11 +91,23 @@ void recoveryFailPoint(std::string_view name) {
 RecoveryStats RecoveryManager::recover() {
     const auto totalStart = std::chrono::steady_clock::now();
     RecoveryStats stats;
+    stats.recoveryStartOffset = logManager_.oldestRetainedLsn();
     CheckpointSelection checkpoint;
     if (checkpointControl_ != nullptr && !forceFullScan_) {
         checkpoint = checkpointControl_->select(logManager_);
         stats.checkpointControlPresent = checkpoint.controlFilePresent;
         stats.checkpointValidationFailures = checkpoint.validationFailures;
+        if (!checkpoint.slot.has_value()) {
+            checkpoint.slot = discoverRetainedCheckpoint(logManager_);
+            if (checkpoint.slot.has_value()) {
+                try {
+                    checkpointControl_->publish(*checkpoint.slot);
+                } catch (const std::exception&) {
+                    // The WAL checkpoint remains authoritative; control rebuild is
+                    // an optimization and must not turn recoverable state into failure.
+                }
+            }
+        }
     } else if (checkpointControl_ != nullptr) {
         stats.checkpointControlPresent = std::filesystem::exists(checkpointControl_->path());
     }

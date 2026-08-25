@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -41,7 +42,7 @@ void usage() {
     std::cerr
         << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
            "[--buffer-frames N] [--lru-k N] [--checkpoint-wal-bytes N] "
-           "[--checkpoint-statements N]\n";
+           "[--checkpoint-statements N] [--wal-segment-bytes N]\n";
 }
 
 } // namespace
@@ -70,6 +71,12 @@ int main(int argc, char** argv) {
             } else if (argument == "--checkpoint-statements" && index + 1 < argc) {
                 config.checkpointStatements = parseNonnegativeUint64(
                     argv[++index], "--checkpoint-statements");
+            } else if (argument == "--wal-segment-bytes" && index + 1 < argc) {
+                const auto value = parsePositiveSize(argv[++index], "--wal-segment-bytes");
+                if (value > std::numeric_limits<std::uint32_t>::max()) {
+                    throw std::invalid_argument("invalid --wal-segment-bytes value");
+                }
+                config.walSegmentBytes = static_cast<std::uint32_t>(value);
             } else {
                 usage();
                 return 2;

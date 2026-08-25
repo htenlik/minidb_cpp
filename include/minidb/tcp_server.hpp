@@ -3,6 +3,7 @@
 #include "minidb/buffer_pool_manager.hpp"
 #include "minidb/disk_manager.hpp"
 #include "minidb/sql_executor.hpp"
+#include "minidb/segmented_wal.hpp"
 #include "minidb/tcp_transport.hpp"
 
 #include <cstddef>
@@ -21,6 +22,7 @@ struct ServerConfig {
     std::size_t lruK = 2;
     std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t checkpointStatements = 0;
+    std::uint32_t walSegmentBytes = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY;
 };
 
 class TcpServer {

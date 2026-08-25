@@ -110,19 +110,44 @@ CheckpointId CheckpointManager::checkpoint() {
             recoveryStart,
         });
         const auto controlAfter = control_.stats();
+        recoveryFailPoint("checkpoint_after_control_sync");
 
-        const auto elapsed = static_cast<std::uint64_t>(
+        const auto checkpointElapsed = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - started).count());
+        const auto reclamationStarted = std::chrono::steady_clock::now();
+        const auto segmentStatsBefore = logManager_.stats();
+        std::uint64_t reclaimedBytes = 0;
+        try {
+            logManager_.rotateSegment();
+            // Keep one additional closed predecessor as a conservative local
+            // recovery/debug cushion. It is still bounded and lets a torn newest
+            // control slot fall back to the prior durable generation.
+            reclaimedBytes = logManager_.reclaimSegmentsBefore(beginLsn, 1);
+        } catch (const std::exception&) {
+            // The sharp checkpoint is already durable and authoritative. Failed
+            // best-effort reclamation only leaves extra history on disk.
+            ++stats_.reclamationFailures;
+        }
+        const auto segmentStatsAfter = logManager_.stats();
+        const auto reclamationElapsed = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - reclamationStarted).count());
+
         ++stats_.checkpointsCompleted;
         stats_.dirtyPagesFlushed += writes;
         stats_.databaseWrites += writes;
         ++stats_.walForces;
         ++stats_.databaseSyncs;
         stats_.controlFileSyncs += controlAfter.fsyncCalls - controlBefore.fsyncCalls;
+        stats_.segmentsReclaimed += segmentStatsAfter.segmentsDeleted
+            - segmentStatsBefore.segmentsDeleted;
+        stats_.walBytesReclaimed += reclaimedBytes;
+        stats_.reclamationDurationNs += reclamationElapsed;
         stats_.walBytesSincePreviousCheckpoint = walStart - lastCheckpointWalSize_;
-        stats_.checkpointDurationNs += elapsed;
-        stats_.checkpointMaxDurationNs = std::max(stats_.checkpointMaxDurationNs, elapsed);
+        stats_.checkpointDurationNs += checkpointElapsed;
+        stats_.checkpointMaxDurationNs = std::max(
+            stats_.checkpointMaxDurationNs, checkpointElapsed);
         stats_.lastCheckpointId = checkpointId;
         stats_.lastCheckpointEndLsn = endLsn;
         stats_.lastRecoveryStartOffset = recoveryStart;
@@ -131,7 +156,6 @@ CheckpointId CheckpointManager::checkpoint() {
         previousCheckpointEndLsn_ = endLsn;
         lastCheckpointWalSize_ = recoveryStart;
         statementsSinceCheckpoint_ = 0;
-        recoveryFailPoint("checkpoint_after_control_sync");
         return checkpointId;
     } catch (...) {
         ++stats_.checkpointFailures;

@@ -1,10 +1,12 @@
 #include "minidb/log_manager.hpp"
 
 #include "minidb/byte_codec.hpp"
+#include "minidb/recovery.hpp"
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <fcntl.h>
 #include <limits>
 #include <stdexcept>
@@ -30,8 +32,13 @@ std::uint64_t descriptorSize(int descriptor) {
 LogManager::LogManager(
     std::string walPath,
     std::size_t bufferCapacity,
-    LogOpenMode openMode)
-    : path_(std::move(walPath)), bufferCapacity_(bufferCapacity), openMode_(openMode) {
+    LogOpenMode openMode,
+    WalStorageMode storageMode,
+    std::uint32_t segmentPayloadCapacity)
+    : path_(std::move(walPath)),
+      segmentedPath_(segmentedWalPathForLegacyWal(path_)),
+      bufferCapacity_(bufferCapacity), openMode_(openMode),
+      requestedStorageMode_(storageMode), segmentPayloadCapacity_(segmentPayloadCapacity) {
     if (path_.empty()) {
         throw WalError(WalErrorKind::InvalidArgument, "WAL path must not be empty");
     }
@@ -43,6 +50,10 @@ LogManager::LogManager(
 }
 
 LogManager::~LogManager() {
+    if (segmented_ != nullptr) {
+        try { flushAll(); } catch (...) {}
+        return;
+    }
     if (descriptor_ < 0) return;
     try {
         flushAll();
@@ -52,6 +63,20 @@ LogManager::~LogManager() {
 }
 
 void LogManager::openOrCreate() {
+    if (requestedStorageMode_ == WalStorageMode::Auto
+        && !std::filesystem::exists(segmentedPath_)) {
+        std::error_code cleanupError;
+        std::filesystem::remove_all(segmentedPath_ + ".tmp", cleanupError);
+    }
+    if (requestedStorageMode_ == WalStorageMode::Segmented
+        || (requestedStorageMode_ == WalStorageMode::Auto
+            && std::filesystem::exists(segmentedPath_))
+        || (requestedStorageMode_ == WalStorageMode::Auto
+            && !std::filesystem::exists(path_))) {
+        openSegmented();
+        return;
+    }
+    activeStorageMode_ = WalStorageMode::LegacySingleFile;
     descriptor_ = ::open(path_.c_str(), O_RDWR | O_CREAT, 0644);
     if (descriptor_ < 0) throwIo("Could not open WAL file");
     try {
@@ -62,6 +87,25 @@ void LogManager::openOrCreate() {
         ::close(descriptor_);
         descriptor_ = -1;
         throw;
+    }
+}
+
+void LogManager::openSegmented() {
+    activeStorageMode_ = WalStorageMode::Segmented;
+    segmented_ = std::make_unique<SegmentedWalStorage>(
+        segmentedPath_, segmentPayloadCapacity_, true);
+    const auto scanned = segmented_->scan();
+    nextLsn_ = scanned.validBytes;
+    bufferStartOffset_ = nextLsn_;
+    truncatedTail_ = scanned.truncatedTail;
+    if (openMode_ == LogOpenMode::DeferredRecovery) {
+        recoveryPending_ = true;
+        return;
+    }
+    for (const auto& record : scanned.records) knownLsns_.insert(record.lsn);
+    if (!scanned.records.empty()) {
+        lastAppendedLsn_ = scanned.records.back().lsn;
+        durableLsn_ = lastAppendedLsn_;
     }
 }
 
@@ -144,7 +188,24 @@ void LogManager::syncWal() {
 
 void LogManager::writeBuffer() {
     if (buffer_.empty()) return;
-    writeBytes(bufferStartOffset_, buffer_);
+    if (segmented_ != nullptr) {
+        const auto before = segmented_->stats();
+        std::size_t offset = 0;
+        while (offset < buffer_.size()) {
+            const auto total = byte_codec::readUint32(
+                std::span<const std::byte>(buffer_).subspan(offset),
+                wal_record_layout::TOTAL_LENGTH_OFFSET);
+            segmented_->appendRecord(
+                bufferStartOffset_ + offset,
+                std::span<const std::byte>(buffer_).subspan(offset, total));
+            offset += total;
+        }
+        const auto after = segmented_->stats();
+        stats_.physicalWrites += after.physicalWrites - before.physicalWrites;
+        stats_.bytesWritten += after.bytesWritten - before.bytesWritten;
+    } else {
+        writeBytes(bufferStartOffset_, buffer_);
+    }
     bufferStartOffset_ += buffer_.size();
     buffer_.clear();
     ++stats_.bufferFlushes;
@@ -169,7 +230,15 @@ Lsn LogManager::append(LogRecord record) {
 
     if (encoded.size() > bufferCapacity_) {
         writeBuffer();
-        writeBytes(lsn, encoded);
+        if (segmented_ != nullptr) {
+            const auto before = segmented_->stats();
+            segmented_->appendRecord(lsn, encoded);
+            const auto after = segmented_->stats();
+            stats_.physicalWrites += after.physicalWrites - before.physicalWrites;
+            stats_.bytesWritten += after.bytesWritten - before.bytesWritten;
+        } else {
+            writeBytes(lsn, encoded);
+        }
         bufferStartOffset_ = lsn + encoded.size();
     } else {
         if (encoded.size() > bufferCapacity_ - buffer_.size()) writeBuffer();
@@ -186,7 +255,9 @@ Lsn LogManager::append(LogRecord record) {
 }
 
 bool LogManager::containsLsn(Lsn lsn) const noexcept {
-    return isValidLsn(lsn) && knownLsns_.contains(lsn);
+    return segmented_ != nullptr
+        ? (knownLsns_.contains(lsn) || segmented_->containsLsn(lsn))
+        : isValidLsn(lsn) && knownLsns_.contains(lsn);
 }
 
 void LogManager::flushUpTo(Lsn target) {
@@ -195,8 +266,16 @@ void LogManager::flushUpTo(Lsn target) {
         throw WalError(WalErrorKind::InvalidArgument, "flushUpTo target is not an appended LSN");
     }
     if (isValidLsn(durableLsn_) && durableLsn_ >= target) return;
-    writeBuffer();
-    syncWal();
+    if (segmented_ != nullptr) {
+        writeBuffer();
+        const auto before = segmented_->stats();
+        segmented_->flush();
+        const auto after = segmented_->stats();
+        stats_.fsyncCalls += after.fsyncCalls - before.fsyncCalls;
+    } else {
+        writeBuffer();
+        syncWal();
+    }
     durableLsn_ = lastAppendedLsn_;
 }
 
@@ -206,7 +285,7 @@ void LogManager::flushAll() {
 }
 
 WalScanResult LogManager::scanIncludingBuffer() const {
-    auto result = scanWalFile(path_);
+    auto result = segmented_ != nullptr ? segmented_->scan() : scanWalFile(path_);
     if (result.truncatedTail || buffer_.empty()) return result;
     if (result.validBytes != bufferStartOffset_ || result.fileBytes != bufferStartOffset_) {
         throw std::logic_error("WAL disk and in-memory buffer offsets disagree");
@@ -257,6 +336,7 @@ WalScanResult LogManager::scanFrom(WalOffset startOffset) const {
         }
         return result;
     }
+    if (segmented_ != nullptr) return segmented_->scanFrom(startOffset);
     return scanWalFileFrom(path_, startOffset);
 }
 
@@ -278,10 +358,12 @@ LogRecord LogManager::readRecordAt(Lsn lsn) const {
         return decodeWalRecord(
             std::span<const std::byte>(buffer_).subspan(offset, totalLength), lsn);
     }
+    if (segmented_ != nullptr) return segmented_->readRecordAt(lsn);
     return readWalRecordAt(path_, lsn);
 }
 
 std::uint64_t LogManager::physicalFileSize() const {
+    if (segmented_ != nullptr) return segmented_->physicalBytes();
     return descriptorSize(descriptor_);
 }
 
@@ -296,7 +378,8 @@ void LogManager::completeRecoveryScan(const WalScanResult& scan, Lsn baseDurable
     }
     bufferStartOffset_ = nextLsn_;
     knownLsns_.clear();
-    for (const auto& record : scan.records) knownLsns_.insert(record.lsn);
+    const auto knownScan = segmented_ != nullptr ? segmented_->scan() : scan;
+    for (const auto& record : knownScan.records) knownLsns_.insert(record.lsn);
     if (isValidLsn(baseDurableLsn)) knownLsns_.insert(baseDurableLsn);
     lastAppendedLsn_ = scan.records.empty() ? baseDurableLsn : scan.records.back().lsn;
     durableLsn_ = lastAppendedLsn_;
@@ -331,6 +414,12 @@ void LogManager::validate() const {
 
 void LogManager::truncateToLastValidRecord() {
     if (!truncatedTail_) return;
+    if (segmented_ != nullptr) {
+        segmented_->truncateActiveTail();
+        truncatedTail_ = false;
+        bufferStartOffset_ = nextLsn_;
+        return;
+    }
     if (::ftruncate(descriptor_, static_cast<off_t>(nextLsn_)) != 0) {
         throwIo("Could not truncate incomplete WAL tail");
     }
@@ -344,7 +433,79 @@ LogManagerStats LogManager::stats() const noexcept {
     result.bufferedBytes = buffer_.size();
     result.lastAppendedLsn = lastAppendedLsn_;
     result.durableLsn = durableLsn_;
+    result.logicalWalEnd = nextLsn_;
+    if (segmented_ != nullptr) {
+        const auto storage = segmented_->stats();
+        result.segmentsCreated = storage.segmentsCreated;
+        result.segmentsClosed = storage.segmentsClosed;
+        result.segmentsDeleted = storage.segmentsDeleted;
+        result.segmentRotations = storage.segmentRotations;
+        result.segmentDirectorySyncs = storage.segmentDirectorySyncs;
+        result.retainedSegments = storage.retainedSegments;
+        result.activeSegmentId = storage.activeSegmentId;
+        result.oldestRetainedLsn = storage.oldestRetainedLsn;
+        result.walBytesReclaimed = storage.walBytesReclaimed;
+        result.physicalWalBytes = storage.physicalWalBytes;
+    } else if (descriptor_ >= 0) {
+        struct stat status {};
+        if (::fstat(descriptor_, &status) == 0 && status.st_size >= 0) {
+            result.physicalWalBytes = static_cast<std::uint64_t>(status.st_size);
+        }
+    }
     return result;
+}
+
+void LogManager::resetStats() noexcept {
+    stats_ = {};
+    if (segmented_ != nullptr) segmented_->resetStats();
+}
+
+void LogManager::rotateSegment() {
+    if (segmented_ == nullptr) return;
+    const auto before = segmented_->stats();
+    segmented_->rotate();
+    const auto after = segmented_->stats();
+    stats_.fsyncCalls += after.fsyncCalls - before.fsyncCalls;
+    stats_.physicalWrites += after.physicalWrites - before.physicalWrites;
+    stats_.bytesWritten += after.bytesWritten - before.bytesWritten;
+}
+
+std::uint64_t LogManager::reclaimSegmentsBefore(
+    Lsn floorLsn, std::size_t extraSegments) {
+    if (segmented_ == nullptr) return 0;
+    const auto reclaimed = segmented_->reclaimBefore(floorLsn, extraSegments);
+    knownLsns_.clear();
+    for (const auto& record : segmented_->scan().records) knownLsns_.insert(record.lsn);
+    return reclaimed;
+}
+
+void LogManager::migrateLegacyToSegmented() {
+    if (!legacyMigrationPending()) return;
+    flushAll();
+    migrateLegacyWalToSegments(path_, segmentedPath_, segmentPayloadCapacity_);
+    if (descriptor_ >= 0) {
+        ::close(descriptor_);
+        descriptor_ = -1;
+    }
+    segmented_ = std::make_unique<SegmentedWalStorage>(
+        segmentedPath_, segmentPayloadCapacity_, false);
+    activeStorageMode_ = WalStorageMode::Segmented;
+    const auto scan = segmented_->scan();
+    nextLsn_ = scan.validBytes;
+    bufferStartOffset_ = nextLsn_;
+    knownLsns_.clear();
+    for (const auto& record : scan.records) knownLsns_.insert(record.lsn);
+    lastAppendedLsn_ = scan.records.empty() ? INVALID_LSN : scan.records.back().lsn;
+    durableLsn_ = lastAppendedLsn_;
+    recoveryFailPoint("wal_migration_before_legacy_delete");
+    if (::unlink(path_.c_str()) != 0 && errno != ENOENT) {
+        throwIo("Could not delete obsolete legacy WAL");
+    }
+    recoveryFailPoint("wal_migration_after_legacy_delete");
+    auto parent = std::filesystem::path(path_).parent_path();
+    if (parent.empty()) parent = ".";
+    syncDirectory(parent.string());
+    recoveryFailPoint("wal_migration_after_legacy_parent_sync");
 }
 
 } // namespace minidb

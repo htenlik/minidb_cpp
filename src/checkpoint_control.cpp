@@ -70,7 +70,7 @@ std::uint32_t slotChecksum(std::span<const std::byte> bytes) {
 
 bool crossValidate(const CheckpointSlot& slot, const LogManager& log) {
     if (slot.walFileSizeAtCheckpoint < slot.recoveryStartOffset
-        || slot.recoveryStartOffset > log.physicalFileSize()) return false;
+        || slot.recoveryStartOffset > log.lastValidOffset()) return false;
     const auto endRecord = log.readRecordAt(slot.checkpointEndLsn);
     if (endRecord.lsn != slot.checkpointEndLsn
         || endRecord.type != LogRecordType::CheckpointEnd) return false;

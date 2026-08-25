@@ -30,6 +30,8 @@ public:
         std::filesystem::remove(path_, error);
         std::filesystem::remove(path_.string() + ".wal", error);
         std::filesystem::remove(path_.string() + ".ckpt", error);
+        std::filesystem::remove_all(path_.string() + ".wal.d", error);
+        std::filesystem::remove_all(path_.string() + ".wal.d.tmp", error);
     }
 
     TemporaryDatabase(const TemporaryDatabase&) = delete;

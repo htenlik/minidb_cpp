@@ -1,9 +1,11 @@
 #pragma once
 
+#include "minidb/segmented_wal.hpp"
 #include "minidb/wal.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -15,6 +17,12 @@ enum class LogOpenMode {
     DeferredRecovery,
 };
 
+enum class WalStorageMode {
+    LegacySingleFile,
+    Segmented,
+    Auto,
+};
+
 struct LogManagerStats {
     std::uint64_t recordsAppended = 0;
     std::uint64_t bytesAppended = 0;
@@ -24,6 +32,17 @@ struct LogManagerStats {
     std::uint64_t fsyncCalls = 0;
     std::uint64_t flushUpToCalls = 0;
     std::uint64_t bufferedBytes = 0;
+    std::uint64_t segmentsCreated = 0;
+    std::uint64_t segmentsClosed = 0;
+    std::uint64_t segmentsDeleted = 0;
+    std::uint64_t segmentRotations = 0;
+    std::uint64_t segmentDirectorySyncs = 0;
+    std::uint64_t retainedSegments = 0;
+    std::uint64_t physicalWalBytes = 0;
+    std::uint64_t walBytesReclaimed = 0;
+    WalSegmentId activeSegmentId = INVALID_WAL_SEGMENT_ID;
+    Lsn oldestRetainedLsn = INVALID_LSN;
+    Lsn logicalWalEnd = wal_file_layout::HEADER_SIZE;
     Lsn lastAppendedLsn = INVALID_LSN;
     Lsn durableLsn = INVALID_LSN;
 
@@ -37,7 +56,9 @@ public:
     explicit LogManager(
         std::string walPath,
         std::size_t bufferCapacity = DEFAULT_BUFFER_SIZE,
-        LogOpenMode openMode = LogOpenMode::EagerValidated);
+        LogOpenMode openMode = LogOpenMode::EagerValidated,
+        WalStorageMode storageMode = WalStorageMode::LegacySingleFile,
+        std::uint32_t segmentPayloadCapacity = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY);
     ~LogManager() override;
 
     LogManager(const LogManager&) = delete;
@@ -53,6 +74,20 @@ public:
     [[nodiscard]] bool hasTruncatedTail() const noexcept { return truncatedTail_; }
     [[nodiscard]] std::uint64_t lastValidOffset() const noexcept { return nextLsn_; }
     [[nodiscard]] std::uint64_t physicalFileSize() const;
+    [[nodiscard]] std::uint64_t physicalWalBytes() const { return physicalFileSize(); }
+    [[nodiscard]] Lsn oldestRetainedLsn() const noexcept {
+        return segmented_ != nullptr && !segmented_->segments().empty()
+            ? segmented_->segments().front().header.startLsn
+            : wal_file_layout::HEADER_SIZE;
+    }
+    [[nodiscard]] bool isSegmented() const noexcept {
+        return activeStorageMode_ == WalStorageMode::Segmented;
+    }
+    [[nodiscard]] bool legacyMigrationPending() const noexcept {
+        return activeStorageMode_ == WalStorageMode::LegacySingleFile
+            && requestedStorageMode_ == WalStorageMode::Auto;
+    }
+    [[nodiscard]] const std::string& segmentedPath() const noexcept { return segmentedPath_; }
     [[nodiscard]] bool recoveryPending() const noexcept { return recoveryPending_; }
     [[nodiscard]] const std::string& path() const noexcept { return path_; }
 
@@ -62,12 +97,17 @@ public:
     void validate() const;
     void truncateToLastValidRecord();
     void completeRecoveryScan(const WalScanResult& scan, Lsn baseDurableLsn = INVALID_LSN);
+    void rotateSegment();
+    [[nodiscard]] std::uint64_t reclaimSegmentsBefore(
+        Lsn floorLsn, std::size_t extraSegments = 0);
+    void migrateLegacyToSegmented();
 
     [[nodiscard]] LogManagerStats stats() const noexcept;
-    void resetStats() noexcept { stats_ = {}; }
+    void resetStats() noexcept;
 
 private:
     std::string path_;
+    std::string segmentedPath_;
     int descriptor_ = -1;
     std::size_t bufferCapacity_;
     std::vector<std::byte> buffer_;
@@ -78,10 +118,15 @@ private:
     bool truncatedTail_ = false;
     bool recoveryPending_ = false;
     LogOpenMode openMode_ = LogOpenMode::EagerValidated;
+    WalStorageMode requestedStorageMode_ = WalStorageMode::LegacySingleFile;
+    WalStorageMode activeStorageMode_ = WalStorageMode::LegacySingleFile;
+    std::uint32_t segmentPayloadCapacity_ = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY;
+    std::unique_ptr<SegmentedWalStorage> segmented_;
     std::unordered_set<Lsn> knownLsns_;
     LogManagerStats stats_{};
 
     void openOrCreate();
+    void openSegmented();
     void initializeNewWal();
     void loadExistingWal();
     void loadExistingWalDeferred();

@@ -8,8 +8,14 @@ namespace minidb {
 using Lsn = std::uint64_t;
 inline constexpr Lsn INVALID_LSN = std::numeric_limits<Lsn>::max();
 
-using WalOffset = std::uint64_t;
+// A position in the global logical WAL byte stream. Historical code used the
+// name WalOffset while the stream was stored in one file; keep the alias for
+// on-disk/API compatibility, but it is not a segment-local file offset.
+using WalOffset = Lsn;
 inline constexpr WalOffset INVALID_WAL_OFFSET = std::numeric_limits<WalOffset>::max();
+
+using WalSegmentId = std::uint64_t;
+inline constexpr WalSegmentId INVALID_WAL_SEGMENT_ID = 0;
 
 using TransactionId = std::uint64_t;
 inline constexpr TransactionId INVALID_TRANSACTION_ID = 0;

@@ -29,6 +29,10 @@ struct CheckpointStats {
     std::uint64_t walBytesSincePreviousCheckpoint = 0;
     std::uint64_t checkpointDurationNs = 0;
     std::uint64_t checkpointMaxDurationNs = 0;
+    std::uint64_t reclamationDurationNs = 0;
+    std::uint64_t reclamationFailures = 0;
+    std::uint64_t segmentsReclaimed = 0;
+    std::uint64_t walBytesReclaimed = 0;
     CheckpointId lastCheckpointId = INVALID_CHECKPOINT_ID;
     Lsn lastCheckpointEndLsn = INVALID_LSN;
     WalOffset lastRecoveryStartOffset = wal_file_layout::HEADER_SIZE;
