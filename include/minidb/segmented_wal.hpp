@@ -115,7 +115,8 @@ public:
     SegmentedWalStorage(
         std::string directory,
         std::uint32_t payloadCapacity = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY,
-        bool createIfMissing = true);
+        bool createIfMissing = true,
+        Lsn migrationBaseLsn = INVALID_LSN);
     ~SegmentedWalStorage();
 
     SegmentedWalStorage(const SegmentedWalStorage&) = delete;
@@ -158,7 +159,7 @@ private:
     bool truncatedTail_ = false;
     SegmentedWalStats stats_{};
 
-    void createNewStore(std::uint32_t payloadCapacity);
+    void createNewStore(std::uint32_t payloadCapacity, Lsn migrationBaseLsn);
     void openExistingStore();
     void discoverSegments();
     void openActiveDescriptor();

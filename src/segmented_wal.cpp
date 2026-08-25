@@ -251,7 +251,9 @@ encodeWalSegmentManifest(const WalSegmentManifest& manifest) {
     if (manifest.payloadCapacity < 128
         || manifest.firstRetainedSegmentId == INVALID_WAL_SEGMENT_ID
         || !isValidLsn(manifest.initialLsn)
-        || manifest.initialLsn < wal_file_layout::HEADER_SIZE) {
+        || manifest.initialLsn < wal_file_layout::HEADER_SIZE
+        || (manifest.migrationBaseLsn != INVALID_LSN
+            && manifest.migrationBaseLsn < manifest.initialLsn)) {
         throw WalError(WalErrorKind::InvalidArgument, "Invalid segmented-WAL manifest fields");
     }
     std::array<std::byte, HEADER_SIZE> bytes{};
@@ -290,7 +292,9 @@ WalSegmentManifest decodeWalSegmentManifest(std::span<const std::byte> bytes) {
     if (manifest.payloadCapacity < 128
         || manifest.firstRetainedSegmentId == INVALID_WAL_SEGMENT_ID
         || !isValidLsn(manifest.initialLsn)
-        || manifest.initialLsn < wal_file_layout::HEADER_SIZE) {
+        || manifest.initialLsn < wal_file_layout::HEADER_SIZE
+        || (manifest.migrationBaseLsn != INVALID_LSN
+            && manifest.migrationBaseLsn < manifest.initialLsn)) {
         throw WalError(WalErrorKind::CorruptHeader, "Malformed segmented-WAL manifest fields");
     }
     return manifest;
@@ -307,7 +311,10 @@ void syncDirectory(const std::string& path) {
 }
 
 SegmentedWalStorage::SegmentedWalStorage(
-    std::string directory, std::uint32_t payloadCapacity, bool createIfMissing)
+    std::string directory,
+    std::uint32_t payloadCapacity,
+    bool createIfMissing,
+    Lsn migrationBaseLsn)
     : directory_(std::move(directory)) {
     if (directory_.empty() || payloadCapacity < 128) {
         throw WalError(WalErrorKind::InvalidArgument, "Invalid segmented-WAL configuration");
@@ -319,7 +326,7 @@ SegmentedWalStorage::SegmentedWalStorage(
                            "Configured WAL segment capacity disagrees with manifest");
         }
     }
-    else if (createIfMissing) createNewStore(payloadCapacity);
+    else if (createIfMissing) createNewStore(payloadCapacity, migrationBaseLsn);
     else throw WalError(WalErrorKind::Io, "Segmented WAL directory does not exist");
 }
 
@@ -329,7 +336,8 @@ SegmentedWalStorage::~SegmentedWalStorage() {
     ::close(activeDescriptor_);
 }
 
-void SegmentedWalStorage::createNewStore(std::uint32_t payloadCapacity) {
+void SegmentedWalStorage::createNewStore(
+    std::uint32_t payloadCapacity, Lsn migrationBaseLsn) {
     std::error_code error;
     if (!std::filesystem::create_directory(directory_, error) || error) {
         throw WalError(WalErrorKind::Io, "Could not create segmented WAL directory: "
@@ -338,7 +346,7 @@ void SegmentedWalStorage::createNewStore(std::uint32_t payloadCapacity) {
     manifest_.payloadCapacity = payloadCapacity;
     manifest_.firstRetainedSegmentId = 1;
     manifest_.initialLsn = wal_file_layout::HEADER_SIZE;
-    manifest_.migrationBaseLsn = INVALID_LSN;
+    manifest_.migrationBaseLsn = migrationBaseLsn;
     publishManifest();
     createSegment(manifest_.initialLsn);
     syncDirectory(std::filesystem::path(directory_).parent_path().string());
@@ -662,7 +670,9 @@ void migrateLegacyWalToSegments(
     std::filesystem::remove_all(temporary, error);
     recoveryFailPoint("wal_migration_after_temp_cleanup");
     {
-        SegmentedWalStorage storage(temporary, payloadCapacity, true);
+        const auto migrationBase = scan.records.empty()
+            ? wal_file_layout::HEADER_SIZE : scan.records.front().lsn;
+        SegmentedWalStorage storage(temporary, payloadCapacity, true, migrationBase);
         recoveryFailPoint("wal_migration_after_temp_create");
         for (std::size_t index = 0; index < scan.records.size(); ++index) {
             const auto& record = scan.records[index];

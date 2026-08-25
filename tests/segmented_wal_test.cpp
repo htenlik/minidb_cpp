@@ -285,6 +285,15 @@ void testLegacyMigration() {
             require(migrated.records[index].lsn == original[index],
                     "Migration changed a global logical LSN");
         }
+        std::array<std::byte, minidb::wal_manifest_layout::HEADER_SIZE> manifestBytes{};
+        std::ifstream manifest(
+            std::filesystem::path(log.segmentedPath()) / "manifest", std::ios::binary);
+        manifest.read(reinterpret_cast<char*>(manifestBytes.data()),
+                      static_cast<std::streamsize>(manifestBytes.size()));
+        require(manifest.good()
+                    && minidb::decodeWalSegmentManifest(manifestBytes).migrationBaseLsn
+                        == original.front(),
+                "Migration manifest did not persist its legacy logical base");
     }
 }
 

@@ -1047,7 +1047,10 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
                 0,
                 8,
                 static_cast<std::size_t>(config.bufferFrames),
-                static_cast<std::size_t>(config.lruK)});
+                static_cast<std::size_t>(config.lruK),
+                config.checkpointWalBytes,
+                config.checkpointStatements,
+                config.walSegmentBytes});
         server.start();
         std::exception_ptr serverError;
         std::thread serverThread([&] {
@@ -1157,7 +1160,8 @@ BenchmarkResult runTransactional(
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK),
                               config.checkpointWalBytes,
-                              config.checkpointStatements});
+                              config.checkpointStatements,
+                              config.walSegmentBytes});
         auto& engine = server.sqlEngine();
         createUsers(engine);
         const auto setupRows = name == "txn_insert" ? 0U
@@ -1228,7 +1232,10 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
             config.databasePath,
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
-                              static_cast<std::size_t>(config.lruK)});
+                              static_cast<std::size_t>(config.lruK),
+                              config.checkpointWalBytes,
+                              config.checkpointStatements,
+                              config.walSegmentBytes});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
     }
@@ -1238,7 +1245,8 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
     {
         DiskManager disk(config.databasePath);
         LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
-                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto);
+                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto,
+                       config.walSegmentBytes);
         measure(latency, [&] { recovery = RecoveryManager(disk, log).recover(); });
     }
     {
@@ -1246,7 +1254,10 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
             config.databasePath,
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
-                              static_cast<std::size_t>(config.lruK)});
+                              static_cast<std::size_t>(config.lruK),
+                              config.checkpointWalBytes,
+                              config.checkpointStatements,
+                              config.walSegmentBytes});
         validation.catalog().validate();
     }
     BenchmarkResult result;
@@ -1272,7 +1283,8 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
             config.databasePath,
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
-                              static_cast<std::size_t>(config.lruK), 0, 0});
+                              static_cast<std::size_t>(config.lruK), 0, 0,
+                              config.walSegmentBytes});
         static_cast<void>(server.checkpointManager().checkpoint());
         server.checkpointManager().resetStats();
         server.bufferPool().resetStats();
@@ -1306,7 +1318,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
             config.databasePath,
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
-                              static_cast<std::size_t>(config.lruK), 0, 0});
+                              static_cast<std::size_t>(config.lruK), 0, 0,
+                              config.walSegmentBytes});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
         static_cast<void>(server.checkpointManager().checkpoint());
@@ -1322,7 +1335,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     {
         DiskManager disk(config.databasePath);
         LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
-                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto);
+                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto,
+                       config.walSegmentBytes);
         measure(fullLatency, [&] { full = RecoveryManager(disk, log, nullptr, true).recover(); });
     }
     RecoveryStats bounded;
@@ -1330,7 +1344,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     {
         DiskManager disk(config.databasePath);
         LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
-                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto);
+                       LogOpenMode::DeferredRecovery, WalStorageMode::Auto,
+                       config.walSegmentBytes);
         CheckpointControl control(checkpointPathForDatabase(config.databasePath));
         measure(boundedLatency, [&] { bounded = RecoveryManager(disk, log, &control).recover(); });
     }
@@ -1339,7 +1354,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
             config.databasePath,
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
-                              static_cast<std::size_t>(config.lruK), 0, 0});
+                              static_cast<std::size_t>(config.lruK), 0, 0,
+                              config.walSegmentBytes});
         validation.catalog().validate();
     }
     BenchmarkResult result;
