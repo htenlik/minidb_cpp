@@ -1,4 +1,5 @@
 #include "minidb/database_metadata_manager.hpp"
+#include "minidb/recovery.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,7 @@ void DatabaseMetadataManager::persist(database_format::DatabaseHeader header) {
         database_format::METADATA_PAGE_ID, after);
     if (isValidLsn(lsn)) walProvider_.flushUpTo(lsn);
     diskManager_.writePhysicalPage(database_format::METADATA_PAGE_ID, after);
+    recoveryFailPoint("after_database_page_write");
 }
 
 void DatabaseMetadataManager::updateCatalogRootPageId(PageId pageId) {

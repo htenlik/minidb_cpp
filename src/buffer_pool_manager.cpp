@@ -1,4 +1,5 @@
 #include "minidb/buffer_pool_manager.hpp"
+#include "minidb/recovery.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -51,6 +52,7 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
     prepareFrameForWrite(frame);
     ensureWalDurableBeforePageWrite(frame);
     diskManager_.writePage(frame.pageId, frame.data);
+    recoveryFailPoint("after_database_page_write");
     frame.dirty = false;
     ++stats_.physicalPageWrites;
 }
@@ -202,6 +204,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
         prepareFrameForWrite(frame);
         ensureWalDurableBeforePageWrite(frame);
         diskManager_.writePage(pageId, frame.data);
+        recoveryFailPoint("after_database_page_write");
         frame.dirty = false;
         ++stats_.physicalPageWrites;
     }
@@ -223,6 +226,7 @@ void BufferPoolManager::flushAll() {
     for (auto& frame : frames_) {
         if (!frame.valid || !frame.dirty) continue;
         diskManager_.writePage(frame.pageId, frame.data);
+        recoveryFailPoint("after_database_page_write");
         frame.dirty = false;
         ++stats_.physicalPageWrites;
     }

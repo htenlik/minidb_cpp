@@ -97,9 +97,9 @@ TcpServer::TcpServer(
     BufferPoolManager& bufferPool,
     DiskManager& diskManager)
     : config_(std::move(config)),
-      engine_(engine),
-      bufferPool_(bufferPool),
-      diskManager_(diskManager) {
+      engine_(engine) {
+    static_cast<void>(bufferPool);
+    static_cast<void>(diskManager);
     if (config_.host.empty() || config_.backlog <= 0
         || config_.bufferFrames == 0 || config_.lruK == 0) {
         throw std::invalid_argument(
@@ -166,8 +166,6 @@ void TcpServer::serveConnection(int descriptor) {
         const auto source = decodeExecuteSqlPayload(*request);
         try {
             const auto result = engine_.execute(source);
-            bufferPool_.flushAll();
-            diskManager_.flush();
             try {
                 writeFrame(descriptor, encodeQueryResultFrame(requestId, result));
             } catch (const ProtocolError&) {

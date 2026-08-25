@@ -11,6 +11,8 @@
 #include <variant>
 #include <vector>
 
+namespace minidb { class RecoveryCoordinator; }
+
 namespace minidb::sql {
 
 enum class AccessPath {
@@ -67,15 +69,15 @@ private:
 
 class SqlEngine {
 public:
-    explicit SqlEngine(Catalog& catalog) : executor_(catalog) {}
+    explicit SqlEngine(Catalog& catalog, RecoveryCoordinator* recovery = nullptr)
+        : executor_(catalog), recovery_(recovery) {}
 
     [[nodiscard]] QueryResult execute(std::string_view source);
-    [[nodiscard]] QueryResult execute(const Statement& statement) {
-        return executor_.execute(statement);
-    }
+    [[nodiscard]] QueryResult execute(const Statement& statement);
 
 private:
     SqlExecutor executor_;
+    RecoveryCoordinator* recovery_;
 };
 
 } // namespace minidb::sql

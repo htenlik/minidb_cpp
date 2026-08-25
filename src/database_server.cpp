@@ -4,10 +4,33 @@ namespace minidb::net {
 
 DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     : diskManager_(databasePath),
-      bufferPool_(diskManager_, config.bufferFrames, config.lruK),
-      allocator_(bufferPool_, diskManager_),
-      catalog_(Catalog::openOrCreate(bufferPool_, diskManager_, allocator_)),
-      engine_(catalog_),
-      server_(std::move(config), engine_, bufferPool_, diskManager_) {}
+      logManager_(walPathForDatabase(databasePath)) {
+    recoveryStats_ = RecoveryManager(diskManager_, logManager_).recover();
+    recovery_ = std::make_unique<RecoveryCoordinator>(diskManager_, logManager_);
+    bufferPool_ = std::make_unique<BufferPoolManager>(
+        diskManager_, config.bufferFrames, config.lruK, &logManager_, recovery_.get());
+    recovery_->attachBufferPool(*bufferPool_);
+    metadataManager_ = std::make_unique<DatabaseMetadataManager>(
+        diskManager_, *recovery_, logManager_);
+    allocator_ = std::make_unique<PageAllocator>(
+        *bufferPool_, diskManager_, metadataManager_.get());
+
+    if (diskManager_.databaseHeader().catalogRootPageId == INVALID_PAGE_ID) {
+        recovery_->beginStatement();
+        try {
+            catalog_.emplace(Catalog::openOrCreate(
+                *bufferPool_, diskManager_, *allocator_));
+            recovery_->commitStatement();
+        } catch (...) {
+            if (recovery_->hasActiveStatement()) recovery_->rollbackStatement();
+            throw;
+        }
+    } else {
+        catalog_.emplace(Catalog::open(*bufferPool_, diskManager_, *allocator_));
+    }
+    engine_ = std::make_unique<sql::SqlEngine>(*catalog_, recovery_.get());
+    server_ = std::make_unique<TcpServer>(
+        std::move(config), *engine_, *bufferPool_, diskManager_);
+}
 
 } // namespace minidb::net

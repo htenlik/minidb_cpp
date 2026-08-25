@@ -41,8 +41,6 @@ public:
 private:
     ServerConfig config_;
     sql::SqlEngine& engine_;
-    BufferPoolManager& bufferPool_;
-    DiskManager& diskManager_;
     Socket listener_;
     std::uint16_t boundPort_ = 0;
 

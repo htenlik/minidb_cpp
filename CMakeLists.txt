@@ -241,6 +241,14 @@ add_executable(network_stress_test tests/network_stress_test.cpp)
 target_link_libraries(network_stress_test PRIVATE minidb_network)
 add_test(NAME network_stress_test COMMAND network_stress_test)
 
+add_executable(transaction_recovery_test tests/transaction_recovery_test.cpp)
+target_link_libraries(transaction_recovery_test PRIVATE minidb_network)
+add_test(NAME transaction_recovery_test COMMAND transaction_recovery_test)
+
+add_executable(recovery_crash_test tests/recovery_crash_test.cpp)
+target_link_libraries(recovery_crash_test PRIVATE minidb_network)
+add_test(NAME recovery_crash_test COMMAND recovery_crash_test)
+
 add_executable(cli_format_test tests/cli_format_test.cpp)
 target_link_libraries(cli_format_test PRIVATE minidb_network)
 add_test(NAME cli_format_test COMMAND cli_format_test)

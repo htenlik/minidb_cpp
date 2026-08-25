@@ -1,6 +1,7 @@
 #include "minidb/sql_executor.hpp"
 
 #include "minidb/sql_parser.hpp"
+#include "minidb/recovery.hpp"
 #include "minidb/table.hpp"
 
 #include <algorithm>
@@ -828,7 +829,22 @@ QueryResult SqlExecutor::execute(const Statement& statement) {
 
 QueryResult SqlEngine::execute(std::string_view source) {
     auto statement = Parser::parse(source);
-    return executor_.execute(statement);
+    return execute(statement);
+}
+
+QueryResult SqlEngine::execute(const Statement& statement) {
+    const bool mutating = !std::holds_alternative<SelectStatement>(statement.node);
+    if (!mutating || recovery_ == nullptr) return executor_.execute(statement);
+
+    recovery_->beginStatement();
+    try {
+        auto result = executor_.execute(statement);
+        recovery_->commitStatement();
+        return result;
+    } catch (...) {
+        if (recovery_->hasActiveStatement()) recovery_->rollbackStatement();
+        throw;
+    }
 }
 
 } // namespace minidb::sql

@@ -6,8 +6,13 @@
 #include "minidb/disk_manager.hpp"
 #include "minidb/sql_executor.hpp"
 #include "minidb/tcp_server.hpp"
+#include "minidb/database_metadata_manager.hpp"
+#include "minidb/log_manager.hpp"
+#include "minidb/recovery.hpp"
 
 #include <cstddef>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -20,24 +25,34 @@ class DatabaseServer {
 public:
     DatabaseServer(std::string databasePath, ServerConfig config);
 
-    void start() { server_.start(); }
-    void serve(std::size_t connectionLimit = 0) { server_.serve(connectionLimit); }
-    void close() noexcept { server_.close(); }
+    void start() { server_->start(); }
+    void serve(std::size_t connectionLimit = 0) { server_->serve(connectionLimit); }
+    void close() noexcept { server_->close(); }
 
-    [[nodiscard]] std::uint16_t port() const noexcept { return server_.port(); }
-    [[nodiscard]] TcpServer& tcpServer() noexcept { return server_; }
+    [[nodiscard]] std::uint16_t port() const noexcept { return server_->port(); }
+    [[nodiscard]] TcpServer& tcpServer() noexcept { return *server_; }
     [[nodiscard]] DiskManager& diskManager() noexcept { return diskManager_; }
-    [[nodiscard]] BufferPoolManager& bufferPool() noexcept { return bufferPool_; }
-    [[nodiscard]] PageAllocator& pageAllocator() noexcept { return allocator_; }
-    [[nodiscard]] Catalog& catalog() noexcept { return catalog_; }
+    [[nodiscard]] LogManager& logManager() noexcept { return logManager_; }
+    [[nodiscard]] RecoveryCoordinator& recoveryCoordinator() noexcept { return *recovery_; }
+    [[nodiscard]] BufferPoolManager& bufferPool() noexcept { return *bufferPool_; }
+    [[nodiscard]] PageAllocator& pageAllocator() noexcept { return *allocator_; }
+    [[nodiscard]] Catalog& catalog() noexcept { return *catalog_; }
+    [[nodiscard]] sql::SqlEngine& sqlEngine() noexcept { return *engine_; }
+    [[nodiscard]] const RecoveryStats& startupRecoveryStats() const noexcept {
+        return recoveryStats_;
+    }
 
 private:
     DiskManager diskManager_;
-    BufferPoolManager bufferPool_;
-    PageAllocator allocator_;
-    Catalog catalog_;
-    sql::SqlEngine engine_;
-    TcpServer server_;
+    LogManager logManager_;
+    RecoveryStats recoveryStats_{};
+    std::unique_ptr<RecoveryCoordinator> recovery_;
+    std::unique_ptr<BufferPoolManager> bufferPool_;
+    std::unique_ptr<DatabaseMetadataManager> metadataManager_;
+    std::unique_ptr<PageAllocator> allocator_;
+    std::optional<Catalog> catalog_;
+    std::unique_ptr<sql::SqlEngine> engine_;
+    std::unique_ptr<TcpServer> server_;
 };
 
 } // namespace minidb::net
