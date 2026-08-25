@@ -268,6 +268,24 @@ void testInvalidWalReferenceFallsBackToOlderSlot() {
                 && server.startupRecoveryStats().checkpointValidationFailures >= 1,
             "Invalid WAL reference did not fall back to the older cross-valid slot");
 }
+
+void testCorruptControlHeaderCanBeRebuilt() {
+    minidb::test::TemporaryDatabase database("checkpoint_rebuild_control");
+    {
+        minidb::net::DatabaseServer server(database.path().string(), config());
+        createItems(server);
+        static_cast<void>(server.checkpointManager().checkpoint());
+    }
+    corruptByte(database.path().string() + ".ckpt", 0);
+    minidb::net::DatabaseServer server(database.path().string(), config());
+    require(!server.startupRecoveryStats().checkpointUsed
+                && server.startupRecoveryStats().fullScanFallback,
+            "Corrupt checkpoint header did not trigger full-scan fallback");
+    static_cast<void>(server.checkpointManager().checkpoint());
+    const auto selected = server.checkpointControl().select(server.logManager());
+    require(selected.slot.has_value(),
+            "A later checkpoint could not rebuild corrupt optimization metadata");
+}
 } // namespace
 
 int main() {
@@ -278,6 +296,7 @@ int main() {
         testFailureDoesNotPublish();
         testAllocatorStateIsCheckpointComplete();
         testInvalidWalReferenceFallsBackToOlderSlot();
+        testCorruptControlHeaderCanBeRebuilt();
         std::cout << "checkpoint_test passed\n";
         return 0;
     } catch (const std::exception& error) {

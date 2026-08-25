@@ -228,10 +228,23 @@ void CheckpointControl::initializeFileIfNeeded() {
     const auto descriptor = ::open(path_.c_str(), O_RDWR | O_CREAT, 0644);
     if (descriptor < 0) throwIo("Could not create checkpoint control");
     const FileDescriptor owned(descriptor);
-    if (fileSize(owned.get()) == 0) {
+    bool initialize = fileSize(owned.get()) != checkpoint_control_layout::FILE_SIZE;
+    if (!initialize) {
+        try {
+            std::array<std::byte, checkpoint_control_layout::HEADER_SIZE> existing{};
+            readExact(owned.get(), 0, existing);
+            validateCheckpointControlHeader(existing);
+        } catch (const WalError&) {
+            initialize = true;
+        }
+    }
+    if (initialize) {
         std::array<std::byte, checkpoint_control_layout::FILE_SIZE> bytes{};
         const auto header = encodeCheckpointControlHeader();
         std::copy(header.begin(), header.end(), bytes.begin());
+        if (::ftruncate(owned.get(), static_cast<off_t>(bytes.size())) != 0) {
+            throwIo("Could not resize checkpoint control");
+        }
         writeExact(owned.get(), 0, bytes, stats_);
         if (::fsync(owned.get()) != 0) throwIo("Could not fsync checkpoint-control header");
         ++stats_.fsyncCalls;
