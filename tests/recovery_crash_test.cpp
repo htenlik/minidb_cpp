@@ -67,10 +67,33 @@ void testStealCrashUndo() {
     minidb::test::TemporaryDatabase database("crash_steal_undo");
     const auto path = database.path().string();
     initialize(path);
+    {
+        minidb::net::DatabaseServer setup(path, {"127.0.0.1", 0, 8, 3, 2});
+        static_cast<void>(setup.sqlEngine().execute(
+            "INSERT INTO events VALUES (1, 'baseline')"));
+    }
     expectCrash(path, "after_database_page_write", "INSERT INTO events VALUES (7, 'durable')");
-    require(rowCount(path) == 0,
+    expectCrash(path, "recovery_after_undo_page");
+    expectCrash(path, "recovery_after_database_sync");
+    require(rowCount(path) == 1,
             "Recovery did not undo an uncommitted statement whose page was stolen");
-    require(rowCount(path) == 0, "Loser recovery was not idempotent after durable ABORT");
+    require(rowCount(path) == 1, "Loser recovery was not idempotent after durable ABORT");
+}
+
+void testPrecommitCrashPoints() {
+    for (const auto* failpoint : {
+             "after_begin_append",
+             "after_page_update_append",
+             "after_page_update_wal_force",
+             "after_commit_append"}) {
+        minidb::test::TemporaryDatabase database(
+            std::string("precommit_") + failpoint);
+        const auto path = database.path().string();
+        initialize(path);
+        expectCrash(path, failpoint, "INSERT INTO events VALUES (8, 'not-committed')");
+        require(rowCount(path) == 0,
+                std::string("Pre-COMMIT crash was not undone at ") + failpoint);
+    }
 }
 
 std::vector<minidb::RowValues> query(const std::string& path, const std::string& sql) {
@@ -241,6 +264,7 @@ int main() {
     try {
         testCommittedCrashRedoAndInterruptedRecovery();
         testStealCrashUndo();
+        testPrecommitCrashPoints();
         testCreateCrashBoundary();
         testUpdatePrimaryKeyAndDeleteCrashBoundaries();
         testBPlusSplitMergeAndFreeListCrash();
