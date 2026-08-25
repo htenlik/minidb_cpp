@@ -160,6 +160,10 @@ add_executable(checkpoint_test tests/checkpoint_test.cpp)
 target_link_libraries(checkpoint_test PRIVATE minidb_network)
 add_test(NAME checkpoint_test COMMAND checkpoint_test)
 
+add_executable(checkpoint_crash_test tests/checkpoint_crash_test.cpp)
+target_link_libraries(checkpoint_crash_test PRIVATE minidb_network)
+add_test(NAME checkpoint_crash_test COMMAND checkpoint_crash_test)
+
 add_executable(recovery_test tests/recovery_test.cpp)
 target_link_libraries(recovery_test PRIVATE minidb_core)
 add_test(NAME recovery_test COMMAND recovery_test)

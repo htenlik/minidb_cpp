@@ -150,6 +150,18 @@ void corruptByte(const std::string& path, std::uint64_t offset) {
     if (!file) throw std::runtime_error("Could not corrupt checkpoint-control byte");
 }
 
+void writeSlot(const std::string& path, std::size_t index,
+               const std::array<std::byte, minidb::checkpoint_slot_layout::SIZE>& bytes) {
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekp(static_cast<std::streamoff>(
+        minidb::checkpoint_control_layout::HEADER_SIZE
+        + index * minidb::checkpoint_control_layout::SLOT_SIZE));
+    file.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    file.flush();
+    if (!file) throw std::runtime_error("Could not overwrite checkpoint-control slot");
+}
+
 void testTornNewestAndFullScanFallback() {
     minidb::test::TemporaryDatabase database("checkpoint_torn_control");
     minidb::CheckpointId older = 0;
@@ -204,6 +216,29 @@ void testFailureDoesNotPublish() {
     require(server.checkpointManager().stats().checkpointFailures == 3,
             "Checkpoint failure statistics are incorrect");
 }
+
+void testInvalidWalReferenceFallsBackToOlderSlot() {
+    minidb::test::TemporaryDatabase database("checkpoint_invalid_wal_reference");
+    minidb::CheckpointId validId = 0;
+    minidb::CheckpointSlot bad;
+    {
+        minidb::net::DatabaseServer server(database.path().string(), config());
+        createItems(server);
+        static_cast<void>(server.checkpointManager().checkpoint());
+        validId = server.checkpointManager().checkpoint();
+        const auto selected = server.checkpointControl().select(server.logManager());
+        require(selected.slot.has_value(), "Could not select checkpoint for corruption setup");
+        bad = *selected.slot;
+        ++bad.generation;
+        ++bad.checkpointEndLsn; // CRC-valid, but not a WAL record boundary.
+    }
+    writeSlot(database.path().string() + ".ckpt", 0, minidb::encodeCheckpointSlot(bad));
+    minidb::net::DatabaseServer server(database.path().string(), config());
+    require(server.startupRecoveryStats().checkpointUsed
+                && server.startupRecoveryStats().checkpointId == validId
+                && server.startupRecoveryStats().checkpointValidationFailures >= 1,
+            "Invalid WAL reference did not fall back to the older cross-valid slot");
+}
 } // namespace
 
 int main() {
@@ -212,6 +247,7 @@ int main() {
         testNoDirtyQuiescenceAndAutoPolicy();
         testTornNewestAndFullScanFallback();
         testFailureDoesNotPublish();
+        testInvalidWalReferenceFallsBackToOlderSlot();
         std::cout << "checkpoint_test passed\n";
         return 0;
     } catch (const std::exception& error) {
