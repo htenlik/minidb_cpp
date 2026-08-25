@@ -153,6 +153,14 @@ add_executable(segmented_wal_test tests/segmented_wal_test.cpp)
 target_link_libraries(segmented_wal_test PRIVATE minidb_core)
 add_test(NAME segmented_wal_test COMMAND segmented_wal_test)
 
+add_executable(wal_migration_crash_test tests/wal_migration_crash_test.cpp)
+target_link_libraries(wal_migration_crash_test PRIVATE minidb_core)
+add_test(NAME wal_migration_crash_test COMMAND wal_migration_crash_test)
+
+add_executable(segmented_wal_recovery_test tests/segmented_wal_recovery_test.cpp)
+target_link_libraries(segmented_wal_recovery_test PRIVATE minidb_network)
+add_test(NAME segmented_wal_recovery_test COMMAND segmented_wal_recovery_test)
+
 add_executable(recovery_log_test tests/recovery_log_test.cpp)
 target_link_libraries(recovery_log_test PRIVATE minidb_core)
 add_test(NAME recovery_log_test COMMAND recovery_log_test)

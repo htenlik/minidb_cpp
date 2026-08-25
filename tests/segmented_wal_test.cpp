@@ -213,7 +213,7 @@ void testReclamationAndLsnNonRebase() {
 
 void testRetainedCheckpointFallbackAndControlRebuild() {
     minidb::test::TemporaryDatabase database("segmented_checkpoint_fallback");
-    constexpr std::uint32_t CAPACITY = 256;
+    constexpr std::uint32_t CAPACITY = 128; // BEGIN fits; END must rotate.
     const auto legacy = minidb::walPathForDatabase(database.path().string());
     const auto controlPath = minidb::checkpointPathForDatabase(database.path().string());
     minidb::Lsn beginLsn = minidb::INVALID_LSN;
@@ -236,6 +236,8 @@ void testRetainedCheckpointFallbackAndControlRebuild() {
             minidb::encodeCheckpointEndLogPayload({
                 1, begin, disk.pageCount(), 1, recoveryStart})}));
         log.flushAll();
+        require(log.stats().retainedSegments == 2,
+                "Checkpoint BEGIN/END did not straddle the forced segment boundary");
         log.rotateSegment();
         static_cast<void>(log.reclaimSegmentsBefore(beginLsn));
     }
