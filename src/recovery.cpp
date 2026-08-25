@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <map>
 #include <limits>
 #include <stdexcept>
@@ -58,7 +59,7 @@ RecoveryStats RecoveryManager::recover() {
         stats.checkpointControlPresent = checkpoint.controlFilePresent;
         stats.checkpointValidationFailures = checkpoint.validationFailures;
     } else if (checkpointControl_ != nullptr) {
-        stats.checkpointControlPresent = checkpointControl_->select(logManager_).controlFilePresent;
+        stats.checkpointControlPresent = std::filesystem::exists(checkpointControl_->path());
     }
     const auto analysisStart = std::chrono::steady_clock::now();
     if (checkpoint.slot.has_value()) {

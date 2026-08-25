@@ -58,6 +58,7 @@ public:
 
     [[nodiscard]] WalScanResult scan() const;
     [[nodiscard]] WalScanResult scanFrom(WalOffset startOffset) const;
+    [[nodiscard]] LogRecord readRecordAt(Lsn lsn) const;
     void validate() const;
     void truncateToLastValidRecord();
     void completeRecoveryScan(const WalScanResult& scan, Lsn baseDurableLsn = INVALID_LSN);

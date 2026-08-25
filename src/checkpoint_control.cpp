@@ -71,9 +71,7 @@ std::uint32_t slotChecksum(std::span<const std::byte> bytes) {
 bool crossValidate(const CheckpointSlot& slot, const LogManager& log) {
     if (slot.walFileSizeAtCheckpoint < slot.recoveryStartOffset
         || slot.recoveryStartOffset > log.physicalFileSize()) return false;
-    const auto endScan = log.scanFrom(slot.checkpointEndLsn);
-    if (endScan.records.empty()) return false;
-    const auto& endRecord = endScan.records.front();
+    const auto endRecord = log.readRecordAt(slot.checkpointEndLsn);
     if (endRecord.lsn != slot.checkpointEndLsn
         || endRecord.type != LogRecordType::CheckpointEnd) return false;
     validateCheckpointRecord(endRecord);
@@ -84,9 +82,7 @@ bool crossValidate(const CheckpointSlot& slot, const LogManager& log) {
         || end.databasePageCount != slot.databasePageCount
         || end.nextTransactionId != slot.nextTransactionId
         || endRecord.lsn + encodedEndSize != slot.recoveryStartOffset) return false;
-    const auto beginScan = log.scanFrom(end.checkpointBeginLsn);
-    if (beginScan.records.empty()) return false;
-    const auto& beginRecord = beginScan.records.front();
+    const auto beginRecord = log.readRecordAt(end.checkpointBeginLsn);
     if (beginRecord.lsn != end.checkpointBeginLsn
         || beginRecord.type != LogRecordType::CheckpointBegin) return false;
     validateCheckpointRecord(beginRecord);

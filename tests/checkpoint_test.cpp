@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <variant>
+#include <vector>
 
 namespace {
 using minidb::test::require;
@@ -217,6 +218,34 @@ void testFailureDoesNotPublish() {
             "Checkpoint failure statistics are incorrect");
 }
 
+void testAllocatorStateIsCheckpointComplete() {
+    minidb::test::TemporaryDatabase database("checkpoint_allocator");
+    std::vector<minidb::PageId> expectedFree;
+    std::uint64_t expectedPages = 0;
+    {
+        minidb::net::DatabaseServer server(database.path().string(), config());
+        server.recoveryCoordinator().beginStatement();
+        const auto first = server.pageAllocator().allocatePage();
+        const auto second = server.pageAllocator().allocatePage();
+        server.pageAllocator().releasePage(first);
+        const auto reused = server.pageAllocator().allocatePage();
+        require(reused == first, "Allocator checkpoint setup did not exercise LIFO reuse");
+        server.pageAllocator().releasePage(second);
+        server.pageAllocator().releasePage(reused);
+        server.recoveryCoordinator().commitStatement();
+        expectedFree = server.pageAllocator().freePageIds();
+        expectedPages = server.diskManager().pageCount();
+        static_cast<void>(server.checkpointManager().checkpoint());
+    }
+    minidb::net::DatabaseServer server(database.path().string(), config());
+    require(server.startupRecoveryStats().checkpointUsed
+                && server.diskManager().pageCount() == expectedPages
+                && server.pageAllocator().freePageIds() == expectedFree,
+            "Checkpoint did not preserve page count/free-list contents without old WAL");
+    server.pageAllocator().validate();
+    server.catalog().validate();
+}
+
 void testInvalidWalReferenceFallsBackToOlderSlot() {
     minidb::test::TemporaryDatabase database("checkpoint_invalid_wal_reference");
     minidb::CheckpointId validId = 0;
@@ -247,6 +276,7 @@ int main() {
         testNoDirtyQuiescenceAndAutoPolicy();
         testTornNewestAndFullScanFallback();
         testFailureDoesNotPublish();
+        testAllocatorStateIsCheckpointComplete();
         testInvalidWalReferenceFallsBackToOlderSlot();
         std::cout << "checkpoint_test passed\n";
         return 0;

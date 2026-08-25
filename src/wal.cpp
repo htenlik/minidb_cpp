@@ -302,4 +302,36 @@ WalScanResult scanWalFileFrom(const std::string& path, WalOffset startOffset) {
     return scanDescriptor(owned.get(), startOffset);
 }
 
+LogRecord readWalRecordAt(const std::string& path, Lsn lsn) {
+    const auto descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0) throwIo("Could not open WAL file for record read");
+    const FileDescriptor owned(descriptor);
+    const auto size = fileSize(owned.get());
+    if (lsn < wal_file_layout::HEADER_SIZE
+        || lsn > size
+        || size - lsn < wal_record_layout::HEADER_SIZE) {
+        throw WalError(WalErrorKind::CorruptRecord,
+                       "Referenced WAL record header is outside the file");
+    }
+    std::array<std::byte, wal_file_layout::HEADER_SIZE> fileHeader{};
+    readExact(owned.get(), 0, fileHeader);
+    validateWalFileHeader(fileHeader);
+    std::array<std::byte, wal_record_layout::HEADER_SIZE> recordHeader{};
+    readExact(owned.get(), lsn, recordHeader);
+    validateRecordPrefix(recordHeader, lsn);
+    const auto totalLength = byte_codec::readUint32(
+        recordHeader, wal_record_layout::TOTAL_LENGTH_OFFSET);
+    if (totalLength > size - lsn) {
+        throw WalError(WalErrorKind::CorruptRecord,
+                       "Referenced WAL record is truncated");
+    }
+    std::vector<std::byte> encoded(totalLength);
+    std::copy(recordHeader.begin(), recordHeader.end(), encoded.begin());
+    if (encoded.size() > recordHeader.size()) {
+        readExact(owned.get(), lsn + recordHeader.size(),
+                  std::span<std::byte>(encoded).subspan(recordHeader.size()));
+    }
+    return decodeWalRecord(encoded, lsn);
+}
+
 } // namespace minidb

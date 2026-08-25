@@ -260,6 +260,27 @@ WalScanResult LogManager::scanFrom(WalOffset startOffset) const {
     return scanWalFileFrom(path_, startOffset);
 }
 
+LogRecord LogManager::readRecordAt(Lsn lsn) const {
+    if (!buffer_.empty() && lsn >= bufferStartOffset_) {
+        const auto offset = static_cast<std::size_t>(lsn - bufferStartOffset_);
+        if (offset >= buffer_.size()
+            || buffer_.size() - offset < wal_record_layout::HEADER_SIZE) {
+            throw WalError(WalErrorKind::CorruptRecord,
+                           "Referenced buffered WAL record does not exist");
+        }
+        const auto totalLength = byte_codec::readUint32(
+            std::span<const std::byte>(buffer_).subspan(offset),
+            wal_record_layout::TOTAL_LENGTH_OFFSET);
+        if (totalLength > buffer_.size() - offset) {
+            throw WalError(WalErrorKind::CorruptRecord,
+                           "Referenced buffered WAL record is incomplete");
+        }
+        return decodeWalRecord(
+            std::span<const std::byte>(buffer_).subspan(offset, totalLength), lsn);
+    }
+    return readWalRecordAt(path_, lsn);
+}
+
 std::uint64_t LogManager::physicalFileSize() const {
     return descriptorSize(descriptor_);
 }
@@ -290,7 +311,8 @@ void LogManager::validate() const {
     if (!result.truncatedTail && result.validBytes != nextLsn_) {
         throw std::logic_error("LogManager next LSN disagrees with scanned WAL end");
     }
-    if (result.records.size() != knownLsns_.size()) {
+    if (openMode_ != LogOpenMode::DeferredRecovery
+        && result.records.size() != knownLsns_.size()) {
         throw std::logic_error("LogManager known-LSN set disagrees with scanned records");
     }
     for (const auto& record : result.records) {

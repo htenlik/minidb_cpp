@@ -112,5 +112,6 @@ void validateWalFileHeader(std::span<const std::byte> bytes);
 
 [[nodiscard]] WalScanResult scanWalFile(const std::string& path);
 [[nodiscard]] WalScanResult scanWalFileFrom(const std::string& path, WalOffset startOffset);
+[[nodiscard]] LogRecord readWalRecordAt(const std::string& path, Lsn lsn);
 
 } // namespace minidb
