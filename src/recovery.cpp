@@ -4,6 +4,7 @@
 #include "minidb/log_manager.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <limits>
@@ -43,19 +44,24 @@ void recoveryFailPoint(std::string_view name) {
 }
 
 RecoveryStats RecoveryManager::recover() {
+    const auto totalStart = std::chrono::steady_clock::now();
     RecoveryStats stats;
     if (logManager_.hasTruncatedTail()) {
+        const auto before = logManager_.scan().fileBytes;
         logManager_.truncateToLastValidRecord();
         stats.repairedTail = true;
+        stats.tailBytesTruncated = before - logManager_.scan().fileBytes;
     }
+    const auto analysisStart = std::chrono::steady_clock::now();
     const auto scan = logManager_.scan();
     std::map<TransactionId, AnalyzedTransaction> transactions;
+    std::optional<TransactionId> activeTransaction;
     for (const auto& record : scan.records) {
         ++stats.recordsAnalyzed;
         validateTransactionRecordPayload(record);
         auto found = transactions.find(record.transactionId);
         if (record.type == LogRecordType::Begin) {
-            if (found != transactions.end()) {
+            if (found != transactions.end() || activeTransaction.has_value()) {
                 throw WalError(WalErrorKind::CorruptRecord, "Transaction has duplicate BEGIN records");
             }
             AnalyzedTransaction transaction;
@@ -63,9 +69,11 @@ RecoveryStats RecoveryManager::recover() {
             transaction.begin = decodeBeginLogPayload(record.payload);
             transaction.lastLsn = record.lsn;
             transactions.emplace(record.transactionId, std::move(transaction));
+            activeTransaction = record.transactionId;
             continue;
         }
-        if (found == transactions.end() || found->second.status != TransactionStatus::Active
+        if (!activeTransaction.has_value() || *activeTransaction != record.transactionId
+            || found == transactions.end() || found->second.status != TransactionStatus::Active
             || record.prevLsn != found->second.lastLsn) {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
@@ -74,12 +82,15 @@ RecoveryStats RecoveryManager::recover() {
         } else if (record.type == LogRecordType::Commit) {
             found->second.status = TransactionStatus::Committed;
             ++stats.committedTransactions;
+            activeTransaction.reset();
         } else if (record.type == LogRecordType::Abort) {
             found->second.status = TransactionStatus::Aborted;
             ++stats.abortedTransactions;
+            activeTransaction.reset();
         }
         found->second.lastLsn = record.lsn;
     }
+    stats.transactionsAnalyzed = transactions.size();
 
     std::vector<const LogRecord*> redo;
     AnalyzedTransaction* loser = nullptr;
@@ -98,19 +109,31 @@ RecoveryStats RecoveryManager::recover() {
     std::sort(redo.begin(), redo.end(), [](const LogRecord* left, const LogRecord* right) {
         return left->lsn < right->lsn;
     });
+    stats.analysisNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - analysisStart).count());
+    const auto redoStart = std::chrono::steady_clock::now();
     for (const auto* record : redo) {
         const auto update = decodePageUpdateLogPayload(record->payload);
+        const auto beforeCount = diskManager_.pageCount();
         diskManager_.writePhysicalPage(update.pageId, update.afterImage);
+        stats.databasePagesExtended += diskManager_.pageCount() - beforeCount;
+        ++stats.databaseWrites;
         ++stats.pagesRedone;
         recoveryFailPoint("recovery_after_redo_page");
     }
+    stats.redoNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - redoStart).count());
 
+    const auto undoStart = std::chrono::steady_clock::now();
     if (loser != nullptr) {
         std::unordered_set<PageId> restored;
         for (auto iterator = loser->updates.rbegin(); iterator != loser->updates.rend(); ++iterator) {
             const auto update = decodePageUpdateLogPayload((*iterator)->payload);
             if (update.beforePageExisted && restored.insert(update.pageId).second) {
                 diskManager_.writePhysicalPage(update.pageId, update.beforeImage);
+                ++stats.databaseWrites;
                 ++stats.pagesUndone;
                 recoveryFailPoint("recovery_after_undo_page");
             }
@@ -121,7 +144,11 @@ RecoveryStats RecoveryManager::recover() {
             stats.pagesTruncated = beforeCount - loser->begin.startPageCount;
         }
     }
+    stats.undoNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - undoStart).count());
     diskManager_.sync();
+    ++stats.databaseSyncCalls;
     recoveryFailPoint("recovery_after_database_sync");
 
     if (loser != nullptr) {
@@ -133,6 +160,9 @@ RecoveryStats RecoveryManager::recover() {
         recoveryFailPoint("recovery_after_abort_sync");
     }
     diskManager_.reloadDatabaseHeader();
+    stats.totalNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - totalStart).count());
     return stats;
 }
 
@@ -159,6 +189,7 @@ void RecoveryCoordinator::beginStatement() {
     active_.emplace(ActiveStatement{
         nextTransactionId_++, diskManager_.pageCount(), INVALID_LSN, INVALID_LSN, {},
     });
+    ++stats_.transactionsBegun;
 }
 
 void RecoveryCoordinator::notePageWriteIntent(
@@ -176,6 +207,7 @@ void RecoveryCoordinator::notePageWriteIntent(
         std::nullopt,
         INVALID_LSN,
     });
+    ++stats_.pagesFirstWritten;
 }
 
 void RecoveryCoordinator::ensureBeginLogged() {
@@ -218,6 +250,8 @@ Lsn RecoveryCoordinator::preparePageForWrite(
         }));
     state.latestAfter = after;
     state.latestLsn = lsn;
+    ++stats_.pageUpdateRecords;
+    stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
     recoveryFailPoint("after_page_update_append");
     return lsn;
 }
@@ -240,14 +274,19 @@ void RecoveryCoordinator::commitStatement() {
         }
     }
     if (!isValidLsn(active_->beginLsn)) {
+        ++stats_.zeroWriteTransactions;
+        ++stats_.transactionsCommitted;
         active_.reset();
         return;
     }
+    recoveryFailPoint("before_commit_append");
     const auto commitLsn = appendTransactionRecord(LogRecordType::Commit);
     recoveryFailPoint("after_commit_append");
     logManager_.flushUpTo(commitLsn);
+    ++stats_.commitFsyncs;
     recoveryFailPoint("after_commit_sync");
     active_.reset();
+    ++stats_.transactionsCommitted;
 }
 
 void RecoveryCoordinator::rollbackStatement() {
@@ -265,7 +304,10 @@ void RecoveryCoordinator::rollbackStatement() {
         bufferPool_->discardPagesAtOrAboveForRecovery(static_cast<PageId>(startPageCount));
     }
     for (const auto& [pageId, state] : active_->pages) {
-        if (state.beforeExisted) diskManager_.writePhysicalPage(pageId, state.before);
+        if (state.beforeExisted) {
+            diskManager_.writePhysicalPage(pageId, state.before);
+            ++stats_.rollbackDatabaseWrites;
+        }
     }
     if (diskManager_.pageCount() > startPageCount) {
         diskManager_.truncateToPageCount(startPageCount);
@@ -281,6 +323,7 @@ void RecoveryCoordinator::rollbackStatement() {
         recoveryFailPoint("rollback_after_abort_sync");
     }
     diskManager_.reloadDatabaseHeader();
+    ++stats_.transactionsRolledBack;
 }
 
 } // namespace minidb

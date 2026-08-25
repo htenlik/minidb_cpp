@@ -3,6 +3,7 @@
 #include "minidb/buffer_pool_manager.hpp"
 #include "minidb/log_manager.hpp"
 #include "minidb/pager.hpp"
+#include "minidb/recovery.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -86,6 +87,14 @@ struct WalBenchmarkMetrics {
     TimingMetrics flushTiming;
 };
 
+struct RecoveryBenchmarkMetrics {
+    TransactionRuntimeStats transactions{};
+    RecoveryStats recovery{};
+    std::uint64_t walBytes = 0;
+    std::uint64_t logicalChangedBytes = 0;
+    double loggingAmplification = 0.0;
+};
+
 struct BenchmarkResult {
     std::string benchmark;
     std::string storageBackend;
@@ -96,6 +105,7 @@ struct BenchmarkResult {
     PagerStats pager;
     BufferPoolStats buffer;
     WalBenchmarkMetrics wal;
+    RecoveryBenchmarkMetrics recovery;
     StorageMetrics storageBefore;
     StorageMetrics storageAfter;
     double averageRowsExamined = 0.0;

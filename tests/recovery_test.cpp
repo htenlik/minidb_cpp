@@ -1,9 +1,12 @@
 #include "minidb/buffer_pool_manager.hpp"
 #include "minidb/log_manager.hpp"
 #include "minidb/recovery.hpp"
+#include "minidb/database_metadata_manager.hpp"
+#include "minidb/page_allocator.hpp"
 #include "test_utils.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -127,6 +130,84 @@ void testExplicitRollbackAndZeroMutation() {
             "Unflushed in-memory mutation emitted BEGIN/ABORT WAL");
 }
 
+void appendRaw(const std::string& path, std::size_t count) {
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    const std::vector<std::byte> bytes(count, std::byte{0xCC});
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+}
+
+void testTailRepairAndChainValidation() {
+    RecoveryFixture fixture("recovery_tail_repair");
+    {
+        minidb::LogManager log(fixture.wal);
+        const auto begin = log.append(minidb::LogRecord{
+            minidb::LogRecordType::Begin, 1, minidb::INVALID_LSN,
+            minidb::encodeBeginLogPayload({1})});
+        const auto commit = log.append(minidb::LogRecord{
+            minidb::LogRecordType::Commit, 1, begin, {}});
+        log.flushUpTo(commit);
+    }
+    appendRaw(fixture.wal, 17);
+    {
+        minidb::DiskManager disk(fixture.database.path().string());
+        minidb::LogManager log(fixture.wal);
+        const auto stats = minidb::RecoveryManager(disk, log).recover();
+        require(stats.repairedTail && stats.tailBytesTruncated == 17,
+                "Startup recovery did not report exact incomplete-tail repair");
+        minidb::RecoveryCoordinator coordinator(disk, log);
+        coordinator.beginStatement();
+        coordinator.commitStatement();
+        require(!log.scan().truncatedTail, "WAL could not continue after tail repair");
+    }
+
+    RecoveryFixture corrupt("recovery_chain_corrupt");
+    {
+        minidb::LogManager log(corrupt.wal);
+        static_cast<void>(log.append(minidb::LogRecord{
+            minidb::LogRecordType::Begin, 1, minidb::INVALID_LSN,
+            minidb::encodeBeginLogPayload({1})}));
+        static_cast<void>(log.append(minidb::LogRecord{
+            minidb::LogRecordType::Begin, 2, minidb::INVALID_LSN,
+            minidb::encodeBeginLogPayload({1})}));
+        log.flushAll();
+    }
+    minidb::DiskManager disk(corrupt.database.path().string());
+    minidb::LogManager log(corrupt.wal);
+    minidb::test::requireThrows<minidb::WalError>(
+        [&] { static_cast<void>(minidb::RecoveryManager(disk, log).recover()); },
+        "Recovery accepted overlapping active transaction chains");
+}
+
+void testPageZeroCommitAndRollback() {
+    RecoveryFixture fixture("recovery_page_zero");
+    minidb::DiskManager disk(fixture.database.path().string());
+    const auto rootA = disk.appendPage();
+    const auto rootB = disk.appendPage();
+    minidb::LogManager log(fixture.wal);
+    minidb::RecoveryCoordinator coordinator(disk, log);
+    minidb::BufferPoolManager pool(disk, 2, 2, &log, &coordinator);
+    coordinator.attachBufferPool(pool);
+    minidb::DatabaseMetadataManager metadata(disk, coordinator, log);
+
+    coordinator.beginStatement();
+    metadata.updateCatalogRootPageId(rootA);
+    coordinator.commitStatement();
+    require(disk.databaseHeader().catalogRootPageId == rootA,
+            "Committed catalog-root page-0 update was lost");
+
+    coordinator.beginStatement();
+    metadata.updateCatalogRootPageId(rootB);
+    metadata.updateFreeListRootPageId(rootB);
+    coordinator.rollbackStatement();
+    require(disk.databaseHeader().catalogRootPageId == rootA
+                && disk.databaseHeader().freeListRootPageId == minidb::INVALID_PAGE_ID,
+            "Rollback did not restore the complete original page-0 image");
+
+    minidb::PageAllocator allocator(pool, disk, &metadata);
+    allocator.validate();
+}
+
 } // namespace
 
 int main() {
@@ -134,6 +215,8 @@ int main() {
         testCommitIsNoForceAndRedoSurvivesReopen();
         testStealLoserUndoAndTruncation();
         testExplicitRollbackAndZeroMutation();
+        testTailRepairAndChainValidation();
+        testPageZeroCommitAndRollback();
         std::cout << "recovery_test passed\n";
         return 0;
     } catch (const std::exception& error) {

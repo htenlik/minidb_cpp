@@ -233,6 +233,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "tcp", "tcp_pk_lookup", "tcp_heap_scan", "tcp_insert", "tcp_mixed",
         "mixed", "mixed_read_heavy", "mixed_write_heavy",
         "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
+        "txn_insert", "txn_update", "txn_delete", "txn_mixed", "recovery_full_scan",
     };
 }
 
@@ -386,6 +387,24 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"flush_count\":" << result.wal.flushTiming.operationCount
                << ",\"flush_p95_ns\":" << result.wal.flushTiming.p95Nanoseconds
                << ",\"flush_p99_ns\":" << result.wal.flushTiming.p99Nanoseconds << '}';
+        output << ",\"recovery\":{\"transactions_begun\":"
+               << result.recovery.transactions.transactionsBegun
+               << ",\"transactions_committed\":"
+               << result.recovery.transactions.transactionsCommitted
+               << ",\"page_update_records\":"
+               << result.recovery.transactions.pageUpdateRecords
+               << ",\"full_page_image_bytes\":"
+               << result.recovery.transactions.fullPageImageBytes
+               << ",\"wal_bytes\":" << result.recovery.walBytes
+               << ",\"logical_changed_bytes\":" << result.recovery.logicalChangedBytes
+               << ",\"logging_amplification\":" << result.recovery.loggingAmplification
+               << ",\"records_analyzed\":" << result.recovery.recovery.recordsAnalyzed
+               << ",\"pages_redone\":" << result.recovery.recovery.pagesRedone
+               << ",\"pages_undone\":" << result.recovery.recovery.pagesUndone
+               << ",\"analysis_ns\":" << result.recovery.recovery.analysisNs
+               << ",\"redo_ns\":" << result.recovery.recovery.redoNs
+               << ",\"undo_ns\":" << result.recovery.recovery.undoNs
+               << ",\"total_ns\":" << result.recovery.recovery.totalNs << '}';
         output << ",\"storage\":{\"before\":";
         writeStorageJson(output, result.storageBefore);
         output << ",\"after\":";
@@ -456,6 +475,19 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.wal.appendTiming.p99Nanoseconds << '/'
            << result.wal.flushTiming.p95Nanoseconds << '/'
            << result.wal.flushTiming.p99Nanoseconds << '\n'
+           << "txn begun/committed/page updates/full-image bytes: "
+           << result.recovery.transactions.transactionsBegun << '/'
+           << result.recovery.transactions.transactionsCommitted << '/'
+           << result.recovery.transactions.pageUpdateRecords << '/'
+           << result.recovery.transactions.fullPageImageBytes << '\n'
+           << "recovery analyzed/redone/undone/total ns: "
+           << result.recovery.recovery.recordsAnalyzed << '/'
+           << result.recovery.recovery.pagesRedone << '/'
+           << result.recovery.recovery.pagesUndone << '/'
+           << result.recovery.recovery.totalNs << '\n'
+           << "WAL/logical bytes and amplification: " << result.recovery.walBytes << '/'
+           << result.recovery.logicalChangedBytes << '/'
+           << result.recovery.loggingAmplification << '\n'
            << "storage before pages/bytes/free/resident: "
            << result.storageBefore.databasePages << '/' << result.storageBefore.databaseBytes
            << '/' << result.storageBefore.freePages << '/'
@@ -486,7 +518,7 @@ EnvironmentMetadata currentEnvironment() {
     const std::string buildType = std::string(MINIDB_BUILD_TYPE).empty()
         ? "unspecified" : MINIDB_BUILD_TYPE;
     return EnvironmentMetadata{
-        "v0.1.0 frozen MVP + Milestone 11A WAL foundation",
+        "v0.1.0 frozen MVP + Milestone 11B crash recovery",
         MINIDB_GIT_COMMIT,
         __VERSION__,
         buildType,

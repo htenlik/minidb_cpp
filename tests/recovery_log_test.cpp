@@ -61,6 +61,21 @@ void testMalformedPayloads() {
         "PAGE_UPDATE accepted nonzero reserved bytes");
 }
 
+void testCommitAndAbortHaveExactEmptyPayloads() {
+    for (const auto type : {minidb::LogRecordType::Commit, minidb::LogRecordType::Abort}) {
+        minidb::LogRecord record{type, 9, 64, {}, minidb::INVALID_LSN};
+        const auto encoded = minidb::encodeWalRecord(record, 128);
+        require(minidb::byte_codec::readUint32(
+                    encoded, minidb::wal_record_layout::PAYLOAD_LENGTH_OFFSET) == 0
+                    && encoded.size() == minidb::wal_record_layout::HEADER_SIZE,
+                "COMMIT/ABORT record did not encode an exact empty payload");
+        const auto decoded = minidb::decodeWalRecord(encoded, 128);
+        minidb::validateTransactionRecordPayload(decoded);
+        require(decoded.type == type && decoded.payload.empty(),
+                "COMMIT/ABORT empty payload did not round-trip through CRC record codec");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -68,6 +83,7 @@ int main() {
         testBeginPayload();
         testPageUpdatePayload();
         testMalformedPayloads();
+        testCommitAndAbortHaveExactEmptyPayloads();
         std::cout << "recovery_log_test passed\n";
         return 0;
     } catch (const std::exception& error) {

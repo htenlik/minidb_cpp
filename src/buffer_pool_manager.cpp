@@ -51,6 +51,7 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
     if (!frame.dirty) return;
     prepareFrameForWrite(frame);
     ensureWalDurableBeforePageWrite(frame);
+    recoveryFailPoint("after_page_update_wal_force");
     diskManager_.writePage(frame.pageId, frame.data);
     recoveryFailPoint("after_database_page_write");
     frame.dirty = false;
@@ -203,6 +204,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
     if (frame.dirty) {
         prepareFrameForWrite(frame);
         ensureWalDurableBeforePageWrite(frame);
+        recoveryFailPoint("after_page_update_wal_force");
         diskManager_.writePage(pageId, frame.data);
         recoveryFailPoint("after_database_page_write");
         frame.dirty = false;
@@ -223,6 +225,7 @@ void BufferPoolManager::flushAll() {
         }
     }
     ensureWalDurable(maximumPageLsn);
+    recoveryFailPoint("after_page_update_wal_force");
     for (auto& frame : frames_) {
         if (!frame.valid || !frame.dirty) continue;
         diskManager_.writePage(frame.pageId, frame.data);

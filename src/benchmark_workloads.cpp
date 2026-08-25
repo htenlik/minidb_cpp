@@ -1017,6 +1017,125 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
     return result;
 }
 
+BenchmarkResult runTransactional(
+    const BenchmarkConfig& config,
+    const std::string& name) {
+    removeDatabase(config);
+    std::vector<std::uint64_t> latencies;
+    latencies.reserve(static_cast<std::size_t>(config.operations));
+    BenchmarkResult result;
+    {
+        net::DatabaseServer server(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK)});
+        auto& engine = server.sqlEngine();
+        createUsers(engine);
+        const auto setupRows = name == "txn_insert" ? 0U
+            : std::max(config.rows, config.operations);
+        populateUsers(engine, setupRows);
+        server.bufferPool().flushAll();
+        const auto before = storageMetrics(
+            server.diskManager(), server.bufferPool(), server.pageAllocator());
+        server.bufferPool().resetStats();
+        server.logManager().resetStats();
+        server.recoveryCoordinator().resetStats();
+        const auto walBefore = std::filesystem::file_size(
+            walPathForDatabase(config.databasePath));
+
+        for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+            if (name == "txn_insert") {
+                measure(latencies, [&] { static_cast<void>(engine.execute(
+                    "INSERT INTO users VALUES (" + std::to_string(operation)
+                    + ", 'user" + std::to_string(operation) + "', "
+                    + std::to_string(operation) + ", TRUE)")); });
+            } else if (name == "txn_update") {
+                measure(latencies, [&] { static_cast<void>(engine.execute(
+                    "UPDATE users SET score = " + std::to_string(operation + 1000U)
+                    + " WHERE id = " + std::to_string(operation) )); });
+            } else if (name == "txn_delete") {
+                measure(latencies, [&] { static_cast<void>(engine.execute(
+                    "DELETE FROM users WHERE id = " + std::to_string(operation))); });
+            } else {
+                const auto key = operation % setupRows;
+                if (operation % 3U == 0) {
+                    measure(latencies, [&] { static_cast<void>(engine.execute(
+                        "UPDATE users SET active = FALSE WHERE id = "
+                        + std::to_string(key))); });
+                } else if (operation % 3U == 1) {
+                    const auto inserted = setupRows + operation;
+                    measure(latencies, [&] { static_cast<void>(engine.execute(
+                        "INSERT INTO users VALUES (" + std::to_string(inserted)
+                        + ", 'mixed', 1, TRUE)")); });
+                } else {
+                    measure(latencies, [&] { static_cast<void>(engine.execute(
+                        "DELETE FROM users WHERE id = " + std::to_string(key))); });
+                }
+            }
+        }
+        server.catalog().validate();
+        const auto after = storageMetrics(
+            server.diskManager(), server.bufferPool(), server.pageAllocator());
+        result = finish(
+            name, config, std::move(latencies), {}, before, after,
+            0.0, 0.0, server.bufferPool().stats());
+        result.storageBackend = "buffer_pool_full_page_wal";
+        result.wal.manager = server.logManager().stats();
+        result.wal.walRecords = result.wal.manager.recordsAppended;
+        result.recovery.transactions = server.recoveryCoordinator().stats();
+        result.recovery.walBytes = std::filesystem::file_size(
+            walPathForDatabase(config.databasePath)) - walBefore;
+        result.recovery.logicalChangedBytes = config.operations * 32U;
+        result.recovery.loggingAmplification =
+            static_cast<double>(result.recovery.walBytes)
+            / static_cast<double>(result.recovery.logicalChangedBytes);
+    }
+    cleanupDatabase(config);
+    return result;
+}
+
+BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    {
+        net::DatabaseServer server(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK)});
+        createUsers(server.sqlEngine());
+        populateUsers(server.sqlEngine(), config.operations);
+    }
+    const auto walBytes = std::filesystem::file_size(walPathForDatabase(config.databasePath));
+    std::vector<std::uint64_t> latency;
+    RecoveryStats recovery;
+    {
+        DiskManager disk(config.databasePath);
+        LogManager log(walPathForDatabase(config.databasePath));
+        measure(latency, [&] { recovery = RecoveryManager(disk, log).recover(); });
+    }
+    {
+        net::DatabaseServer validation(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK)});
+        validation.catalog().validate();
+    }
+    BenchmarkResult result;
+    result.benchmark = "recovery_full_scan";
+    result.storageBackend = "physical_recovery";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(latency, totalLatency(latency));
+    result.recovery.recovery = recovery;
+    result.recovery.walBytes = walBytes;
+    result.environment = currentEnvironment();
+    result.validationPassed = true;
+    cleanupDatabase(config);
+    return result;
+}
+
 std::string canonicalName(const std::string& name) {
     if (name == "pager") return "pager_random";
     if (name == "buffer") return "buffer_random";
@@ -1032,6 +1151,8 @@ std::string canonicalName(const std::string& name) {
 BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     name = canonicalName(name);
     if (name.starts_with("wal_")) return runWal(config, name);
+    if (name.starts_with("txn_")) return runTransactional(config, name);
+    if (name == "recovery_full_scan") return runRecoveryBenchmark(config);
     if (name.starts_with("pager_")) return runPager(config, std::move(name));
     if (name.starts_with("buffer_")) return runBuffer(config, name);
     if (name.starts_with("bplus_")) return runBplus(config, name);

@@ -15,13 +15,34 @@ class LogManager;
 
 struct RecoveryStats {
     std::uint64_t recordsAnalyzed = 0;
+    std::uint64_t transactionsAnalyzed = 0;
     std::uint64_t committedTransactions = 0;
     std::uint64_t abortedTransactions = 0;
     std::uint64_t loserTransactions = 0;
     std::uint64_t pagesRedone = 0;
     std::uint64_t pagesUndone = 0;
     std::uint64_t pagesTruncated = 0;
+    std::uint64_t databasePagesExtended = 0;
+    std::uint64_t databaseWrites = 0;
+    std::uint64_t databaseSyncCalls = 0;
+    std::uint64_t tailBytesTruncated = 0;
+    std::uint64_t analysisNs = 0;
+    std::uint64_t redoNs = 0;
+    std::uint64_t undoNs = 0;
+    std::uint64_t totalNs = 0;
     bool repairedTail = false;
+};
+
+struct TransactionRuntimeStats {
+    std::uint64_t transactionsBegun = 0;
+    std::uint64_t transactionsCommitted = 0;
+    std::uint64_t transactionsRolledBack = 0;
+    std::uint64_t zeroWriteTransactions = 0;
+    std::uint64_t pagesFirstWritten = 0;
+    std::uint64_t pageUpdateRecords = 0;
+    std::uint64_t fullPageImageBytes = 0;
+    std::uint64_t commitFsyncs = 0;
+    std::uint64_t rollbackDatabaseWrites = 0;
 };
 
 class RecoveryManager {
@@ -48,6 +69,8 @@ public:
     [[nodiscard]] bool hasActiveStatement() const noexcept { return active_.has_value(); }
     [[nodiscard]] TransactionId activeTransactionId() const noexcept;
     [[nodiscard]] TransactionId nextTransactionId() const noexcept { return nextTransactionId_; }
+    [[nodiscard]] const TransactionRuntimeStats& stats() const noexcept { return stats_; }
+    void resetStats() noexcept { stats_ = {}; }
 
     void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) override;
     [[nodiscard]] Lsn preparePageForWrite(
@@ -75,6 +98,7 @@ private:
     BufferPoolManager* bufferPool_ = nullptr;
     TransactionId nextTransactionId_ = 1;
     std::optional<ActiveStatement> active_;
+    TransactionRuntimeStats stats_{};
 
     void ensureBeginLogged();
     [[nodiscard]] Lsn appendTransactionRecord(
