@@ -42,7 +42,7 @@ Catalog Catalog::openOrCreate(
         1,
         0,
     });
-    diskManager.updateCatalogRootPageId(metadataPageId);
+    allocator.updateCatalogRootPageId(metadataPageId);
     Catalog catalog(
         bufferPool, diskManager, allocator, metadataPageId, std::move(entries));
     catalog.validate();

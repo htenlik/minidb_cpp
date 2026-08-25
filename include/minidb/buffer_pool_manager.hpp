@@ -3,6 +3,7 @@
 #include "minidb/disk_manager.hpp"
 #include "minidb/lru_k_replacer.hpp"
 #include "minidb/page_guard.hpp"
+#include "minidb/page_recovery.hpp"
 #include "minidb/wal_types.hpp"
 
 #include <cstddef>
@@ -51,7 +52,8 @@ public:
         DiskManager& diskManager,
         std::size_t frameCount,
         std::size_t k = 2,
-        WalFlushProvider* walProvider = nullptr);
+        WalFlushProvider* walProvider = nullptr,
+        PageRecoveryHook* recoveryHook = nullptr);
     ~BufferPoolManager();
 
     BufferPoolManager(const BufferPoolManager&) = delete;
@@ -74,6 +76,12 @@ public:
     [[nodiscard]] std::optional<std::uint32_t> pinCount(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<bool> isDirty(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<Lsn> pageLsn(PageId pageId) const noexcept;
+    [[nodiscard]] std::optional<DiskManager::Page> residentPageCopy(PageId pageId) const;
+    [[nodiscard]] std::uint64_t totalPinCount() const noexcept;
+
+    // Recovery/rollback invalidation never writes dirty contents.
+    void discardPageForRecovery(PageId pageId);
+    void discardPagesAtOrAboveForRecovery(PageId firstPageId);
 
     void validate() const;
     void validateReplacer() const { replacer_.validate(); }
@@ -87,6 +95,7 @@ private:
     std::deque<FrameId> freeFrames_;
     LRUKReplacer replacer_;
     WalFlushProvider* walProvider_;
+    PageRecoveryHook* recoveryHook_;
     BufferPoolStats stats_{};
 
     [[nodiscard]] std::optional<BasicPageGuard> fetchPage(PageId pageId, bool writable);
@@ -94,6 +103,7 @@ private:
     void flushVictimIfDirty(FrameId frameId);
     void ensureWalDurable(Lsn pageLsn);
     void ensureWalDurableBeforePageWrite(const BufferFrame& frame);
+    void prepareFrameForWrite(BufferFrame& frame);
     void installPage(FrameId frameId, PageId pageId, DiskManager::Page page, bool dirty);
     void releasePin(FrameId frameId);
     [[nodiscard]] std::span<const std::byte, database_format::PAGE_SIZE> readData(

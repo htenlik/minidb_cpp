@@ -1,8 +1,12 @@
 #include "minidb/disk_manager.hpp"
 
 #include <filesystem>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 #include <limits>
 #include <stdexcept>
+#include <unistd.h>
 
 namespace minidb {
 
@@ -80,6 +84,12 @@ void DiskManager::requireExistingDataPage(PageId pageId) const {
     }
 }
 
+void DiskManager::requireExistingPhysicalPage(PageId pageId) const {
+    if (pageId == INVALID_PAGE_ID || pageId >= pageCount_) {
+        throw std::out_of_range("Physical PageId does not exist.");
+    }
+}
+
 void DiskManager::readPage(PageId pageId, Page& output) {
     requireExistingDataPage(pageId);
     file_.clear();
@@ -127,6 +137,88 @@ PageId DiskManager::appendPage() {
 void DiskManager::flush() {
     file_.flush();
     if (!file_) throw std::runtime_error("Failed to flush database file.");
+}
+
+void DiskManager::sync() {
+    flush();
+    const auto descriptor = ::open(path_.c_str(), O_RDWR);
+    if (descriptor < 0) {
+        throw std::runtime_error(
+            "Could not open database for fsync: " + std::string(std::strerror(errno)));
+    }
+    const auto result = ::fsync(descriptor);
+    const auto savedError = errno;
+    ::close(descriptor);
+    if (result != 0) {
+        throw std::runtime_error(
+            "Could not fsync database: " + std::string(std::strerror(savedError)));
+    }
+}
+
+void DiskManager::readPhysicalPage(PageId pageId, Page& output) {
+    requireExistingPhysicalPage(pageId);
+    file_.clear();
+    file_.seekg(
+        static_cast<std::streamoff>(pageId) * static_cast<std::streamoff>(PAGE_SIZE),
+        std::ios::beg);
+    file_.read(reinterpret_cast<char*>(output.data()),
+               static_cast<std::streamsize>(output.size()));
+    if (file_.gcount() != static_cast<std::streamsize>(output.size())) {
+        throw std::runtime_error("Failed to read full physical page from disk.");
+    }
+}
+
+void DiskManager::writePhysicalPage(PageId pageId, const Page& page) {
+    if (pageId == INVALID_PAGE_ID) {
+        throw std::invalid_argument("Cannot physically write INVALID_PAGE_ID.");
+    }
+    while (pageCount_ <= pageId) {
+        static_cast<void>(appendPage());
+    }
+    file_.clear();
+    file_.seekp(
+        static_cast<std::streamoff>(pageId) * static_cast<std::streamoff>(PAGE_SIZE),
+        std::ios::beg);
+    file_.write(reinterpret_cast<const char*>(page.data()),
+                static_cast<std::streamsize>(page.size()));
+    if (!file_) throw std::runtime_error("Failed to write physical database page.");
+    if (pageId == database_format::METADATA_PAGE_ID) {
+        databaseHeader_ = database_format::deserializeDatabaseHeader(page);
+    }
+}
+
+void DiskManager::reopenFile() {
+    file_.close();
+    file_.clear();
+    file_.open(path_, std::ios::in | std::ios::out | std::ios::binary);
+    if (!file_) throw std::runtime_error("Could not reopen database file: " + path_);
+}
+
+void DiskManager::truncateToPageCount(std::uint64_t pageCount) {
+    if (pageCount == 0 || pageCount > INVALID_PAGE_ID) {
+        throw std::invalid_argument("Recovery page count is outside the supported range.");
+    }
+    flush();
+    const auto descriptor = ::open(path_.c_str(), O_RDWR);
+    if (descriptor < 0) {
+        throw std::runtime_error(
+            "Could not open database for truncation: " + std::string(std::strerror(errno)));
+    }
+    const auto byteCount = pageCount * PAGE_SIZE;
+    const auto result = ::ftruncate(descriptor, static_cast<off_t>(byteCount));
+    const auto savedError = errno;
+    ::close(descriptor);
+    if (result != 0) {
+        throw std::runtime_error(
+            "Could not truncate database: " + std::string(std::strerror(savedError)));
+    }
+    reopenFile();
+    pageCount_ = static_cast<PageId>(pageCount);
+    loadAndValidateDatabaseHeader();
+}
+
+void DiskManager::reloadDatabaseHeader() {
+    loadAndValidateDatabaseHeader();
 }
 
 void DiskManager::updateCatalogRootPageId(PageId pageId) {

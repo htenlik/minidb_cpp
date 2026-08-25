@@ -8,6 +8,7 @@ add_library(minidb_core
     src/bplus_tree.cpp
     src/catalog.cpp
     src/database_format.cpp
+    src/database_metadata_manager.cpp
     src/disk_manager.cpp
     src/lru_k_replacer.cpp
     src/log_manager.cpp
@@ -17,6 +18,8 @@ add_library(minidb_core
     src/persistent_bplus_tree.cpp
     src/record_page.cpp
     src/record_store.cpp
+    src/recovery_log.cpp
+    src/recovery.cpp
     src/row.cpp
     src/schema.cpp
     src/slotted_page.cpp
@@ -141,6 +144,14 @@ add_test(NAME wal_codec_test COMMAND wal_codec_test)
 add_executable(log_manager_test tests/log_manager_test.cpp)
 target_link_libraries(log_manager_test PRIVATE minidb_core)
 add_test(NAME log_manager_test COMMAND log_manager_test)
+
+add_executable(recovery_log_test tests/recovery_log_test.cpp)
+target_link_libraries(recovery_log_test PRIVATE minidb_core)
+add_test(NAME recovery_log_test COMMAND recovery_log_test)
+
+add_executable(recovery_test tests/recovery_test.cpp)
+target_link_libraries(recovery_test PRIVATE minidb_core)
+add_test(NAME recovery_test COMMAND recovery_test)
 
 add_executable(wal_scanner_test tests/wal_scanner_test.cpp)
 target_link_libraries(wal_scanner_test PRIVATE minidb_core)

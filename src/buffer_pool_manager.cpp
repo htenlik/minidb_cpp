@@ -12,11 +12,13 @@ BufferPoolManager::BufferPoolManager(
     DiskManager& diskManager,
     std::size_t frameCount,
     std::size_t k,
-    WalFlushProvider* walProvider)
+    WalFlushProvider* walProvider,
+    PageRecoveryHook* recoveryHook)
     : diskManager_(diskManager),
       frames_(frameCount),
       replacer_(frameCount, k),
-      walProvider_(walProvider) {
+      walProvider_(walProvider),
+      recoveryHook_(recoveryHook) {
     if (frameCount == 0) throw std::invalid_argument("Buffer pool capacity must be positive");
     if (frameCount > std::numeric_limits<FrameId>::max()) {
         throw std::invalid_argument("Buffer pool capacity exceeds FrameId range");
@@ -46,10 +48,17 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
         throw std::logic_error("Selected buffer victim is not evictable");
     }
     if (!frame.dirty) return;
+    prepareFrameForWrite(frame);
     ensureWalDurableBeforePageWrite(frame);
     diskManager_.writePage(frame.pageId, frame.data);
     frame.dirty = false;
     ++stats_.physicalPageWrites;
+}
+
+void BufferPoolManager::prepareFrameForWrite(BufferFrame& frame) {
+    if (recoveryHook_ == nullptr) return;
+    const auto lsn = recoveryHook_->preparePageForWrite(frame.pageId, frame.data);
+    if (isValidLsn(lsn)) frame.pageLsn = lsn;
 }
 
 void BufferPoolManager::ensureWalDurable(Lsn pageLsn) {
@@ -127,7 +136,12 @@ std::optional<BasicPageGuard> BufferPoolManager::fetchPage(PageId pageId, bool w
         if (frame.pinCount == 0) replacer_.setEvictable(found->second, false);
         ++frame.pinCount;
         replacer_.recordAccess(found->second);
-        if (writable) frame.dirty = true;
+        if (writable) {
+            if (recoveryHook_ != nullptr) {
+                recoveryHook_->notePageWriteIntent(pageId, frame.data);
+            }
+            frame.dirty = true;
+        }
         ++stats_.pinOperations;
         return BasicPageGuard(*this, found->second, pageId);
     }
@@ -140,6 +154,9 @@ std::optional<BasicPageGuard> BufferPoolManager::fetchPage(PageId pageId, bool w
     DiskManager::Page page{};
     diskManager_.readPage(pageId, page);
     ++stats_.physicalPageReads;
+    if (writable && recoveryHook_ != nullptr) {
+        recoveryHook_->notePageWriteIntent(pageId, page);
+    }
     installPage(*frameId, pageId, std::move(page), writable);
     if (dirtyVictim) ++stats_.dirtyEvictions;
     return BasicPageGuard(*this, *frameId, pageId);
@@ -164,6 +181,7 @@ std::optional<WritePageGuard> BufferPoolManager::newPageWrite() {
     flushVictimIfDirty(*frameId);
     const auto pageId = diskManager_.appendPage();
     DiskManager::Page page{};
+    if (recoveryHook_ != nullptr) recoveryHook_->notePageWriteIntent(pageId, page);
     installPage(*frameId, pageId, std::move(page), true);
     if (dirtyVictim) ++stats_.dirtyEvictions;
     ++stats_.appendedPages;
@@ -181,6 +199,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
     if (found == pageTable_.end()) return false;
     auto& frame = frames_[found->second];
     if (frame.dirty) {
+        prepareFrameForWrite(frame);
         ensureWalDurableBeforePageWrite(frame);
         diskManager_.writePage(pageId, frame.data);
         frame.dirty = false;
@@ -190,6 +209,9 @@ bool BufferPoolManager::flushPage(PageId pageId) {
 }
 
 void BufferPoolManager::flushAll() {
+    for (auto& frame : frames_) {
+        if (frame.valid && frame.dirty) prepareFrameForWrite(frame);
+    }
     Lsn maximumPageLsn = INVALID_LSN;
     for (const auto& frame : frames_) {
         if (!frame.valid || !frame.dirty || !isValidLsn(frame.pageLsn)) continue;
@@ -205,6 +227,43 @@ void BufferPoolManager::flushAll() {
         ++stats_.physicalPageWrites;
     }
     diskManager_.flush();
+}
+
+std::optional<DiskManager::Page> BufferPoolManager::residentPageCopy(PageId pageId) const {
+    const auto found = pageTable_.find(pageId);
+    if (found == pageTable_.end()) return std::nullopt;
+    return frames_[found->second].data;
+}
+
+std::uint64_t BufferPoolManager::totalPinCount() const noexcept {
+    std::uint64_t total = 0;
+    for (const auto& frame : frames_) total += frame.valid ? frame.pinCount : 0;
+    return total;
+}
+
+void BufferPoolManager::discardPageForRecovery(PageId pageId) {
+    const auto found = pageTable_.find(pageId);
+    if (found == pageTable_.end()) return;
+    const auto frameId = found->second;
+    auto& frame = frames_[frameId];
+    if (frame.pinCount != 0) {
+        throw std::logic_error("Cannot discard a pinned buffer page during recovery");
+    }
+    if (!replacer_.remove(frameId)) {
+        throw std::logic_error("Recovery discard could not remove buffer frame");
+    }
+    pageTable_.erase(found);
+    frame = {};
+    freeFrames_.push_back(frameId);
+}
+
+void BufferPoolManager::discardPagesAtOrAboveForRecovery(PageId firstPageId) {
+    std::vector<PageId> pages;
+    for (const auto& [pageId, frameId] : pageTable_) {
+        static_cast<void>(frameId);
+        if (pageId >= firstPageId) pages.push_back(pageId);
+    }
+    for (const auto pageId : pages) discardPageForRecovery(pageId);
 }
 
 void BufferPoolManager::releasePin(FrameId frameId) {

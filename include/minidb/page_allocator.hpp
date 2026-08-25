@@ -10,6 +10,8 @@
 
 namespace minidb {
 
+class DatabaseMetadataManager;
+
 namespace free_page_layout {
 
 using LayoutVersion = std::uint32_t;
@@ -37,10 +39,14 @@ static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 // the buffer pool's append path when the list is empty.
 class PageAllocator {
 public:
-    PageAllocator(BufferPoolManager& bufferPool, DiskManager& diskManager);
+    PageAllocator(
+        BufferPoolManager& bufferPool,
+        DiskManager& diskManager,
+        DatabaseMetadataManager* metadataManager = nullptr);
 
     [[nodiscard]] PageId allocatePage();
     void releasePage(PageId pageId);
+    void updateCatalogRootPageId(PageId pageId);
 
     void validate() const;
     [[nodiscard]] std::vector<PageId> freePageIds() const;
@@ -48,6 +54,9 @@ public:
 private:
     BufferPoolManager& bufferPool_;
     DiskManager& diskManager_;
+    DatabaseMetadataManager* metadataManager_;
+
+    void updateFreeListRootPageId(PageId pageId);
 
     [[nodiscard]] PageId readNextFreePageId(PageId pageId) const;
     void writeFreePage(PageId pageId, PageId nextPageId);

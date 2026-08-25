@@ -1,6 +1,7 @@
 #include "minidb/page_allocator.hpp"
 
 #include "minidb/page_access.hpp"
+#include "minidb/database_metadata_manager.hpp"
 
 #include <algorithm>
 #include <span>
@@ -44,9 +45,24 @@ void requireExistingDataPage(
 
 } // namespace
 
-PageAllocator::PageAllocator(BufferPoolManager& bufferPool, DiskManager& diskManager)
-    : bufferPool_(bufferPool), diskManager_(diskManager) {
+PageAllocator::PageAllocator(
+    BufferPoolManager& bufferPool,
+    DiskManager& diskManager,
+    DatabaseMetadataManager* metadataManager)
+    : bufferPool_(bufferPool),
+      diskManager_(diskManager),
+      metadataManager_(metadataManager) {
     validate();
+}
+
+void PageAllocator::updateFreeListRootPageId(PageId pageId) {
+    if (metadataManager_ != nullptr) metadataManager_->updateFreeListRootPageId(pageId);
+    else diskManager_.updateFreeListRootPageId(pageId);
+}
+
+void PageAllocator::updateCatalogRootPageId(PageId pageId) {
+    if (metadataManager_ != nullptr) metadataManager_->updateCatalogRootPageId(pageId);
+    else diskManager_.updateCatalogRootPageId(pageId);
 }
 
 PageId PageAllocator::readNextFreePageId(PageId pageId) const {
@@ -144,7 +160,7 @@ PageId PageAllocator::allocatePage() {
     }
 
     const auto nextPageId = readNextFreePageId(pageId);
-    diskManager_.updateFreeListRootPageId(nextPageId);
+    updateFreeListRootPageId(nextPageId);
     {
         auto guard = requireWritePage(bufferPool_, pageId, "reuse free-list page");
         auto bytes = guard.data();
@@ -164,7 +180,7 @@ void PageAllocator::releasePage(PageId pageId) {
 
     const auto previousHead = diskManager_.databaseHeader().freeListRootPageId;
     writeFreePage(pageId, previousHead);
-    diskManager_.updateFreeListRootPageId(pageId);
+    updateFreeListRootPageId(pageId);
 }
 
 } // namespace minidb
