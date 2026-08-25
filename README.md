@@ -36,7 +36,7 @@ TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Exec
                                               LogManager    DiskManager
                                                |                 |
                                                v                 v
-                                        database.db.wal      database.db
+                                        database.db.wal.d/   database.db
 ```
 
 ## Milestones
@@ -60,16 +60,18 @@ The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
 11A. **WAL foundation and buffer-pool write-ahead ordering** ✅
 11B. **Crash recovery and statement atomicity** ✅
 11C.1. **Sharp checkpoints and bounded recovery scan** ✅
-11C.2. **WAL lifecycle and advanced recovery** — next
+11C.2. **Segmented WAL, global logical LSNs, and safe reclamation** ✅
+11D. **Recovery/logging refinement experiments** — next
 12. **Transactions and concurrency** — planned
 13. **Experimental and paper-driven work** — later
 
-Milestones 11A–11C.1 add a versioned `database.db.wal`, byte-offset LSNs, CRC32C,
+Milestones 11A–11C.2 add versioned WAL, global logical LSNs, CRC32C,
 WAL-before-page ordering, implicit atomic mutating statements, full-page before/after
 images, NO-FORCE durable commit, STEAL-safe eviction, startup REDO/UNDO, and a quiescent
 checkpoint whose double-slotted `database.db.ckpt` pointer bounds normal recovery to the
-post-checkpoint WAL tail. WAL is not recycled and still grows indefinitely. See
-[docs/wal.md](docs/wal.md), [docs/recovery.md](docs/recovery.md), and
+post-checkpoint WAL tail. Active WAL lives in `database.db.wal.d/`; obsolete whole
+segments are deleted without rebasing LSNs. See [docs/wal.md](docs/wal.md),
+[docs/wal-segments.md](docs/wal-segments.md), [docs/recovery.md](docs/recovery.md), and
 [docs/checkpoints.md](docs/checkpoints.md).
 
 Milestone 10B routes the active TupleStore, persistent index, Catalog/Table, SQL, and TCP
@@ -198,7 +200,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/minidb demo.db
 ./build/minidb_server demo.db --port 7432 --buffer-frames 128 --lru-k 2 \
-  --checkpoint-wal-bytes 67108864
+  --checkpoint-wal-bytes 67108864 --wal-segment-bytes 16777216
 ./build/minidb_client --port 7432 --execute "SELECT * FROM users;"
 ```
 

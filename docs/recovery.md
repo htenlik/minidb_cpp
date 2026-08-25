@@ -103,7 +103,7 @@ expensive ordering avoids compensation log records while statement errors are un
 
 ## Startup recovery
 
-Milestone 11C.1 first selects a durable sharp checkpoint when possible, so production
+Milestones 11C.1–11C.2 first select a durable sharp checkpoint when possible, so production
 startup is ordered as follows:
 
 ```text
@@ -112,8 +112,10 @@ DiskManager -> deferred LogManager -> checkpoint control -> tail repair -> analy
             -> recovered-loser ABORT fsync -> BufferPool -> PageAllocator -> Catalog
 ```
 
-With a cross-valid control slot, analysis begins at its `recoveryStartOffset`; no earlier
-transaction record is scanned or replayed. Without one it begins at WAL byte 64. An
+With a cross-valid control slot, analysis begins at its logical `recoveryStartOffset`;
+no earlier transaction record is scanned or replayed. If control is unusable after
+reclamation, retained WAL supplies the newest safe checkpoint base. Without a checkpoint
+it begins at the oldest retained logical position (byte 64 for unreclaimed WAL). An
 incomplete final record is truncated to the last valid record boundary. Interior
 magic/version/length/checksum corruption is fatal and is never treated as a tail.
 Analysis validates one BEGIN, exact same-transaction `prevLSN` chains, terminal-record
@@ -147,9 +149,10 @@ bytes, commit fsyncs, and rollback writes. Benchmarks report WAL bytes divided b
 explicit logical-change estimate as logging amplification.
 
 There is a quiescent sharp checkpoint, documented in [checkpoints.md](checkpoints.md).
-There is no WAL recycling, persistent pageLSN, fuzzy dirty-page table, CLR, concurrent
-transaction, lock, MVCC, isolation, or crash-safe group commit. Valid WAL remains
-append-only, but a usable checkpoint bounds startup to its tail. A crash after COMMIT fsync but
+Obsolete whole WAL segments are now deleted after sharp checkpoints; see
+[wal-segments.md](wal-segments.md). There is no archive/PITR, persistent pageLSN, fuzzy
+dirty-page table, CLR, concurrent transaction, lock, MVCC, isolation, or crash-safe
+group commit. A usable checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
 before the response reaches a client is inherently ambiguous: the statement committed,
 but the client must reconnect and query state. Wire request IDs are not deduplication
 tokens.

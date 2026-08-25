@@ -3,8 +3,8 @@
 Milestone 9 established the repeatable post-`v0.1.0` baseline; 10A added standalone
 buffer workloads; 10B migrated active engine workloads to the bounded pool; 11A adds
 standalone WAL append/force experiments; 11B adds durable transaction and full-history
-recovery experiments; 11C.1 adds sharp-checkpoint latency and bounded-tail recovery
-comparison. The harness reports measurements, not
+recovery experiments; 11C.1 adds sharp-checkpoint latency and bounded-tail recovery;
+11C.2 adds segment-rotation and reclamation experiments. The harness reports measurements, not
 performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
@@ -113,7 +113,7 @@ The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sq
 | Local SQL | `sql_pk_lookup`, `sql_heap_scan`, `sql_insert`, `sql_update`, `sql_delete`, `sql_mixed`, `sql_pk_vs_heap` |
 | TCP loopback | `tcp_pk_lookup`, `tcp_heap_scan`, `tcp_insert`, `tcp_mixed` |
 | Mixed profiles | `mixed_read_heavy`, `mixed_write_heavy` (local SQL) |
-| WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush` |
+| WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush`, `wal_segment_rotation`, `wal_reclamation` |
 | Durable statements | `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed` |
 | Recovery | `recovery_full_scan` |
 
@@ -125,6 +125,12 @@ controls LogManager's memory buffer. Useful payload experiments include 32, 128,
 4096, and 8192 bytes. A record larger than the configured buffer exercises the direct
 write path. These numbers characterize the WAL substrate only and must not be presented
 as transaction throughput or evidence for a future logical/full-page logging choice.
+
+`wal_segment_rotation` forces records through deliberately small persisted test
+segments and reports rotations plus p95/p99 operation latency. `wal_reclamation`
+generates many segments, deletes a reclaimable prefix, and reports before/after bytes,
+deleted segments, reclaimed bytes, and deletion latency. Configure both with
+`--wal-segment-bytes`; small test segments are not production 16-MiB performance.
 
 B+ insertion uses deterministic unique 32-bit keys and valid synthetic RIDs; the other
 B+ workloads populate the persistent tree first. Tuple fragmentation alternates
@@ -217,18 +223,20 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 
 - `benchmark`, explicit `storage_backend`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
-  repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer sizes, mode, and tuple sizes;
+  repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer/segment sizes, mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
 - `pager`: all nine Pager statistics;
 - `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
   evictions, pin activity, appended pages, WAL force requests, gauges, and capacity;
 - `wal`: record/payload counts, payload throughput, encoded bytes written, physical
-  writes, buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
+  retained bytes, logical end, active/retained segment identities, rotations/deletions,
+  buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
 - `recovery`: transaction/page-update/full-image counters, WAL/logical bytes and
   amplification, checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
   REDO/UNDO counts, and phase/total recovery nanoseconds;
-- `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, and total/
-  maximum latency; configuration records byte/statement thresholds and enablement;
+- `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, checkpoint
+  latency, and separately reclaimed segments/bytes/reclamation latency; configuration
+  records byte/statement thresholds and enablement;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;
 - `execution`: average rows examined and index lookups;
 - `environment`: version context, configured Git commit, compiler, build type, platform,

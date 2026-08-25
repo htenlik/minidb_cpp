@@ -24,7 +24,8 @@ The resulting invariant is:
 5. append `CHECKPOINT_END` and fsync WAL through it;
 6. write the next generation into the inactive checkpoint-control slot and fsync the
    control file;
-7. only after that final fsync treat the new checkpoint as authoritative.
+7. only after that final fsync treat the new checkpoint as authoritative;
+8. rotate to a fresh segment and separately reclaim obsolete whole segments.
 
 The checkpoint ID is consumed even if an attempt fails. On restart the next ID is one
 greater than the maximum selected checkpoint or checkpoint record in the scanned tail.
@@ -49,7 +50,7 @@ All fields use little-endian encoding and the enclosing WAL record supplies its 
 | ---: | ---: | --- |
 | 0 | 8 | checkpoint ID |
 | 8 | 8 | previous authoritative checkpoint END LSN, or `INVALID_LSN` |
-| 16 | 8 | WAL byte offset at checkpoint start; equals this BEGIN's LSN |
+| 16 | 8 | logical WAL position at checkpoint start; equals this BEGIN's LSN |
 | 24 | 8 | reserved, zero |
 
 `CHECKPOINT_END` type 7 has a 48-byte version-1 payload:
@@ -60,11 +61,11 @@ All fields use little-endian encoding and the enclosing WAL record supplies its 
 | 8 | 8 | matching `CHECKPOINT_BEGIN` LSN |
 | 16 | 8 | synchronized database page count |
 | 24 | 8 | next transaction ID |
-| 32 | 8 | recovery start offset immediately after this complete END record |
+| 32 | 8 | recovery start LSN immediately after this complete END record |
 | 40 | 8 | reserved, zero |
 
-`WalOffset` is distinct from `Lsn`: the recovery offset may identify end-of-WAL, where
-no record exists yet.
+`WalOffset` remains a compatibility alias for `Lsn`; the recovery position may identify
+logical end-of-WAL, where no record exists yet.
 
 ## Checkpoint-control sidecar
 
@@ -93,7 +94,7 @@ Each slot:
 | 24 | 8 | recovery start offset |
 | 32 | 8 | database page count |
 | 40 | 8 | next transaction ID |
-| 48 | 8 | WAL file size when checkpoint completed |
+| 48 | 8 | logical WAL high-water mark when checkpoint completed |
 | 56 | 4 | CRC32C |
 | 60 | 4 | flags/reserved, zero |
 
@@ -105,16 +106,17 @@ slot is decoded independently and candidates are tried by descending generation.
 A CRC-valid slot is still untrusted. Its END LSN must identify a valid system
 `CHECKPOINT_END`; ID, recovery offset, page count, and next transaction ID must match;
 the recovery offset must equal the record end; and the referenced BEGIN must match. A
-torn or mismatched newest slot falls back to the older cross-valid slot. An absent/bad
-file or two unusable slots causes a correct full scan from byte 64. The sidecar is an
-optimization, not a source of database contents.
+torn or mismatched newest slot falls back to the older cross-valid slot. If control is
+absent/unusable after reclamation, recovery scans retained WAL for the newest complete
+durable checkpoint pair and rebuilds the sidecar best-effort; byte 64 may no longer
+exist. The sidecar is an optimization, not a source of database contents.
 
 ## Checkpoint-aware startup
 
-Production `LogManager` uses deferred-recovery open: it validates only the WAL header
-and size before checkpoint selection, avoiding the former unconditional history scan.
-Recovery selects a cross-valid control slot and invokes the same strict CRC/length/
-physical-LSN scanner from either `recoveryStartOffset` or byte 64. A partial final record
+Production `LogManager` uses deferred recovery. Segmented discovery validates the
+retained manifest, headers, chain, and record boundaries; reclaimed historical files
+are not read. Recovery then selects a cross-valid control slot and invokes strict CRC/length/
+logical-LSN scanner from either `recoveryStartOffset` or the oldest retained LSN. A partial final record
 is truncated. Tail winners retain ascending full-page REDO; the one possible tail loser
 retains reverse before-image UNDO and appended-page truncation.
 
@@ -136,11 +138,11 @@ growth, control selection/fallback, and skipped/scanned WAL bytes. Benchmarks
 `checkpoint_latency` and `recovery_checkpoint_compare` expose the checkpoint-cost versus
 recovery-work tradeoff without timing assertions.
 
-Checkpoints bound recovery scanning, but `database.db.wal` still grows indefinitely.
-11C.1 does not truncate, rotate, segment, archive, or recycle WAL, and physical LSNs
-remain byte offsets. It adds no persistent pageLSN, fuzzy checkpoint, dirty-page table,
-CLR, finer-grained WAL, or concurrency. Cross-file operations are not generally crash
-atomic without a future WAL/recovery lifecycle.
+11C.2 rotates after publication and retains the checkpoint base, one extra closed
+predecessor, and every tail/active segment; older whole segments are deleted. Checkpoint
+critical latency and reclamation latency/bytes are measured separately. It adds no
+archive/PITR, persistent pageLSN, fuzzy checkpoint, dirty-page table, CLR, finer-grained
+WAL, or concurrency. See [wal-segments.md](wal-segments.md).
 
 The design is informed by C. Mohan et al., “ARIES: A Transaction Recovery Method
 Supporting Fine-Granularity Locking and Partial Rollbacks Using Write-Ahead Logging,”

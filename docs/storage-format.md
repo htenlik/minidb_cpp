@@ -181,3 +181,11 @@ Logical tuple and schema encodings have independent versions and are documented 
 Table Definition tuple formats are documented in [catalog.md](catalog.md). Their
 composition with TupleStore and the persistent primary index is described in
 [table-layer.md](table-layer.md).
+
+## WAL sidecar formats
+
+WAL, checkpoint control, and WAL segment manifests are sidecars rather than 4096-byte
+database pages; they do not change any layout above. The record/control formats are in
+[wal.md](wal.md) and [checkpoints.md](checkpoints.md). The active segmented directory,
+64-byte manifest, 64-byte segment header, logical-LSN mapping, and reclamation rules are
+specified in [wal-segments.md](wal-segments.md).

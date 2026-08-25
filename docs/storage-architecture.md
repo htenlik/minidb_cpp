@@ -102,7 +102,7 @@ No persistent offset, width, magic, version, tuple encoding, catalog encoding, S
 grammar, or wire byte changed in 10B. A database assembled through the legacy Pager
 formats is opened and queried by the active buffer-backed engine in compatibility tests.
 
-Milestones 11A–11C.1 add sidecar logging/recovery/checkpoint paths without altering a persistent
+Milestones 11A–11C.2 add sidecar logging/recovery/checkpoint paths without altering a persistent
 database-page format:
 
 ```text
@@ -113,7 +113,7 @@ RecoveryCoordinator
    LogManager <------ BufferPoolManager ------> DiskManager
         |              force WAL first               |
         v                                             v
- database.db.wal                                database.db
+ database.db.wal.d/                             database.db
 ```
 
 The buffer pool captures write intent and enforces WAL durability before writing a dirty
@@ -122,7 +122,9 @@ coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encodin
 
 The engine remains single-threaded. Guards are not locks or latches. 11B adds physical
 analysis/REDO/UNDO and one implicit recovery unit per mutating statement. 11C.1 adds a
-quiescent full-buffer checkpoint and double-slotted `database.db.ckpt` recovery pointer.
-Neither changes database page formats. There is still no persistent pageLSN, fuzzy
-checkpoint, WAL recycling, CLR, lock, MVCC, or concurrent transaction. See
-[wal.md](wal.md), [recovery.md](recovery.md), and [checkpoints.md](checkpoints.md).
+quiescent full-buffer checkpoint and double-slotted `database.db.ckpt` recovery pointer;
+11C.2 splits the global logical WAL into segment files and reclaims whole files behind
+the retained checkpoint base. Neither changes database page formats. There is still no
+archive/PITR, persistent pageLSN, fuzzy checkpoint, CLR, lock, MVCC, or concurrent
+transaction. See [wal.md](wal.md), [wal-segments.md](wal-segments.md),
+[recovery.md](recovery.md), and [checkpoints.md](checkpoints.md).
