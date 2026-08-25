@@ -1031,7 +1031,9 @@ BenchmarkResult runTransactional(
             config.databasePath,
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
-                              static_cast<std::size_t>(config.lruK)});
+                              static_cast<std::size_t>(config.lruK),
+                              config.checkpointWalBytes,
+                              config.checkpointStatements});
         auto& engine = server.sqlEngine();
         createUsers(engine);
         const auto setupRows = name == "txn_insert" ? 0U
@@ -1043,6 +1045,7 @@ BenchmarkResult runTransactional(
         server.bufferPool().resetStats();
         server.logManager().resetStats();
         server.recoveryCoordinator().resetStats();
+        server.checkpointManager().resetStats();
         const auto walBefore = std::filesystem::file_size(
             walPathForDatabase(config.databasePath));
 
@@ -1086,6 +1089,7 @@ BenchmarkResult runTransactional(
         result.wal.manager = server.logManager().stats();
         result.wal.walRecords = result.wal.manager.recordsAppended;
         result.recovery.transactions = server.recoveryCoordinator().stats();
+        result.checkpoint = server.checkpointManager().stats();
         result.recovery.walBytes = std::filesystem::file_size(
             walPathForDatabase(config.databasePath)) - walBefore;
         result.recovery.logicalChangedBytes = config.operations * 32U;
@@ -1148,16 +1152,15 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK), 0, 0});
-        createUsers(server.sqlEngine());
-        const auto count = std::max(config.rows, config.operations);
-        populateUsers(server.sqlEngine(), count);
         static_cast<void>(server.checkpointManager().checkpoint());
         server.checkpointManager().resetStats();
         server.bufferPool().resetStats();
-        for (std::uint64_t key = 0; key < config.operations; ++key) {
-            static_cast<void>(server.sqlEngine().execute(
-                "UPDATE users SET score = " + std::to_string(key + 1000)
-                + " WHERE id = " + std::to_string(key)));
+        if (config.operations != 0) {
+            server.recoveryCoordinator().beginStatement();
+            for (std::uint64_t page = 0; page < config.operations; ++page) {
+                static_cast<void>(server.pageAllocator().allocatePage());
+            }
+            server.recoveryCoordinator().commitStatement();
         }
         measure(latency, [&] { static_cast<void>(server.checkpointManager().checkpoint()); });
         server.catalog().validate();

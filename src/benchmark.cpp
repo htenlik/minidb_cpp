@@ -46,7 +46,10 @@ void validateConfig(const BenchmarkConfig& config) {
     if (config.benchmark.empty() == config.suite.empty()) {
         throw std::invalid_argument("specify exactly one of --benchmark or --suite");
     }
-    if (config.rows == 0 || config.operations == 0 || config.pages == 0
+    const bool zeroOperationCheckpoint = config.benchmark == "checkpoint_latency"
+        && config.operations == 0;
+    if (config.rows == 0 || (config.operations == 0 && !zeroOperationCheckpoint)
+        || config.pages == 0
         || config.repetitions == 0 || config.reopenInterval == 0
         || config.bufferFrames == 0 || config.lruK == 0 || config.walPayloadBytes == 0
         || config.walBatchSize == 0 || config.walBufferBytes == 0) {
