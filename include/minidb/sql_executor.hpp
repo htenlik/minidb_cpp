@@ -11,7 +11,7 @@
 #include <variant>
 #include <vector>
 
-namespace minidb { class RecoveryCoordinator; }
+namespace minidb { class CheckpointManager; class RecoveryCoordinator; }
 
 namespace minidb::sql {
 
@@ -69,8 +69,11 @@ private:
 
 class SqlEngine {
 public:
-    explicit SqlEngine(Catalog& catalog, RecoveryCoordinator* recovery = nullptr)
-        : executor_(catalog), recovery_(recovery) {}
+    explicit SqlEngine(
+        Catalog& catalog,
+        RecoveryCoordinator* recovery = nullptr,
+        CheckpointManager* checkpoints = nullptr)
+        : executor_(catalog), recovery_(recovery), checkpoints_(checkpoints) {}
 
     [[nodiscard]] QueryResult execute(std::string_view source);
     [[nodiscard]] QueryResult execute(const Statement& statement);
@@ -78,6 +81,7 @@ public:
 private:
     SqlExecutor executor_;
     RecoveryCoordinator* recovery_;
+    CheckpointManager* checkpoints_;
 };
 
 } // namespace minidb::sql

@@ -4,12 +4,19 @@ namespace minidb::net {
 
 DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     : diskManager_(databasePath),
-      logManager_(walPathForDatabase(databasePath)) {
-    recoveryStats_ = RecoveryManager(diskManager_, logManager_).recover();
-    recovery_ = std::make_unique<RecoveryCoordinator>(diskManager_, logManager_);
+      logManager_(walPathForDatabase(databasePath), LogManager::DEFAULT_BUFFER_SIZE,
+                  LogOpenMode::DeferredRecovery),
+      checkpointControl_(checkpointPathForDatabase(databasePath)) {
+    recoveryStats_ = RecoveryManager(
+        diskManager_, logManager_, &checkpointControl_).recover();
+    recovery_ = std::make_unique<RecoveryCoordinator>(
+        diskManager_, logManager_, recoveryStats_.nextTransactionId);
     bufferPool_ = std::make_unique<BufferPoolManager>(
         diskManager_, config.bufferFrames, config.lruK, &logManager_, recovery_.get());
     recovery_->attachBufferPool(*bufferPool_);
+    checkpoints_ = std::make_unique<CheckpointManager>(
+        *recovery_, *bufferPool_, diskManager_, logManager_, checkpointControl_,
+        recoveryStats_, CheckpointPolicy{config.checkpointWalBytes, config.checkpointStatements});
     metadataManager_ = std::make_unique<DatabaseMetadataManager>(
         diskManager_, *recovery_, logManager_);
     allocator_ = std::make_unique<PageAllocator>(
@@ -28,7 +35,8 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     } else {
         catalog_.emplace(Catalog::open(*bufferPool_, diskManager_, *allocator_));
     }
-    engine_ = std::make_unique<sql::SqlEngine>(*catalog_, recovery_.get());
+    engine_ = std::make_unique<sql::SqlEngine>(
+        *catalog_, recovery_.get(), checkpoints_.get());
     server_ = std::make_unique<TcpServer>(
         std::move(config), *engine_, *bufferPool_, diskManager_);
 }

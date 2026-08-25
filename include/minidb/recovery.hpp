@@ -11,6 +11,7 @@
 namespace minidb {
 
 class BufferPoolManager;
+class CheckpointControl;
 class LogManager;
 
 struct RecoveryStats {
@@ -30,6 +31,18 @@ struct RecoveryStats {
     std::uint64_t redoNs = 0;
     std::uint64_t undoNs = 0;
     std::uint64_t totalNs = 0;
+    bool checkpointControlPresent = false;
+    bool checkpointUsed = false;
+    CheckpointId checkpointId = INVALID_CHECKPOINT_ID;
+    Lsn checkpointEndLsn = INVALID_LSN;
+    WalOffset recoveryStartOffset = wal_file_layout::HEADER_SIZE;
+    std::uint64_t walBytesSkipped = 0;
+    std::uint64_t walBytesScanned = 0;
+    bool fullScanFallback = true;
+    std::uint64_t checkpointValidationFailures = 0;
+    std::uint64_t checkpointGeneration = 0;
+    CheckpointId highestCheckpointId = INVALID_CHECKPOINT_ID;
+    TransactionId nextTransactionId = 1;
     bool repairedTail = false;
 };
 
@@ -47,19 +60,29 @@ struct TransactionRuntimeStats {
 
 class RecoveryManager {
 public:
-    RecoveryManager(DiskManager& diskManager, LogManager& logManager)
-        : diskManager_(diskManager), logManager_(logManager) {}
+    RecoveryManager(
+        DiskManager& diskManager,
+        LogManager& logManager,
+        CheckpointControl* checkpointControl = nullptr,
+        bool forceFullScan = false)
+        : diskManager_(diskManager), logManager_(logManager),
+          checkpointControl_(checkpointControl), forceFullScan_(forceFullScan) {}
 
     [[nodiscard]] RecoveryStats recover();
 
 private:
     DiskManager& diskManager_;
     LogManager& logManager_;
+    CheckpointControl* checkpointControl_;
+    bool forceFullScan_;
 };
 
 class RecoveryCoordinator final : public PageRecoveryHook {
 public:
-    RecoveryCoordinator(DiskManager& diskManager, LogManager& logManager);
+    RecoveryCoordinator(
+        DiskManager& diskManager,
+        LogManager& logManager,
+        TransactionId nextTransactionId = INVALID_TRANSACTION_ID);
 
     void attachBufferPool(BufferPoolManager& bufferPool) noexcept;
     void beginStatement();
@@ -67,6 +90,7 @@ public:
     void rollbackStatement();
 
     [[nodiscard]] bool hasActiveStatement() const noexcept { return active_.has_value(); }
+    [[nodiscard]] bool rollbackActive() const noexcept { return rollbackActive_; }
     [[nodiscard]] TransactionId activeTransactionId() const noexcept;
     [[nodiscard]] TransactionId nextTransactionId() const noexcept { return nextTransactionId_; }
     [[nodiscard]] const TransactionRuntimeStats& stats() const noexcept { return stats_; }
@@ -98,6 +122,7 @@ private:
     BufferPoolManager* bufferPool_ = nullptr;
     TransactionId nextTransactionId_ = 1;
     std::optional<ActiveStatement> active_;
+    bool rollbackActive_ = false;
     TransactionRuntimeStats stats_{};
 
     void ensureBeginLogged();

@@ -10,6 +10,11 @@
 
 namespace minidb {
 
+enum class LogOpenMode {
+    EagerValidated,
+    DeferredRecovery,
+};
+
 struct LogManagerStats {
     std::uint64_t recordsAppended = 0;
     std::uint64_t bytesAppended = 0;
@@ -31,7 +36,8 @@ public:
 
     explicit LogManager(
         std::string walPath,
-        std::size_t bufferCapacity = DEFAULT_BUFFER_SIZE);
+        std::size_t bufferCapacity = DEFAULT_BUFFER_SIZE,
+        LogOpenMode openMode = LogOpenMode::EagerValidated);
     ~LogManager() override;
 
     LogManager(const LogManager&) = delete;
@@ -46,11 +52,15 @@ public:
     [[nodiscard]] bool containsLsn(Lsn lsn) const noexcept override;
     [[nodiscard]] bool hasTruncatedTail() const noexcept { return truncatedTail_; }
     [[nodiscard]] std::uint64_t lastValidOffset() const noexcept { return nextLsn_; }
+    [[nodiscard]] std::uint64_t physicalFileSize() const;
+    [[nodiscard]] bool recoveryPending() const noexcept { return recoveryPending_; }
     [[nodiscard]] const std::string& path() const noexcept { return path_; }
 
     [[nodiscard]] WalScanResult scan() const;
+    [[nodiscard]] WalScanResult scanFrom(WalOffset startOffset) const;
     void validate() const;
     void truncateToLastValidRecord();
+    void completeRecoveryScan(const WalScanResult& scan, Lsn baseDurableLsn = INVALID_LSN);
 
     [[nodiscard]] LogManagerStats stats() const noexcept;
     void resetStats() noexcept { stats_ = {}; }
@@ -65,12 +75,15 @@ private:
     Lsn lastAppendedLsn_ = INVALID_LSN;
     Lsn durableLsn_ = INVALID_LSN;
     bool truncatedTail_ = false;
+    bool recoveryPending_ = false;
+    LogOpenMode openMode_ = LogOpenMode::EagerValidated;
     std::unordered_set<Lsn> knownLsns_;
     LogManagerStats stats_{};
 
     void openOrCreate();
     void initializeNewWal();
     void loadExistingWal();
+    void loadExistingWalDeferred();
     void writeBuffer();
     void writeBytes(std::uint64_t offset, std::span<const std::byte> bytes);
     void syncWal();

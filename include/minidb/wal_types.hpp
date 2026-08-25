@@ -8,8 +8,14 @@ namespace minidb {
 using Lsn = std::uint64_t;
 inline constexpr Lsn INVALID_LSN = std::numeric_limits<Lsn>::max();
 
+using WalOffset = std::uint64_t;
+inline constexpr WalOffset INVALID_WAL_OFFSET = std::numeric_limits<WalOffset>::max();
+
 using TransactionId = std::uint64_t;
 inline constexpr TransactionId INVALID_TRANSACTION_ID = 0;
+
+using CheckpointId = std::uint64_t;
+inline constexpr CheckpointId INVALID_CHECKPOINT_ID = 0;
 
 enum class LogRecordType : std::uint16_t {
     Begin = 1,

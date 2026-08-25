@@ -29,6 +29,7 @@ public:
         std::error_code error;
         std::filesystem::remove(path_, error);
         std::filesystem::remove(path_.string() + ".wal", error);
+        std::filesystem::remove(path_.string() + ".ckpt", error);
     }
 
     TemporaryDatabase(const TemporaryDatabase&) = delete;

@@ -9,6 +9,8 @@
 #include "minidb/database_metadata_manager.hpp"
 #include "minidb/log_manager.hpp"
 #include "minidb/recovery.hpp"
+#include "minidb/checkpoint_control.hpp"
+#include "minidb/checkpoint_manager.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -34,6 +36,8 @@ public:
     [[nodiscard]] DiskManager& diskManager() noexcept { return diskManager_; }
     [[nodiscard]] LogManager& logManager() noexcept { return logManager_; }
     [[nodiscard]] RecoveryCoordinator& recoveryCoordinator() noexcept { return *recovery_; }
+    [[nodiscard]] CheckpointManager& checkpointManager() noexcept { return *checkpoints_; }
+    [[nodiscard]] CheckpointControl& checkpointControl() noexcept { return checkpointControl_; }
     [[nodiscard]] BufferPoolManager& bufferPool() noexcept { return *bufferPool_; }
     [[nodiscard]] PageAllocator& pageAllocator() noexcept { return *allocator_; }
     [[nodiscard]] Catalog& catalog() noexcept { return *catalog_; }
@@ -45,9 +49,11 @@ public:
 private:
     DiskManager diskManager_;
     LogManager logManager_;
+    CheckpointControl checkpointControl_;
     RecoveryStats recoveryStats_{};
     std::unique_ptr<RecoveryCoordinator> recovery_;
     std::unique_ptr<BufferPoolManager> bufferPool_;
+    std::unique_ptr<CheckpointManager> checkpoints_;
     std::unique_ptr<DatabaseMetadataManager> metadataManager_;
     std::unique_ptr<PageAllocator> allocator_;
     std::optional<Catalog> catalog_;

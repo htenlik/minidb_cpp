@@ -19,6 +19,8 @@ struct ServerConfig {
     int backlog = 16;
     std::size_t bufferFrames = 128;
     std::size_t lruK = 2;
+    std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
+    std::uint64_t checkpointStatements = 0;
 };
 
 class TcpServer {

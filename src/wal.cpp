@@ -119,7 +119,7 @@ void validateRecordPrefix(std::span<const std::byte> header, Lsn physicalLsn) {
     }
 }
 
-WalScanResult scanDescriptor(int descriptor) {
+WalScanResult scanDescriptor(int descriptor, WalOffset startOffset) {
     WalScanResult result;
     result.fileBytes = fileSize(descriptor);
     if (result.fileBytes < wal_file_layout::HEADER_SIZE) {
@@ -129,7 +129,11 @@ WalScanResult scanDescriptor(int descriptor) {
     readExact(descriptor, 0, fileHeader);
     validateWalFileHeader(fileHeader);
 
-    std::uint64_t offset = wal_file_layout::HEADER_SIZE;
+    if (startOffset < wal_file_layout::HEADER_SIZE || startOffset > result.fileBytes) {
+        throw WalError(WalErrorKind::InvalidArgument, "WAL scan offset is outside the file");
+    }
+    result.startOffset = startOffset;
+    std::uint64_t offset = startOffset;
     while (offset < result.fileBytes) {
         const auto remaining = result.fileBytes - offset;
         if (remaining < wal_record_layout::HEADER_SIZE) {
@@ -288,7 +292,14 @@ WalScanResult scanWalFile(const std::string& path) {
     const auto descriptor = ::open(path.c_str(), O_RDONLY);
     if (descriptor < 0) throwIo("Could not open WAL file for scanning");
     const FileDescriptor owned(descriptor);
-    return scanDescriptor(owned.get());
+    return scanDescriptor(owned.get(), wal_file_layout::HEADER_SIZE);
+}
+
+WalScanResult scanWalFileFrom(const std::string& path, WalOffset startOffset) {
+    const auto descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0) throwIo("Could not open WAL file for scanning");
+    const FileDescriptor owned(descriptor);
+    return scanDescriptor(owned.get(), startOffset);
 }
 
 } // namespace minidb

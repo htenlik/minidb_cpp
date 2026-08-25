@@ -94,6 +94,7 @@ struct WalScanResult {
     bool truncatedTail = false;
     std::uint64_t validBytes = wal_file_layout::HEADER_SIZE;
     std::uint64_t fileBytes = wal_file_layout::HEADER_SIZE;
+    WalOffset startOffset = wal_file_layout::HEADER_SIZE;
 };
 
 [[nodiscard]] std::string walPathForDatabase(std::string_view databasePath);
@@ -110,5 +111,6 @@ void validateWalFileHeader(std::span<const std::byte> bytes);
     Lsn physicalLsn);
 
 [[nodiscard]] WalScanResult scanWalFile(const std::string& path);
+[[nodiscard]] WalScanResult scanWalFileFrom(const std::string& path, WalOffset startOffset);
 
 } // namespace minidb

@@ -28,10 +28,20 @@ std::size_t parsePositiveSize(std::string_view text, const char* option) {
     return value;
 }
 
+std::uint64_t parseNonnegativeUint64(std::string_view text, const char* option) {
+    std::uint64_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        throw std::invalid_argument(std::string("invalid ") + option + " value");
+    }
+    return value;
+}
+
 void usage() {
     std::cerr
         << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
-           "[--buffer-frames N] [--lru-k N]\n";
+           "[--buffer-frames N] [--lru-k N] [--checkpoint-wal-bytes N] "
+           "[--checkpoint-statements N]\n";
 }
 
 } // namespace
@@ -54,6 +64,12 @@ int main(int argc, char** argv) {
                 config.bufferFrames = parsePositiveSize(argv[++index], "--buffer-frames");
             } else if (argument == "--lru-k" && index + 1 < argc) {
                 config.lruK = parsePositiveSize(argv[++index], "--lru-k");
+            } else if (argument == "--checkpoint-wal-bytes" && index + 1 < argc) {
+                config.checkpointWalBytes = parseNonnegativeUint64(
+                    argv[++index], "--checkpoint-wal-bytes");
+            } else if (argument == "--checkpoint-statements" && index + 1 < argc) {
+                config.checkpointStatements = parseNonnegativeUint64(
+                    argv[++index], "--checkpoint-statements");
             } else {
                 usage();
                 return 2;

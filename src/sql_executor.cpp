@@ -1,5 +1,7 @@
 #include "minidb/sql_executor.hpp"
 
+#include "minidb/checkpoint_manager.hpp"
+
 #include "minidb/sql_parser.hpp"
 #include "minidb/recovery.hpp"
 #include "minidb/table.hpp"
@@ -840,6 +842,9 @@ QueryResult SqlEngine::execute(const Statement& statement) {
     try {
         auto result = executor_.execute(statement);
         recovery_->commitStatement();
+        if (checkpoints_ != nullptr) {
+            static_cast<void>(checkpoints_->onStatementCommitted());
+        }
         return result;
     } catch (...) {
         if (recovery_->hasActiveStatement()) recovery_->rollbackStatement();

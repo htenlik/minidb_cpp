@@ -1,6 +1,8 @@
 #include "minidb/recovery.hpp"
 
 #include "minidb/buffer_pool_manager.hpp"
+#include "minidb/checkpoint_control.hpp"
+#include "minidb/checkpoint_log.hpp"
 #include "minidb/log_manager.hpp"
 
 #include <algorithm>
@@ -39,6 +41,10 @@ TransactionId nextTransactionIdFrom(const WalScanResult& scan) {
 } // namespace
 
 void recoveryFailPoint(std::string_view name) {
+    const auto* throwing = std::getenv("MINIDB_THROWPOINT");
+    if (throwing != nullptr && name == throwing) {
+        throw std::runtime_error("Injected failure at " + std::string(name));
+    }
     const auto* configured = std::getenv("MINIDB_FAILPOINT");
     if (configured != nullptr && name == configured) ::_exit(86);
 }
@@ -46,19 +52,74 @@ void recoveryFailPoint(std::string_view name) {
 RecoveryStats RecoveryManager::recover() {
     const auto totalStart = std::chrono::steady_clock::now();
     RecoveryStats stats;
-    if (logManager_.hasTruncatedTail()) {
-        const auto before = logManager_.scan().fileBytes;
-        logManager_.truncateToLastValidRecord();
-        stats.repairedTail = true;
-        stats.tailBytesTruncated = before - logManager_.scan().fileBytes;
+    CheckpointSelection checkpoint;
+    if (checkpointControl_ != nullptr && !forceFullScan_) {
+        checkpoint = checkpointControl_->select(logManager_);
+        stats.checkpointControlPresent = checkpoint.controlFilePresent;
+        stats.checkpointValidationFailures = checkpoint.validationFailures;
+    } else if (checkpointControl_ != nullptr) {
+        stats.checkpointControlPresent = checkpointControl_->select(logManager_).controlFilePresent;
     }
     const auto analysisStart = std::chrono::steady_clock::now();
-    const auto scan = logManager_.scan();
+    if (checkpoint.slot.has_value()) {
+        stats.checkpointUsed = true;
+        stats.fullScanFallback = false;
+        stats.checkpointId = checkpoint.slot->checkpointId;
+        stats.checkpointEndLsn = checkpoint.slot->checkpointEndLsn;
+        stats.checkpointGeneration = checkpoint.slot->generation;
+        stats.recoveryStartOffset = checkpoint.slot->recoveryStartOffset;
+        stats.walBytesSkipped = checkpoint.slot->recoveryStartOffset
+            - wal_file_layout::HEADER_SIZE;
+        stats.highestCheckpointId = checkpoint.slot->checkpointId;
+    }
+    auto scan = logManager_.scanFrom(stats.recoveryStartOffset);
+    stats.walBytesScanned = scan.fileBytes - stats.recoveryStartOffset;
+    if (scan.truncatedTail) {
+        stats.repairedTail = true;
+        stats.tailBytesTruncated = scan.fileBytes - scan.validBytes;
+    }
+    if (scan.truncatedTail && !logManager_.recoveryPending()) {
+        logManager_.truncateToLastValidRecord();
+    } else {
+        logManager_.completeRecoveryScan(scan, stats.checkpointEndLsn);
+    }
+    scan.truncatedTail = false;
+    scan.fileBytes = scan.validBytes;
     std::map<TransactionId, AnalyzedTransaction> transactions;
     std::optional<TransactionId> activeTransaction;
+    std::map<CheckpointId, CheckpointBeginLogPayload> checkpointBegins;
+    TransactionId highestTailTransactionId = 0;
     for (const auto& record : scan.records) {
         ++stats.recordsAnalyzed;
+        if (record.type == LogRecordType::CheckpointBegin
+            || record.type == LogRecordType::CheckpointEnd) {
+            validateCheckpointRecord(record);
+            if (activeTransaction.has_value()) {
+                throw WalError(WalErrorKind::CorruptRecord,
+                               "Checkpoint record overlaps an active transaction");
+            }
+            if (record.type == LogRecordType::CheckpointBegin) {
+                const auto payload = decodeCheckpointBeginLogPayload(record.payload);
+                checkpointBegins[payload.checkpointId] = payload;
+                stats.highestCheckpointId = std::max(stats.highestCheckpointId,
+                                                      payload.checkpointId);
+            } else {
+                const auto payload = decodeCheckpointEndLogPayload(record.payload);
+                const auto foundBegin = checkpointBegins.find(payload.checkpointId);
+                if (foundBegin == checkpointBegins.end()
+                    || payload.checkpointBeginLsn != foundBegin->second.walStartOffset
+                    || payload.recoveryStartOffset
+                        != record.lsn + wal_record_layout::HEADER_SIZE + record.payload.size()) {
+                    throw WalError(WalErrorKind::CorruptRecord,
+                                   "CHECKPOINT_END does not match a preceding BEGIN");
+                }
+                stats.highestCheckpointId = std::max(stats.highestCheckpointId,
+                                                      payload.checkpointId);
+            }
+            continue;
+        }
         validateTransactionRecordPayload(record);
+        highestTailTransactionId = std::max(highestTailTransactionId, record.transactionId);
         auto found = transactions.find(record.transactionId);
         if (record.type == LogRecordType::Begin) {
             if (found != transactions.end() || activeTransaction.has_value()) {
@@ -91,6 +152,12 @@ RecoveryStats RecoveryManager::recover() {
         found->second.lastLsn = record.lsn;
     }
     stats.transactionsAnalyzed = transactions.size();
+    TransactionId baseNext = checkpoint.slot.has_value()
+        ? checkpoint.slot->nextTransactionId : TransactionId{1};
+    if (highestTailTransactionId == std::numeric_limits<TransactionId>::max()) {
+        throw std::overflow_error("WAL transaction ID space is exhausted");
+    }
+    stats.nextTransactionId = std::max(baseNext, highestTailTransactionId + 1);
 
     std::vector<const LogRecord*> redo;
     AnalyzedTransaction* loser = nullptr;
@@ -168,10 +235,12 @@ RecoveryStats RecoveryManager::recover() {
 
 RecoveryCoordinator::RecoveryCoordinator(
     DiskManager& diskManager,
-    LogManager& logManager)
+    LogManager& logManager,
+    TransactionId nextTransactionId)
     : diskManager_(diskManager),
       logManager_(logManager),
-      nextTransactionId_(nextTransactionIdFrom(logManager.scan())) {}
+      nextTransactionId_(nextTransactionId == INVALID_TRANSACTION_ID
+          ? nextTransactionIdFrom(logManager.scan()) : nextTransactionId) {}
 
 void RecoveryCoordinator::attachBufferPool(BufferPoolManager& bufferPool) noexcept {
     bufferPool_ = &bufferPool;
@@ -292,6 +361,7 @@ void RecoveryCoordinator::commitStatement() {
 void RecoveryCoordinator::rollbackStatement() {
     if (!active_.has_value()) throw std::logic_error("No statement transaction is active");
     requireNoPins();
+    rollbackActive_ = true;
     const auto startPageCount = active_->startPageCount;
     const auto transactionId = active_->transactionId;
     const auto previousLsn = active_->previousLsn;
@@ -323,6 +393,7 @@ void RecoveryCoordinator::rollbackStatement() {
         recoveryFailPoint("rollback_after_abort_sync");
     }
     diskManager_.reloadDatabaseHeader();
+    rollbackActive_ = false;
     ++stats_.transactionsRolledBack;
 }
 

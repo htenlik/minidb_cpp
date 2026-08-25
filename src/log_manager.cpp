@@ -27,8 +27,11 @@ std::uint64_t descriptorSize(int descriptor) {
 
 } // namespace
 
-LogManager::LogManager(std::string walPath, std::size_t bufferCapacity)
-    : path_(std::move(walPath)), bufferCapacity_(bufferCapacity) {
+LogManager::LogManager(
+    std::string walPath,
+    std::size_t bufferCapacity,
+    LogOpenMode openMode)
+    : path_(std::move(walPath)), bufferCapacity_(bufferCapacity), openMode_(openMode) {
     if (path_.empty()) {
         throw WalError(WalErrorKind::InvalidArgument, "WAL path must not be empty");
     }
@@ -53,12 +56,34 @@ void LogManager::openOrCreate() {
     if (descriptor_ < 0) throwIo("Could not open WAL file");
     try {
         if (descriptorSize(descriptor_) == 0) initializeNewWal();
+        else if (openMode_ == LogOpenMode::DeferredRecovery) loadExistingWalDeferred();
         else loadExistingWal();
     } catch (...) {
         ::close(descriptor_);
         descriptor_ = -1;
         throw;
     }
+}
+
+void LogManager::loadExistingWalDeferred() {
+    const auto size = descriptorSize(descriptor_);
+    if (size < wal_file_layout::HEADER_SIZE) {
+        throw WalError(WalErrorKind::CorruptHeader, "WAL file header is truncated");
+    }
+    std::array<std::byte, wal_file_layout::HEADER_SIZE> header{};
+    std::size_t completed = 0;
+    while (completed < header.size()) {
+        const auto count = ::pread(descriptor_, header.data() + completed,
+                                   header.size() - completed,
+                                   static_cast<off_t>(completed));
+        if (count < 0) { if (errno == EINTR) continue; throwIo("Could not read WAL header"); }
+        if (count == 0) throw WalError(WalErrorKind::CorruptHeader, "WAL header is truncated");
+        completed += static_cast<std::size_t>(count);
+    }
+    validateWalFileHeader(header);
+    nextLsn_ = size;
+    bufferStartOffset_ = nextLsn_;
+    recoveryPending_ = true;
 }
 
 void LogManager::initializeNewWal() {
@@ -126,6 +151,10 @@ void LogManager::writeBuffer() {
 }
 
 Lsn LogManager::append(LogRecord record) {
+    if (recoveryPending_) {
+        throw WalError(WalErrorKind::InvalidArgument,
+                       "Cannot append before deferred startup recovery completes");
+    }
     if (truncatedTail_) {
         throw WalError(
             WalErrorKind::TruncatedTail,
@@ -205,6 +234,52 @@ WalScanResult LogManager::scanIncludingBuffer() const {
 
 WalScanResult LogManager::scan() const {
     return scanIncludingBuffer();
+}
+
+WalScanResult LogManager::scanFrom(WalOffset startOffset) const {
+    if (!buffer_.empty()) {
+        const auto complete = scanIncludingBuffer();
+        if (startOffset < wal_file_layout::HEADER_SIZE || startOffset > complete.validBytes) {
+            throw WalError(WalErrorKind::InvalidArgument, "WAL scan offset is outside the log");
+        }
+        WalScanResult result = complete;
+        result.startOffset = startOffset;
+        result.records.erase(
+            result.records.begin(),
+            std::lower_bound(result.records.begin(), result.records.end(), startOffset,
+                             [](const LogRecord& record, WalOffset offset) {
+                                 return record.lsn < offset;
+                             }));
+        if (!result.records.empty() && result.records.front().lsn != startOffset
+            && startOffset != result.validBytes) {
+            throw WalError(WalErrorKind::CorruptRecord,
+                           "WAL scan offset is not a record boundary");
+        }
+        return result;
+    }
+    return scanWalFileFrom(path_, startOffset);
+}
+
+std::uint64_t LogManager::physicalFileSize() const {
+    return descriptorSize(descriptor_);
+}
+
+void LogManager::completeRecoveryScan(const WalScanResult& scan, Lsn baseDurableLsn) {
+    if (!recoveryPending_) return;
+    if (scan.truncatedTail) {
+        nextLsn_ = scan.validBytes;
+        truncatedTail_ = true;
+        truncateToLastValidRecord();
+    } else {
+        nextLsn_ = scan.validBytes;
+    }
+    bufferStartOffset_ = nextLsn_;
+    knownLsns_.clear();
+    for (const auto& record : scan.records) knownLsns_.insert(record.lsn);
+    if (isValidLsn(baseDurableLsn)) knownLsns_.insert(baseDurableLsn);
+    lastAppendedLsn_ = scan.records.empty() ? baseDurableLsn : scan.records.back().lsn;
+    durableLsn_ = lastAppendedLsn_;
+    recoveryPending_ = false;
 }
 
 void LogManager::validate() const {
