@@ -91,5 +91,8 @@ invariants, disjoint physical ownership among catalog and tables, and disjointne
 the global free list. DROP TABLE, ALTER TABLE, catalog indexes, and schema evolution are
 not implemented.
 
-Bootstrap and table creation modify several independently flushed pages and are not
-crash-atomic. Clean flush/close/reopen persistence is supported; WAL/recovery is not.
+Bootstrap and table creation modify several pages. Catalog itself remains unaware of
+WAL encoding; through the active server, DatabaseMetadataManager, BufferPoolManager,
+and RecoveryCoordinator log those changes as one implicit mutating-statement recovery
+unit. Direct standalone Catalog use without that outer coordinator guarantees clean
+flush/close/reopen persistence but is not crash-atomic.

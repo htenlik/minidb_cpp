@@ -39,7 +39,7 @@ String contents are bytes from the source; UTF-8 is not validated.
 Integer tokens retain their digit spelling and are limited to 1024 digits as a
 defensive lexical bound. The AST stores `{ negative, magnitude }`, so values including
 `4294967295`, `-9223372036854775808`, and values beyond current semantic target ranges
-never overflow during parsing. Milestone 7 will perform column-aware conversion.
+never overflow during parsing. The semantic layer performs column-aware conversion.
 
 Every token has an exact lexeme, decoded value where relevant, and a half-open source
 span. Offsets are zero-based byte offsets; lines and columns are one-based. CRLF counts
@@ -120,7 +120,7 @@ formatter supports structural tests and future executor debugging.
 
 `SqlError` is an exception carrying `SqlErrorKind::Lexer` or `Parser`, a message, and a
 source span. Its formatted text begins `line N, column M:`. Parsing stops safely at the
-first failure; there is no recovery system.
+first failure; the parser does not attempt multi-error syntax recovery.
 
 The parser accepts one optional trailing semicolon and then requires EOF. Multiple
 statements or trailing garbage are rejected. Parenthesized and unary-NOT nesting is
@@ -131,12 +131,12 @@ limited to 128 levels; flat AND/OR chains do not consume this budget.
 The AST deliberately retains SQL literals rather than constructing MiniDB++ `Value`s,
 and CREATE TABLE retains syntax-level types rather than constructing `Schema`. Table
 existence, column existence, duplicate names, primary-key legality, nullability, type
-ranges, and VARCHAR limits belong to Milestone 7.
+ranges, and VARCHAR limits are handled by the semantic layer.
 
 JOIN, qualified identifiers, aliases, projection expressions, functions, aggregates,
 DISTINCT, GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET, subqueries, UNION, multi-row VALUES,
-INSERT ... SELECT, arithmetic, CREATE INDEX, DROP, ALTER, transactions, placeholders,
-and execution are unsupported.
+INSERT ... SELECT, arithmetic, CREATE INDEX, DROP, ALTER, transactions, and
+placeholders are unsupported by the grammar.
 
 Lexing is O(source bytes), predictive parsing is O(token count), expression parsing is
 linear in expression tokens, and AST memory is O(AST nodes/source payload). No database

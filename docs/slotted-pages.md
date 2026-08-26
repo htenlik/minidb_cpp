@@ -175,7 +175,8 @@ overlap, gaps, nonzero reserved/free bytes, illegal owner or neighbor PageIds, b
 chain links, cycles, count disagreement, and live/free PageId overlap. Corruption is not
 repaired automatically.
 
-Successful flush and clean close/reopen persistence is supported. Operations that touch
-heap metadata, neighbor links, a reclaimed page, and PageAllocator metadata are not
-crash-atomic. The 11A WAL substrate is not wired to tuple mutations and there is no
-recovery protocol, so no transactional durability is claimed.
+Successful flush and clean close/reopen persistence is supported. SlottedPage and
+TupleStore do not encode WAL themselves. In the active engine, guarded mutations of
+heap metadata, neighbor links, reclaimed pages, and allocator metadata are intercepted
+by BufferPoolManager and RecoveryCoordinator for implicit statement recovery. Direct
+standalone TupleStore use without that outer coordinator is not crash-atomic.

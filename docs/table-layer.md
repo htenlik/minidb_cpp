@@ -65,7 +65,9 @@ is maintained during ordinary operations.
 Here P is heap-page count and S is a page's slot count. Catalog lookup remains a linear
 catalog scan.
 
-There is no transaction manager or production table WAL integration. A table mutation
-can modify TupleStore, SlottedPage, PageAllocator, and B+ tree pages. Best-effort
-in-process compensation does not make those changes crash-atomic. Only successful normal
-operations followed by a clean flush/close/reopen are guaranteed in this milestone.
+Table deliberately contains no transaction or WAL codec logic. A mutation can modify
+TupleStore, SlottedPage, PageAllocator, and B+ tree pages; when Table is used through
+the active server, BufferPoolManager and RecoveryCoordinator capture those guarded
+changes as one implicit WAL-backed statement recovery unit. Direct standalone Table
+use without that outer coordinator retains best-effort in-process compensation but is
+not crash-atomic.

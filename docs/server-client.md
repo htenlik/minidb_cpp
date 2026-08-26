@@ -8,10 +8,13 @@ storage engine concurrently.
 
 ## Ownership and startup
 
-`DatabaseServer` owns objects in dependency order:
+`DatabaseServer` owns objects in dependency order (with the checkpoint control sidecar
+opened before recovery):
 
 ```text
-DiskManager -> BufferPoolManager -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
+DiskManager -> LogManager -> RecoveryManager / RecoveryCoordinator
+            -> BufferPoolManager -> CheckpointManager
+            -> PageAllocator -> Catalog -> SqlEngine -> TcpServer
 ```
 
 It opens or creates the database, uses the existing catalog bootstrap, then listens.
@@ -28,7 +31,7 @@ collision-free tests, and `TcpServer::port()` reports the selected port.
 ./build/minidb_server demo.db
 ./build/minidb_server demo.db --host 127.0.0.1 --port 7432 \
     --buffer-frames 128 --lru-k 2 --checkpoint-wal-bytes 67108864 \
-    --checkpoint-statements 0
+    --checkpoint-statements 0 --wal-segment-bytes 16777216
 ```
 
 `--buffer-frames` and `--lru-k` must both be positive. Defaults are 128 frames and
@@ -38,8 +41,9 @@ page operations but is not the guaranteed full-engine configuration.
 `--checkpoint-wal-bytes` is the approximate WAL growth after the last completed sharp
 checkpoint (default 64 MiB), and `--checkpoint-statements` is an optional successful
 mutating-statement count. Zero disables either trigger. Policy runs only after COMMIT;
-there is no background or mandatory shutdown checkpoint. See
-[checkpoints.md](checkpoints.md).
+there is no background or mandatory shutdown checkpoint. `--wal-segment-bytes` selects
+the fixed WAL segment payload capacity (default 16 MiB). See
+[checkpoints.md](checkpoints.md) and [wal-segments.md](wal-segments.md).
 
 Startup prints the database path, bound address/actual port, and protocol version.
 Binding another address is an explicit operator choice.
@@ -91,14 +95,13 @@ The final query reports `PrimaryKeyLookup` and one index lookup.
 
 ## Persistence and reconnects
 
-After every successfully executed statement, the server materializes/encodes the result,
-calls `BufferPoolManager::flushAll()` and then `DiskManager::flush()`, and only then sends
-the success response. Operation guards have already left scope at this boundary. Thus a
-successful response means dirty resident pages were written through the current C++ file
-stream, and clean close/reopen tests are deterministic. This is not crash-safe durability:
-the server does not attach the 11A WAL substrate to mutations; there is no database-file
-`fsync`, transaction atomicity, or recovery, and unlogged dirty eviction may
-persist parts of a multi-page change in any order.
+Every mutating statement runs as one implicit recovery unit. Operation guards leave
+scope before commit preparation; the server returns success only after the COMMIT
+record is durable. Database pages are not forced at this boundary, and `SELECT` does
+not perform a global flush. Startup recovery REDOs durable-COMMIT winners and UNDOs a
+tail loser, so clean reconnects and tested process crashes preserve statement
+atomicity. There is still no user-visible multi-statement transaction syntax. See
+[recovery.md](recovery.md) for the exact commit boundary and limitations.
 
 A client connection can carry many sequential requests. A normal SQL error does not end
 the session. Clients may disconnect and reconnect with a new HELLO exchange; later clients

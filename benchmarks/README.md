@@ -24,6 +24,9 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--wal-payload-bytes N` | 128 | Opaque bytes per standalone WAL record |
 | `--wal-batch-size N` | 10 | Records between forces in `wal_batch_flush` |
 | `--wal-buffer-bytes N` | 65536 | LogManager memory-buffer capacity |
+| `--wal-segment-bytes N` | 16777216 | Fixed segmented-WAL payload capacity |
+| `--checkpoint-wal-bytes N` | 67108864 | Automatic checkpoint growth threshold; zero disables |
+| `--checkpoint-statements N` | 0 | Automatic checkpoint commit threshold; zero disables |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |
 | `--seed N` | 12345 | Deterministic workload seed |
 | `--repetitions N` | 1 | Fresh-database repetitions per workload |
@@ -45,7 +48,8 @@ bytes, buffer drains, writes, and fsyncs. The same configuration object records 
 and WAL payload/batch/buffer controls for controlled comparisons.
 
 Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed`,
-`recovery_full_scan`, `checkpoint_latency`, and `recovery_checkpoint_compare`.
+`recovery_full_scan`, `checkpoint_latency`, `recovery_checkpoint_compare`,
+`wal_segment_rotation`, and `wal_reclamation`.
 Transaction results include full-page record counts, WAL bytes, fsyncs, and logging
 amplification. Checkpoint results include dirty writes, required syncs, and latency; the
 comparison reports full-history versus checkpoint-tail records/bytes/time. Configure

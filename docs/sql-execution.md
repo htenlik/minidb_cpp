@@ -161,12 +161,13 @@ reopen.
 - PK UPDATE/DELETE use one index lookup plus mutation; arbitrary forms use O(N)
   discovery plus the selected mutations.
 
-This is a specific access-path rule, not a planner or optimizer. There is no transaction
-manager or WAL. Multi-page catalog/table operations are not crash atomic, and a
-multi-row UPDATE or DELETE can partially complete after an unexpected storage failure.
-All predictable binding, type, and constraint checks are performed before mutation,
-but this is not statement atomicity.
+This is a specific access-path rule, not a planner or optimizer. There is no
+user-visible transaction manager. In the active server, `RecoveryCoordinator` wraps
+each mutating statement in an implicit WAL-backed recovery unit: a durable COMMIT is
+recovered as committed, while a statement without durable COMMIT is undone. Direct
+standalone construction of the semantic/storage layers without that coordinator retains
+only their local validation and compensation behavior.
 
 Unsupported features remain those outside the Milestone 6 grammar: JOIN, aggregation,
 GROUP BY, ORDER BY, LIMIT, aliases, subqueries, schema changes, secondary indexes,
-transactions, networking, and query planning.
+user-visible transactions, and query planning.

@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
             if (line == ".alloc") { const auto id = pager.allocatePage(); std::cout << "allocated page " << id << "\n"; continue; }
             if (line == ".flush") { pager.flushAll(); std::cout << "flushed\n"; continue; }
             if (line.empty()) continue;
-            std::cout << "Unknown command. SQL parser comes in a later milestone.\n";
+            std::cout << "Unknown command. This low-level pager CLI does not execute SQL.\n";
         }
         pager.flushAll();
         return 0;
