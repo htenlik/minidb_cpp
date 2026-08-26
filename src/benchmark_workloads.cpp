@@ -5,6 +5,7 @@
 #include "minidb/log_manager.hpp"
 #include "minidb/minidb_client.hpp"
 #include "minidb/page_allocator.hpp"
+#include "minidb/page_access.hpp"
 #include "minidb/persistent_bplus_tree.hpp"
 #include "minidb/sql_executor.hpp"
 #include "minidb/table.hpp"
@@ -1268,7 +1269,9 @@ BenchmarkResult runTransactional(
     return result;
 }
 
-BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
+BenchmarkResult runRecoveryBenchmark(
+    const BenchmarkConfig& config,
+    const std::string& name) {
     removeDatabase(config);
     {
         net::DatabaseServer server(
@@ -1282,6 +1285,16 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
                               config.walUpdateMode});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
+        if (name == "recovery_loser") {
+            server.recoveryCoordinator().beginStatement();
+            const auto pageId = server.pageAllocator().allocatePage();
+            {
+                auto page = requireWritePage(
+                    server.bufferPool(), pageId, "prepare recovery loser benchmark");
+                page.data()[0] = std::byte{0xA5};
+            }
+            server.bufferPool().flushAll();
+        }
     }
     const auto walBytes = walPhysicalBytes(config.databasePath);
     std::vector<std::uint64_t> latency;
@@ -1306,7 +1319,7 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
         validation.catalog().validate();
     }
     BenchmarkResult result;
-    result.benchmark = "recovery_full_scan";
+    result.benchmark = name;
     result.storageBackend = "physical_recovery";
     result.seed = config.seed;
     result.configuration = config;
@@ -1440,7 +1453,9 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     if (name == "wal_reclamation") return runWalReclamation(config);
     if (name.starts_with("wal_")) return runWal(config, name);
     if (name.starts_with("txn_")) return runTransactional(config, name);
-    if (name == "recovery_full_scan") return runRecoveryBenchmark(config);
+    if (name == "recovery_full_scan" || name == "recovery_loser") {
+        return runRecoveryBenchmark(config, name);
+    }
     if (name == "checkpoint_latency") return runCheckpointLatency(config);
     if (name == "recovery_checkpoint_compare") {
         return runCheckpointRecoveryComparison(config);

@@ -269,7 +269,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
         "wal_segment_rotation", "wal_reclamation",
         "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
-        "txn_bplus_insert", "txn_mixed", "recovery_full_scan",
+        "txn_bplus_insert", "txn_mixed", "recovery_full_scan", "recovery_loser",
         "checkpoint_latency", "recovery_checkpoint_compare",
     };
 }

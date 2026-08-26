@@ -6,7 +6,9 @@
 
 int main() {
     try {
-        for (const auto& name : {std::string("txn_insert"), std::string("recovery_full_scan")}) {
+        for (const auto& name : {std::string("txn_insert"),
+                                 std::string("recovery_full_scan"),
+                                 std::string("recovery_loser")}) {
             for (const auto mode : {minidb::WalUpdateMode::FullPage,
                                     minidb::WalUpdateMode::ByteRange}) {
             minidb::bench::BenchmarkConfig config;
@@ -51,6 +53,9 @@ int main() {
                 minidb::test::require(
                     results[0].recovery.recovery.recordsAnalyzed > 0
                         && results[0].recovery.recovery.pagesRedone > 0
+                        && (name != "recovery_loser"
+                            || (results[0].recovery.recovery.loserTransactions == 1
+                                && results[0].recovery.recovery.pagesTruncated > 0))
                         && results[0].timing.operationCount == 1,
                     "Recovery benchmark omitted analysis/REDO metrics");
             }
