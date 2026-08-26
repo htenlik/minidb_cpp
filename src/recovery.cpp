@@ -382,13 +382,15 @@ void RecoveryCoordinator::notePageWriteIntent(
 
 void RecoveryCoordinator::ensureBeginLogged() {
     if (isValidLsn(active_->beginLsn)) return;
+    const auto payload = encodeBeginLogPayload(BeginLogPayload{active_->startPageCount});
     active_->beginLsn = logManager_.append(LogRecord{
         LogRecordType::Begin,
         active_->transactionId,
         INVALID_LSN,
-        encodeBeginLogPayload(BeginLogPayload{active_->startPageCount}),
+        payload,
         INVALID_LSN,
     });
+    stats_.walTotalBytesGenerated += wal_record_layout::HEADER_SIZE + payload.size();
     active_->previousLsn = active_->beginLsn;
     recoveryFailPoint("after_begin_append");
 }
@@ -397,9 +399,11 @@ Lsn RecoveryCoordinator::appendTransactionRecord(
     LogRecordType type,
     std::vector<std::byte> payload) {
     ensureBeginLogged();
+    const auto recordBytes = wal_record_layout::HEADER_SIZE + payload.size();
     const auto lsn = logManager_.append(LogRecord{
         type, active_->transactionId, active_->previousLsn, std::move(payload), INVALID_LSN,
     });
+    stats_.walTotalBytesGenerated += recordBytes;
     active_->previousLsn = lsn;
     return lsn;
 }
@@ -413,29 +417,47 @@ Lsn RecoveryCoordinator::preparePageForWrite(
     auto& state = found->second;
     const auto& comparison = state.latestAfter.has_value() ? *state.latestAfter : state.before;
     if (comparison == after) return state.latestLsn;
+    std::uint64_t logicalBytesChanged = 0;
     for (std::size_t offset = 0; offset < after.size(); ++offset) {
-        if (comparison[offset] != after[offset]) state.touchedOffsets[offset] = true;
+        if (comparison[offset] != after[offset]) {
+            state.touchedOffsets[offset] = true;
+            ++logicalBytesChanged;
+        }
     }
     Lsn lsn = INVALID_LSN;
+    std::vector<std::byte> payload;
     if (updateMode_ == WalUpdateMode::FullPage) {
-        lsn = appendTransactionRecord(
-            LogRecordType::PageUpdate,
-            encodePageUpdateLogPayload(PageUpdateLogPayload{
-                pageId, state.beforeExisted, state.before, after,
-            }));
+        payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
+            pageId, state.beforeExisted, state.before, after,
+        });
         stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
+        stats_.changedBytes += database_format::PAGE_SIZE;
+        ++stats_.fullPageUpdateRecords;
     } else {
-        lsn = appendTransactionRecord(
-            LogRecordType::PageDeltaUpdate,
-            encodePageDeltaUpdateLogPayload(PageDeltaUpdateLogPayload{
-                pageId,
-                state.beforeExisted,
-                computePageDelta(state.before, after, state.touchedOffsets),
-            }));
+        const auto deltaStart = std::chrono::steady_clock::now();
+        auto ranges = computePageDelta(state.before, after, state.touchedOffsets);
+        stats_.deltaComputationNs += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - deltaStart).count());
+        for (const auto& range : ranges) stats_.changedBytes += range.length;
+        stats_.rangeCount += ranges.size();
+        stats_.deltaRangeCounts.push_back(ranges.size());
+        payload = encodePageDeltaUpdateLogPayload(PageDeltaUpdateLogPayload{
+            pageId, state.beforeExisted, std::move(ranges),
+        });
+        ++stats_.byteRangeUpdateRecords;
     }
+    const auto payloadBytes = payload.size();
+    const auto recordType = updateMode_ == WalUpdateMode::FullPage
+        ? LogRecordType::PageUpdate : LogRecordType::PageDeltaUpdate;
+    lsn = appendTransactionRecord(recordType, std::move(payload));
+    stats_.logicalBytesChanged += logicalBytesChanged;
+    stats_.walUpdatePayloadBytes += payloadBytes;
+    stats_.updateRecordBytes.push_back(wal_record_layout::HEADER_SIZE + payloadBytes);
     state.latestAfter = after;
     state.latestLsn = lsn;
     ++stats_.pageUpdateRecords;
+    ++stats_.updateRecordCount;
     recoveryFailPoint("after_page_update_append");
     return lsn;
 }
@@ -504,6 +526,7 @@ void RecoveryCoordinator::rollbackStatement() {
         const auto abortLsn = logManager_.append(LogRecord{
             LogRecordType::Abort, transactionId, previousLsn, {}, INVALID_LSN,
         });
+        stats_.walTotalBytesGenerated += wal_record_layout::HEADER_SIZE;
         logManager_.flushUpTo(abortLsn);
         recoveryFailPoint("rollback_after_abort_sync");
     }

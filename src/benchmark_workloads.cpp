@@ -46,6 +46,20 @@ std::uint64_t totalLatency(const std::vector<std::uint64_t>& latencies) {
     return std::accumulate(latencies.begin(), latencies.end(), std::uint64_t{0});
 }
 
+RecoveryBenchmarkMetrics::Distribution summarizeDistribution(
+    const std::vector<std::uint64_t>& samples) {
+    if (samples.empty()) return {};
+    const auto total = std::accumulate(samples.begin(), samples.end(), std::uint64_t{0});
+    return RecoveryBenchmarkMetrics::Distribution{
+        samples.size(),
+        static_cast<double>(total) / static_cast<double>(samples.size()),
+        nearestRankPercentile(samples, 50),
+        nearestRankPercentile(samples, 95),
+        nearestRankPercentile(samples, 99),
+        *std::max_element(samples.begin(), samples.end()),
+    };
+}
+
 void removeDatabase(const BenchmarkConfig& config) {
     std::error_code error;
     std::filesystem::remove(config.databasePath, error);
@@ -1049,7 +1063,8 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
                 static_cast<std::size_t>(config.lruK),
                 config.checkpointWalBytes,
                 config.checkpointStatements,
-                config.walSegmentBytes});
+                config.walSegmentBytes,
+                config.walUpdateMode});
         server.start();
         std::exception_ptr serverError;
         std::thread serverThread([&] {
@@ -1160,10 +1175,12 @@ BenchmarkResult runTransactional(
                               static_cast<std::size_t>(config.lruK),
                               config.checkpointWalBytes,
                               config.checkpointStatements,
-                              config.walSegmentBytes});
+                              config.walSegmentBytes,
+                              config.walUpdateMode});
         auto& engine = server.sqlEngine();
         createUsers(engine);
         const auto setupRows = name == "txn_insert" ? 0U
+            : name == "txn_bplus_insert" ? config.rows
             : std::max(config.rows, config.operations);
         populateUsers(engine, setupRows);
         server.bufferPool().flushAll();
@@ -1174,15 +1191,21 @@ BenchmarkResult runTransactional(
         server.recoveryCoordinator().resetStats();
         server.checkpointManager().resetStats();
         for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
-            if (name == "txn_insert") {
+            if (name == "txn_insert" || name == "txn_bplus_insert") {
+                const auto key = name == "txn_insert" ? operation : setupRows + operation;
                 measure(latencies, [&] { static_cast<void>(engine.execute(
-                    "INSERT INTO users VALUES (" + std::to_string(operation)
-                    + ", 'user" + std::to_string(operation) + "', "
-                    + std::to_string(operation) + ", TRUE)")); });
+                    "INSERT INTO users VALUES (" + std::to_string(key)
+                    + ", 'user" + std::to_string(key) + "', "
+                    + std::to_string(key) + ", TRUE)")); });
             } else if (name == "txn_update") {
                 measure(latencies, [&] { static_cast<void>(engine.execute(
                     "UPDATE users SET score = " + std::to_string(operation + 1000U)
                     + " WHERE id = " + std::to_string(operation) )); });
+            } else if (name == "txn_varchar_update") {
+                measure(latencies, [&] { static_cast<void>(engine.execute(
+                    "UPDATE users SET username = 'updated_"
+                    + std::to_string(operation) + "' WHERE id = "
+                    + std::to_string(operation))); });
             } else if (name == "txn_delete") {
                 measure(latencies, [&] { static_cast<void>(engine.execute(
                     "DELETE FROM users WHERE id = " + std::to_string(operation))); });
@@ -1209,16 +1232,28 @@ BenchmarkResult runTransactional(
         result = finish(
             name, config, std::move(latencies), {}, before, after,
             0.0, 0.0, server.bufferPool().stats());
-        result.storageBackend = "buffer_pool_full_page_wal";
+        result.storageBackend = config.walUpdateMode == WalUpdateMode::FullPage
+            ? "buffer_pool_full_page_wal" : "buffer_pool_byte_range_wal";
         result.wal.manager = server.logManager().stats();
         result.wal.walRecords = result.wal.manager.recordsAppended;
         result.recovery.transactions = server.recoveryCoordinator().stats();
         result.checkpoint = server.checkpointManager().stats();
         result.recovery.walBytes = result.wal.manager.bytesAppended;
-        result.recovery.logicalChangedBytes = config.operations * 32U;
-        result.recovery.loggingAmplification =
-            static_cast<double>(result.recovery.walBytes)
-            / static_cast<double>(result.recovery.logicalChangedBytes);
+        result.recovery.logicalChangedBytes =
+            result.recovery.transactions.logicalBytesChanged;
+        if (result.recovery.logicalChangedBytes != 0) {
+            result.recovery.payloadAmplification =
+                static_cast<double>(result.recovery.transactions.walUpdatePayloadBytes)
+                / static_cast<double>(result.recovery.logicalChangedBytes);
+            result.recovery.totalWalAmplification =
+                static_cast<double>(result.recovery.walBytes)
+                / static_cast<double>(result.recovery.logicalChangedBytes);
+        }
+        result.recovery.loggingAmplification = result.recovery.totalWalAmplification;
+        result.recovery.updateRecordBytes = summarizeDistribution(
+            result.recovery.transactions.updateRecordBytes);
+        result.recovery.rangesPerDelta = summarizeDistribution(
+            result.recovery.transactions.deltaRangeCounts);
         const auto checkpoint = server.checkpointControl().select(server.logManager());
         const auto recoveryStart = checkpoint.slot.has_value()
             ? checkpoint.slot->recoveryStartOffset : server.logManager().oldestRetainedLsn();
@@ -1243,7 +1278,8 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
                               static_cast<std::size_t>(config.lruK),
                               config.checkpointWalBytes,
                               config.checkpointStatements,
-                              config.walSegmentBytes});
+                              config.walSegmentBytes,
+                              config.walUpdateMode});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
     }
@@ -1265,7 +1301,8 @@ BenchmarkResult runRecoveryBenchmark(const BenchmarkConfig& config) {
                               static_cast<std::size_t>(config.lruK),
                               config.checkpointWalBytes,
                               config.checkpointStatements,
-                              config.walSegmentBytes});
+                              config.walSegmentBytes,
+                              config.walUpdateMode});
         validation.catalog().validate();
     }
     BenchmarkResult result;
@@ -1292,7 +1329,8 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK), 0, 0,
-                              config.walSegmentBytes});
+                              config.walSegmentBytes,
+                              config.walUpdateMode});
         static_cast<void>(server.checkpointManager().checkpoint());
         server.checkpointManager().resetStats();
         server.bufferPool().resetStats();
@@ -1327,7 +1365,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK), 0, 0,
-                              config.walSegmentBytes});
+                              config.walSegmentBytes,
+                              config.walUpdateMode});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
         static_cast<void>(server.checkpointManager().checkpoint());
@@ -1363,7 +1402,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
             net::ServerConfig{"127.0.0.1", 0, 8,
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK), 0, 0,
-                              config.walSegmentBytes});
+                              config.walSegmentBytes,
+                              config.walUpdateMode});
         validation.catalog().validate();
     }
     BenchmarkResult result;

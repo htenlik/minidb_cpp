@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 namespace minidb {
 
@@ -55,8 +56,19 @@ struct TransactionRuntimeStats {
     std::uint64_t pagesFirstWritten = 0;
     std::uint64_t pageUpdateRecords = 0;
     std::uint64_t fullPageImageBytes = 0;
+    std::uint64_t logicalBytesChanged = 0;
+    std::uint64_t walUpdatePayloadBytes = 0;
+    std::uint64_t walTotalBytesGenerated = 0;
+    std::uint64_t rangeCount = 0;
+    std::uint64_t changedBytes = 0;
+    std::uint64_t updateRecordCount = 0;
+    std::uint64_t fullPageUpdateRecords = 0;
+    std::uint64_t byteRangeUpdateRecords = 0;
+    std::uint64_t deltaComputationNs = 0;
     std::uint64_t commitFsyncs = 0;
     std::uint64_t rollbackDatabaseWrites = 0;
+    std::vector<std::uint64_t> updateRecordBytes;
+    std::vector<std::uint64_t> deltaRangeCounts;
 };
 
 class RecoveryManager {

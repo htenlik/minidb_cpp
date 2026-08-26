@@ -35,6 +35,7 @@ struct BenchmarkConfig {
     std::uint64_t walBatchSize = 10;
     std::uint64_t walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
     std::uint32_t walSegmentBytes = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY;
+    WalUpdateMode walUpdateMode = WalUpdateMode::FullPage;
     std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t checkpointStatements = 0;
     std::uint64_t seed = 12'345;
@@ -93,12 +94,25 @@ struct WalBenchmarkMetrics {
 };
 
 struct RecoveryBenchmarkMetrics {
+    struct Distribution {
+        std::uint64_t count = 0;
+        double mean = 0.0;
+        std::uint64_t p50 = 0;
+        std::uint64_t p95 = 0;
+        std::uint64_t p99 = 0;
+        std::uint64_t maximum = 0;
+    };
+
     TransactionRuntimeStats transactions{};
     RecoveryStats recovery{};
     RecoveryStats fullScanRecovery{};
     std::uint64_t walBytes = 0;
     std::uint64_t logicalChangedBytes = 0;
     double loggingAmplification = 0.0;
+    double payloadAmplification = 0.0;
+    double totalWalAmplification = 0.0;
+    Distribution updateRecordBytes{};
+    Distribution rangesPerDelta{};
 };
 
 struct BenchmarkResult {

@@ -77,6 +77,7 @@ void testConfigurationParsing() {
         "--wal-payload-bytes", "512", "--wal-batch-size", "10",
         "--wal-buffer-bytes", "4096",
         "--wal-segment-bytes", "16384",
+        "--wal-update-mode", "byte-range",
         "--checkpoint-wal-bytes", "8192", "--checkpoint-statements", "17",
         "--seed", "99", "--repetitions", "2",
         "--db", "bench.db", "--json", "out.json", "--tuple-sizes", "medium",
@@ -92,6 +93,7 @@ void testConfigurationParsing() {
             && config.walPayloadBytes == 512 && config.walBatchSize == 10
             && config.walBufferBytes == 4096
             && config.walSegmentBytes == 16384
+            && config.walUpdateMode == minidb::WalUpdateMode::ByteRange
             && config.checkpointWalBytes == 8192 && config.checkpointStatements == 17
             && config.repetitions == 2 && config.databasePath == "bench.db"
             && config.jsonPath == "out.json" && config.tupleSizes == "medium"
@@ -118,6 +120,10 @@ void testConfigurationParsing() {
     reject([] { static_cast<void>(parseArguments(
         std::vector<std::string_view>{"--benchmark", "pager", "--suite", "quick"})); },
         "benchmark and suite together were accepted");
+    reject([] { static_cast<void>(parseArguments(
+        std::vector<std::string_view>{
+            "--benchmark", "txn_insert", "--wal-update-mode", "delta"})); },
+        "unknown WAL update mode was accepted");
 }
 
 void testJson() {
@@ -134,6 +140,7 @@ void testJson() {
     result.configuration.operations = 1;
     result.configuration.reopenInterval = 17;
     result.configuration.repetitions = 3;
+    result.configuration.walUpdateMode = minidb::WalUpdateMode::ByteRange;
     result.timing = summarizeTimings({10}, 10);
     result.pager = minidb::PagerStats{1, 2, 3, 4, 5, 6, 7, 8, 9};
     result.buffer.pageRequests = 10;
@@ -162,6 +169,7 @@ void testJson() {
                 != std::string::npos
             && json.find("\"reopen_interval\":17") != std::string::npos
             && json.find("\"repetitions\":3") != std::string::npos
+            && json.find("\"wal_update_mode\":\"byte-range\"") != std::string::npos
             && json.find("\"dirty_marks\":6") != std::string::npos
             && json.find("\"hit_ratio\":0.7") != std::string::npos
             && json.find("\"capacity\":4") != std::string::npos

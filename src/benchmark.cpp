@@ -179,6 +179,16 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
                 throw std::invalid_argument("WAL segment size exceeds uint32 range");
             }
             result.config.walSegmentBytes = static_cast<std::uint32_t>(value);
+        } else if (argument == "--wal-update-mode") {
+            const auto mode = requireValue(arguments, index, argument);
+            if (mode == "full-page") {
+                result.config.walUpdateMode = WalUpdateMode::FullPage;
+            } else if (mode == "byte-range") {
+                result.config.walUpdateMode = WalUpdateMode::ByteRange;
+            } else {
+                throw std::invalid_argument(
+                    "wal update mode must be 'full-page' or 'byte-range'");
+            }
         } else if (argument == "--checkpoint-wal-bytes") {
             result.config.checkpointWalBytes = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
@@ -231,6 +241,7 @@ std::string usageText() {
         "  --wal-batch-size N    records per synchronous batch flush (default 10)\n"
         "  --wal-buffer-bytes N  in-memory WAL buffer capacity (default 65536)\n"
         "  --wal-segment-bytes N fixed WAL segment payload capacity (default 16777216)\n"
+        "  --wal-update-mode MODE full-page (default) or byte-range page updates\n"
         "  --checkpoint-wal-bytes N automatic checkpoint WAL-growth bytes; 0 disables\n"
         "  --checkpoint-statements N automatic checkpoint commit count; 0 disables\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
@@ -257,7 +268,8 @@ std::vector<std::string> supportedBenchmarkNames() {
         "mixed", "mixed_read_heavy", "mixed_write_heavy",
         "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
         "wal_segment_rotation", "wal_reclamation",
-        "txn_insert", "txn_update", "txn_delete", "txn_mixed", "recovery_full_scan",
+        "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
+        "txn_bplus_insert", "txn_mixed", "recovery_full_scan",
         "checkpoint_latency", "recovery_checkpoint_compare",
     };
 }
@@ -381,6 +393,9 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_batch_size\":" << config.walBatchSize
                << ",\"wal_buffer_bytes\":" << config.walBufferBytes
                << ",\"wal_segment_bytes\":" << config.walSegmentBytes
+               << ",\"wal_update_mode\":\""
+               << (config.walUpdateMode == WalUpdateMode::FullPage
+                       ? "full-page" : "byte-range") << '"'
                << ",\"checkpoint_wal_bytes\":" << config.checkpointWalBytes
                << ",\"checkpoint_statements\":" << config.checkpointStatements
                << ",\"checkpoint_enabled\":"
@@ -437,9 +452,42 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.transactions.pageUpdateRecords
                << ",\"full_page_image_bytes\":"
                << result.recovery.transactions.fullPageImageBytes
+               << ",\"logical_bytes_changed\":"
+               << result.recovery.transactions.logicalBytesChanged
+               << ",\"wal_update_payload_bytes\":"
+               << result.recovery.transactions.walUpdatePayloadBytes
+               << ",\"wal_total_bytes_generated\":"
+               << result.recovery.transactions.walTotalBytesGenerated
+               << ",\"range_count\":" << result.recovery.transactions.rangeCount
+               << ",\"changed_bytes\":" << result.recovery.transactions.changedBytes
+               << ",\"update_record_count\":"
+               << result.recovery.transactions.updateRecordCount
+               << ",\"full_page_update_records\":"
+               << result.recovery.transactions.fullPageUpdateRecords
+               << ",\"byte_range_update_records\":"
+               << result.recovery.transactions.byteRangeUpdateRecords
+               << ",\"delta_computation_ns\":"
+               << result.recovery.transactions.deltaComputationNs
                << ",\"wal_bytes\":" << result.recovery.walBytes
                << ",\"logical_changed_bytes\":" << result.recovery.logicalChangedBytes
                << ",\"logging_amplification\":" << result.recovery.loggingAmplification
+               << ",\"payload_amplification\":" << result.recovery.payloadAmplification
+               << ",\"total_wal_amplification\":"
+               << result.recovery.totalWalAmplification
+               << ",\"update_record_bytes\":{\"count\":"
+               << result.recovery.updateRecordBytes.count
+               << ",\"mean\":" << result.recovery.updateRecordBytes.mean
+               << ",\"p50\":" << result.recovery.updateRecordBytes.p50
+               << ",\"p95\":" << result.recovery.updateRecordBytes.p95
+               << ",\"p99\":" << result.recovery.updateRecordBytes.p99
+               << ",\"max\":" << result.recovery.updateRecordBytes.maximum << '}'
+               << ",\"ranges_per_delta\":{\"count\":"
+               << result.recovery.rangesPerDelta.count
+               << ",\"mean\":" << result.recovery.rangesPerDelta.mean
+               << ",\"p50\":" << result.recovery.rangesPerDelta.p50
+               << ",\"p95\":" << result.recovery.rangesPerDelta.p95
+               << ",\"p99\":" << result.recovery.rangesPerDelta.p99
+               << ",\"max\":" << result.recovery.rangesPerDelta.maximum << '}'
                << ",\"records_analyzed\":" << result.recovery.recovery.recordsAnalyzed
                << ",\"pages_redone\":" << result.recovery.recovery.pagesRedone
                << ",\"pages_undone\":" << result.recovery.recovery.pagesUndone
@@ -502,6 +550,9 @@ std::string formatHuman(const BenchmarkResult& result) {
            << "storage backend: " << result.storageBackend << '\n'
            << "seed/mode: " << result.seed << '/'
            << (result.configuration.cacheMode == CacheMode::Hot ? "hot" : "reopen") << '\n'
+           << "WAL update mode: "
+           << (result.configuration.walUpdateMode == WalUpdateMode::FullPage
+                   ? "full-page" : "byte-range") << '\n'
            << "environment: " << result.environment.versionContext << ", git "
            << result.environment.gitCommit << ", " << result.environment.compiler << ", "
            << result.environment.buildType << ", " << result.environment.platform << '\n'
@@ -553,6 +604,23 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.recovery.transactions.transactionsCommitted << '/'
            << result.recovery.transactions.pageUpdateRecords << '/'
            << result.recovery.transactions.fullPageImageBytes << '\n'
+           << "txn logical/payload/total WAL bytes, ranges/represented bytes/diff ns: "
+           << result.recovery.transactions.logicalBytesChanged << '/'
+           << result.recovery.transactions.walUpdatePayloadBytes << '/'
+           << result.recovery.transactions.walTotalBytesGenerated << '/'
+           << result.recovery.transactions.rangeCount << '/'
+           << result.recovery.transactions.changedBytes << '/'
+           << result.recovery.transactions.deltaComputationNs << '\n'
+           << "update record bytes mean/p50/p95/p99/max: "
+           << result.recovery.updateRecordBytes.mean << '/'
+           << result.recovery.updateRecordBytes.p50 << '/'
+           << result.recovery.updateRecordBytes.p95 << '/'
+           << result.recovery.updateRecordBytes.p99 << '/'
+           << result.recovery.updateRecordBytes.maximum << '\n'
+           << "delta ranges mean/p95/max: "
+           << result.recovery.rangesPerDelta.mean << '/'
+           << result.recovery.rangesPerDelta.p95 << '/'
+           << result.recovery.rangesPerDelta.maximum << '\n'
            << "recovery analyzed/redone/undone/total ns: "
            << result.recovery.recovery.recordsAnalyzed << '/'
            << result.recovery.recovery.pagesRedone << '/'
@@ -570,9 +638,11 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.checkpoint.checkpointDurationNs << '/'
            << result.checkpoint.checkpointMaxDurationNs << '/'
            << result.checkpoint.controlFileSyncs << '\n'
-           << "WAL/logical bytes and amplification: " << result.recovery.walBytes << '/'
+           << "WAL/logical bytes and total/payload amplification: "
+           << result.recovery.walBytes << '/'
            << result.recovery.logicalChangedBytes << '/'
-           << result.recovery.loggingAmplification << '\n'
+           << result.recovery.totalWalAmplification << '/'
+           << result.recovery.payloadAmplification << '\n'
            << "storage before pages/bytes/free/resident: "
            << result.storageBefore.databasePages << '/' << result.storageBefore.databaseBytes
            << '/' << result.storageBefore.freePages << '/'
@@ -603,7 +673,7 @@ EnvironmentMetadata currentEnvironment() {
     const std::string buildType = std::string(MINIDB_BUILD_TYPE).empty()
         ? "unspecified" : MINIDB_BUILD_TYPE;
     return EnvironmentMetadata{
-        "v0.1.0 frozen MVP + Milestone 11C.2 segmented WAL",
+        "MiniDB++ WAL logging experiment",
         MINIDB_GIT_COMMIT,
         __VERSION__,
         buildType,

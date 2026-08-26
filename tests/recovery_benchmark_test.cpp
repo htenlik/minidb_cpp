@@ -7,11 +7,14 @@
 int main() {
     try {
         for (const auto& name : {std::string("txn_insert"), std::string("recovery_full_scan")}) {
+            for (const auto mode : {minidb::WalUpdateMode::FullPage,
+                                    minidb::WalUpdateMode::ByteRange}) {
             minidb::bench::BenchmarkConfig config;
             config.benchmark = name;
             config.rows = 8;
             config.operations = 6;
             config.bufferFrames = 4;
+            config.walUpdateMode = mode;
             config.databasePath = (std::filesystem::temp_directory_path()
                 / ("minidb_recovery_benchmark_" + name + ".db")).string();
             const auto results = minidb::bench::runConfiguredBenchmarks(config);
@@ -21,9 +24,29 @@ int main() {
                 minidb::test::require(
                     results[0].recovery.transactions.transactionsCommitted == 6
                         && results[0].recovery.transactions.pageUpdateRecords > 0
+                        && results[0].recovery.transactions.updateRecordCount > 0
+                        && results[0].recovery.transactions.logicalBytesChanged > 0
+                        && results[0].recovery.transactions.walUpdatePayloadBytes > 0
+                        && results[0].recovery.updateRecordBytes.count > 0
                         && results[0].recovery.walBytes > 0
+                        && results[0].recovery.transactions.walTotalBytesGenerated
+                            == results[0].recovery.walBytes
                         && results[0].recovery.loggingAmplification > 1.0,
                     "Transaction benchmark omitted WAL/amplification diagnostics");
+                if (mode == minidb::WalUpdateMode::ByteRange) {
+                    minidb::test::require(
+                        results[0].recovery.transactions.byteRangeUpdateRecords
+                                == results[0].recovery.transactions.updateRecordCount
+                            && results[0].recovery.rangesPerDelta.count
+                                == results[0].recovery.transactions.updateRecordCount,
+                        "Byte-range benchmark omitted range/diff diagnostics");
+                } else {
+                    minidb::test::require(
+                        results[0].recovery.transactions.fullPageUpdateRecords
+                                == results[0].recovery.transactions.updateRecordCount
+                            && results[0].recovery.rangesPerDelta.count == 0,
+                        "Full-page benchmark reported byte-range diagnostics");
+                }
             } else {
                 minidb::test::require(
                     results[0].recovery.recovery.recordsAnalyzed > 0
@@ -36,6 +59,7 @@ int main() {
                 json.find("\"logging_amplification\"") != std::string::npos
                     && json.find("\"analysis_ns\"") != std::string::npos,
                 "Recovery benchmark JSON omitted diagnostics");
+            }
         }
         std::cout << "recovery_benchmark_test passed\n";
         return 0;
