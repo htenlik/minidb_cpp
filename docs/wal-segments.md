@@ -85,7 +85,7 @@ small and not rewritten during ordinary appends.
 | 16 | 4 | persisted segment payload capacity |
 | 20 | 4 | flags, zero |
 | 24 | 8 | first retained segment ID |
-| 32 | 8 | first retained logical LSN (`64` native; migration checkpoint BEGIN otherwise) |
+| 32 | 8 | store's original logical start (`64` native; migration checkpoint BEGIN otherwise) |
 | 40 | 8 | first migrated legacy LSN, or `INVALID_LSN` for a native store |
 | 48 | 8 | reserved zero |
 | 56 | 4 | CRC32C with this field zeroed |
