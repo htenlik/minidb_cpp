@@ -2,8 +2,7 @@
 
 MiniDB++ is a relational database engine built from scratch in C++20 to explore
 database storage, indexing, query execution, buffering, durability, and crash recovery.
-It is an educational systems project with explicit binary formats and deliberately
-visible storage-engine boundaries—not a production database.
+Its design emphasizes explicit binary formats and visible storage-engine boundaries.
 
 ## Highlights
 
@@ -146,7 +145,7 @@ and `WritePageGuard` release that pin through RAII. Write guards carry dirty-pag
 Only unpinned frames are evictable, and a dirty victim is written after the WAL rule is
 satisfied. See [buffer-pool.md](docs/buffer-pool.md).
 
-## Durability and crash recovery
+## WAL and crash recovery
 
 MiniDB++ treats each mutating SQL statement as one implicit recovery unit; it does not
 expose user-managed transactions. Physical WAL records contain complete 4096-byte page
@@ -163,18 +162,22 @@ no durable COMMIT -> recover the statement as aborted
 ```
 
 A successful mutation is returned to the client only after its COMMIT record is
-fsynced. Sharp, quiescent checkpoints flush the bounded pool and publish a double-slot
-recovery pointer. The WAL is split into fixed-capacity segments; after checkpoint
-publication, obsolete whole segments behind the retained recovery boundary are safely
-reclaimed. This is a correctness-first full-page design and does not claim ARIES,
+fsynced. This is a correctness-first full-page design and does not claim ARIES,
 general transactions, or crash-safe operation without the WAL sidecars.
 
 Recovery is tested by real subprocess termination with `_exit`, bypassing normal
 destructors. Directed cases include crashes before and after COMMIT fsync, dirty STEAL
 before commit, NO-FORCE winners, repeated crashes during REDO or UNDO, checkpoint
 publication boundaries, legacy-WAL migration, segment rotation, and reclamation.
-See [wal.md](docs/wal.md), [recovery.md](docs/recovery.md),
-[checkpoints.md](docs/checkpoints.md), and [wal-segments.md](docs/wal-segments.md).
+See [wal.md](docs/wal.md) and [recovery.md](docs/recovery.md).
+
+## Checkpoints and segmented WAL
+
+Sharp, quiescent checkpoints flush the bounded pool and publish a double-slot recovery
+pointer. The WAL is split into fixed-capacity segments; after checkpoint publication,
+obsolete whole segments behind the retained recovery boundary are safely reclaimed.
+See [checkpoints.md](docs/checkpoints.md) and
+[wal-segments.md](docs/wal-segments.md).
 
 ## Benchmarks
 
@@ -205,9 +208,9 @@ ctest --test-dir build --output-on-failure
 
 The suite covers byte-level format validation, deterministic state models, randomized
 differential tests, malformed and fuzz-like inputs, real reopen boundaries, TCP
-integration, and subprocess crash recovery. The clean Release verification for
-`v0.2.0` runs 54 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer
-builds are also used during release verification.
+integration, and subprocess crash recovery. The current clean Release verification runs
+54 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
+used during release verification.
 
 ## Documentation
 
@@ -223,7 +226,7 @@ builds are also used during release verification.
 - [Server and client](docs/server-client.md)
 - [SQL parsing](docs/sql-parser.md) and [execution](docs/sql-execution.md)
 
-## Known limitations
+## Current limitations
 
 - Database execution is single-threaded, with at most one active mutating statement.
 - There is no user-visible transaction syntax, MVCC, locking, or isolation model.
@@ -234,24 +237,12 @@ builds are also used during release verification.
 - The TCP endpoint has no TLS, authentication, authorization, or multi-client execution;
   it is intended for local development and protocol experimentation.
 
-## Roadmap
+## Future work
 
-Completed broad phases:
-
-- Persistent page, tuple-heap, catalog, and primary-index storage
-- SQL execution and versioned TCP client/server protocol
-- Bounded buffer pool with LRU-K
-- WAL, crash recovery, sharp checkpoints, and segmented WAL lifecycle
-
-Future research directions include finer-grained logging and recovery experiments,
-concurrency and explicit transactions, additional query/index capabilities, and
-storage-performance experiments.
-
-## Project history
-
-- `v0.1.0` is the frozen original end-to-end MVP.
-- `v0.2.0` is the first public portfolio release, adding the bounded active storage
-  path, durability/recovery, checkpoints, segmented WAL, tests, and observability work.
+- Finer-grained WAL and recovery experiments
+- Persistent pageLSNs and more advanced checkpointing
+- Multi-transaction concurrency and isolation
+- Additional indexes and query-planning functionality
 
 ## Development
 
@@ -259,3 +250,7 @@ The project uses C++20 and CMake. Keep normal builds warning-clean under
 `-Wall -Wextra -Wpedantic`, preserve documented persistent and wire formats, and add
 focused tests for behavioral or format changes. Generated builds, database files, WAL
 sidecars, and benchmark JSON are intentionally ignored.
+
+## License
+
+MiniDB++ is available under the [MIT License](LICENSE).
