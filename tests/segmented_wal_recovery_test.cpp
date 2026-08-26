@@ -18,7 +18,9 @@ namespace {
 using minidb::test::require;
 
 minidb::net::ServerConfig config(
-    std::uint32_t segmentBytes, std::size_t frames = 4) {
+    std::uint32_t segmentBytes,
+    std::size_t frames,
+    minidb::WalUpdateMode mode) {
     minidb::net::ServerConfig result;
     result.port = 0;
     result.bufferFrames = frames;
@@ -26,6 +28,7 @@ minidb::net::ServerConfig config(
     result.checkpointWalBytes = 0;
     result.checkpointStatements = 0;
     result.walSegmentBytes = segmentBytes;
+    result.walUpdateMode = mode;
     return result;
 }
 
@@ -34,12 +37,12 @@ std::size_t rowCount(minidb::net::DatabaseServer& server, const std::string& tab
         server.sqlEngine().execute("SELECT * FROM " + table)).rows.size();
 }
 
-void testCrossSegmentCommitAndReopen() {
+void testCrossSegmentCommitAndReopen(minidb::WalUpdateMode mode) {
     minidb::test::TemporaryDatabase database("wal_cross_segment_commit");
     constexpr std::uint32_t SEGMENT_BYTES = 12U * 1024U;
     const auto path = database.path().string();
     {
-        minidb::net::DatabaseServer server(path, config(SEGMENT_BYTES, 2));
+        minidb::net::DatabaseServer server(path, config(SEGMENT_BYTES, 2, mode));
         static_cast<void>(server.sqlEngine().execute(
             "CREATE TABLE docs (id UINT32 PRIMARY KEY, body VARCHAR(3000) NOT NULL)"));
         for (std::uint32_t key = 0; key < 8; ++key) {
@@ -67,40 +70,43 @@ void testCrossSegmentCommitAndReopen() {
             }),
             "No committed transaction crossed the forced segment boundary");
     {
-        minidb::net::DatabaseServer reopened(path, config(SEGMENT_BYTES, 3));
+        minidb::net::DatabaseServer reopened(path, config(SEGMENT_BYTES, 3, mode));
         require(rowCount(reopened, "docs") == 8,
                 "Cross-segment durable COMMIT did not survive reopen/REDO");
         reopened.catalog().validate();
     }
 }
 
-[[noreturn]] void loserChild(const std::string& path, std::uint32_t segmentBytes) {
+[[noreturn]] void loserChild(
+    const std::string& path,
+    std::uint32_t segmentBytes,
+    minidb::WalUpdateMode mode) {
     ::setenv("MINIDB_FAILPOINT", "before_commit_append", 1);
-    minidb::net::DatabaseServer server(path, config(segmentBytes, 2));
+    minidb::net::DatabaseServer server(path, config(segmentBytes, 2, mode));
     static_cast<void>(server.sqlEngine().execute(
         "INSERT INTO docs VALUES (99, '" + std::string(2500, 'z') + "')"));
     ::_exit(90);
 }
 
-void testCrossSegmentLoserUndo() {
+void testCrossSegmentLoserUndo(minidb::WalUpdateMode mode) {
     minidb::test::TemporaryDatabase database("wal_cross_segment_loser");
     constexpr std::uint32_t SEGMENT_BYTES = 12U * 1024U;
     const auto path = database.path().string();
     {
-        minidb::net::DatabaseServer server(path, config(SEGMENT_BYTES, 2));
+        minidb::net::DatabaseServer server(path, config(SEGMENT_BYTES, 2, mode));
         static_cast<void>(server.sqlEngine().execute(
             "CREATE TABLE docs (id UINT32 PRIMARY KEY, body VARCHAR(3000) NOT NULL)"));
         static_cast<void>(server.checkpointManager().checkpoint());
     }
     const auto child = ::fork();
     if (child < 0) throw std::runtime_error("fork failed");
-    if (child == 0) loserChild(path, SEGMENT_BYTES);
+    if (child == 0) loserChild(path, SEGMENT_BYTES, mode);
     int status = 0;
     static_cast<void>(::waitpid(child, &status, 0));
     require(WIFEXITED(status) && WEXITSTATUS(status) == 86,
             "Cross-segment loser child missed pre-COMMIT failpoint");
     {
-        minidb::net::DatabaseServer recovered(path, config(SEGMENT_BYTES, 3));
+        minidb::net::DatabaseServer recovered(path, config(SEGMENT_BYTES, 3, mode));
         require(rowCount(recovered, "docs") == 0
                     && recovered.startupRecoveryStats().loserTransactions == 1,
                 "Recovery did not UNDO the cross-segment loser");
@@ -109,22 +115,25 @@ void testCrossSegmentLoserUndo() {
 }
 
 [[noreturn]] void reclaimedHistoryLoserChild(
-    const std::string& path, std::uint32_t segmentBytes, std::uint32_t key) {
+    const std::string& path,
+    std::uint32_t segmentBytes,
+    std::uint32_t key,
+    minidb::WalUpdateMode mode) {
     ::setenv("MINIDB_FAILPOINT", "before_commit_append", 1);
-    minidb::net::DatabaseServer server(path, config(segmentBytes, 1));
+    minidb::net::DatabaseServer server(path, config(segmentBytes, 1, mode));
     static_cast<void>(server.sqlEngine().execute(
         "INSERT INTO items VALUES (" + std::to_string(key) + ", 'loser')"));
     ::_exit(90);
 }
 
-void testManyCheckpointReclamationCyclesAndLostControl() {
+void testManyCheckpointReclamationCyclesAndLostControl(minidb::WalUpdateMode mode) {
     minidb::test::TemporaryDatabase database("wal_many_reclaim_cycles");
     constexpr std::uint32_t SEGMENT_BYTES = 40U * 1024U;
     const auto path = database.path().string();
     std::uint32_t nextKey = 0;
     std::uint64_t logicalHighWater = 0;
     for (std::size_t cycle = 0; cycle < 8; ++cycle) {
-        minidb::net::DatabaseServer server(path, config(SEGMENT_BYTES, 4));
+        minidb::net::DatabaseServer server(path, config(SEGMENT_BYTES, 4, mode));
         if (cycle == 0) {
             static_cast<void>(server.sqlEngine().execute(
                 "CREATE TABLE items (id UINT32 PRIMARY KEY, value VARCHAR(64) NOT NULL)"));
@@ -145,7 +154,7 @@ void testManyCheckpointReclamationCyclesAndLostControl() {
 
     const auto child = ::fork();
     if (child < 0) throw std::runtime_error("fork failed");
-    if (child == 0) reclaimedHistoryLoserChild(path, SEGMENT_BYTES, nextKey);
+    if (child == 0) reclaimedHistoryLoserChild(path, SEGMENT_BYTES, nextKey, mode);
     int status = 0;
     static_cast<void>(::waitpid(child, &status, 0));
     require(WIFEXITED(status) && WEXITSTATUS(status) == 86,
@@ -153,7 +162,7 @@ void testManyCheckpointReclamationCyclesAndLostControl() {
 
     std::filesystem::remove(minidb::checkpointPathForDatabase(path));
     {
-        minidb::net::DatabaseServer recovered(path, config(SEGMENT_BYTES, 4));
+        minidb::net::DatabaseServer recovered(path, config(SEGMENT_BYTES, 4, mode));
         require(recovered.startupRecoveryStats().checkpointUsed
                     && !recovered.startupRecoveryStats().fullScanFallback
                     && recovered.startupRecoveryStats().loserTransactions == 1
@@ -170,9 +179,12 @@ void testManyCheckpointReclamationCyclesAndLostControl() {
 
 int main() {
     try {
-        testCrossSegmentCommitAndReopen();
-        testCrossSegmentLoserUndo();
-        testManyCheckpointReclamationCyclesAndLostControl();
+        for (const auto mode : {minidb::WalUpdateMode::FullPage,
+                                minidb::WalUpdateMode::ByteRange}) {
+            testCrossSegmentCommitAndReopen(mode);
+            testCrossSegmentLoserUndo(mode);
+            testManyCheckpointReclamationCyclesAndLostControl(mode);
+        }
         std::cout << "segmented_wal_recovery_test passed\n";
         return 0;
     } catch (const std::exception& error) {
