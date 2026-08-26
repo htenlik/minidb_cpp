@@ -3,7 +3,11 @@
 #include "test_utils.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <iostream>
+#include <random>
+#include <vector>
 
 namespace {
 
@@ -46,6 +50,248 @@ void testPageUpdatePayload() {
             "PAGE_UPDATE payload did not round-trip");
 }
 
+minidb::DiskManager::Page filledPage(std::byte value) {
+    minidb::DiskManager::Page page{};
+    page.fill(value);
+    return page;
+}
+
+void requireRange(
+    const minidb::PageByteRange& range,
+    std::uint16_t offset,
+    std::uint16_t length,
+    std::string_view message) {
+    require(range.offset == offset && range.length == length, message);
+}
+
+void testCanonicalPageDeltaComputation() {
+    const minidb::DiskManager::Page zero{};
+    auto changed = zero;
+    require(minidb::computePageDelta(zero, changed).empty(),
+            "Identical pages produced a delta");
+
+    changed[0] = std::byte{1};
+    auto ranges = minidb::computePageDelta(zero, changed);
+    require(ranges.size() == 1, "First-byte change did not produce one range");
+    requireRange(ranges[0], 0, 1, "First-byte range is incorrect");
+
+    changed = zero;
+    changed.back() = std::byte{2};
+    ranges = minidb::computePageDelta(zero, changed);
+    require(ranges.size() == 1, "Last-byte change did not produce one range");
+    requireRange(ranges[0], 4095, 1, "Last-byte range is incorrect");
+
+    changed = zero;
+    for (std::size_t offset = 20; offset < 120; ++offset) changed[offset] = std::byte{3};
+    for (std::size_t offset = 200; offset < 207; ++offset) changed[offset] = std::byte{4};
+    ranges = minidb::computePageDelta(zero, changed);
+    require(ranges.size() == 2, "Separated changes did not produce two ranges");
+    requireRange(ranges[0], 20, 100, "Continuous range was not merged canonically");
+    requireRange(ranges[1], 200, 7, "Second separated range is incorrect");
+
+    changed = filledPage(std::byte{0xFF});
+    ranges = minidb::computePageDelta(zero, changed);
+    require(ranges.size() == 1, "Whole-page change was fragmented");
+    requireRange(ranges[0], 0, 4096, "Whole-page range is incorrect");
+
+    changed = zero;
+    for (std::size_t offset = 0; offset < changed.size(); offset += 2) {
+        changed[offset] = std::byte{0x5A};
+    }
+    ranges = minidb::computePageDelta(zero, changed);
+    require(ranges.size() == minidb::page_delta_update_log_layout::MAX_RANGE_COUNT,
+            "Alternating bytes did not produce maximum canonical range count");
+    requireRange(ranges.front(), 0, 1, "First alternating range is incorrect");
+    requireRange(ranges.back(), 4094, 1, "Last alternating range is incorrect");
+
+    std::array<bool, minidb::database_format::PAGE_SIZE> required{};
+    required[10] = true;
+    required[11] = true;
+    ranges = minidb::computePageDelta(zero, zero, required);
+    require(ranges.size() == 1, "Required unchanged offsets were omitted");
+    requireRange(ranges[0], 10, 2, "Required offsets did not merge canonically");
+    require(std::all_of(ranges[0].beforeBytes.begin(), ranges[0].beforeBytes.end(),
+                        [](std::byte byte) { return byte == std::byte{0}; })
+                && ranges[0].beforeBytes == ranges[0].afterBytes,
+            "Required reverted bytes were encoded incorrectly");
+}
+
+minidb::PageDeltaUpdateLogPayload representativeDelta(bool existing = true) {
+    minidb::PageDeltaUpdateLogPayload payload;
+    payload.pageId = 0x01020304U;
+    payload.beforePageExisted = existing;
+    payload.ranges.push_back(minidb::PageByteRange{
+        0x0102U,
+        2,
+        {std::byte{0xAA}, std::byte{0xBB}},
+        {std::byte{0xCC}, std::byte{0xDD}},
+    });
+    return payload;
+}
+
+void testExactDeltaPayloadAndWalCodec() {
+    const auto payload = representativeDelta();
+    const auto encoded = minidb::encodePageDeltaUpdateLogPayload(payload);
+    require(encoded.size() == 32, "Representative delta payload size changed");
+    require(minidb::byte_codec::readUint32(encoded, 0) == 0x01020304U
+                && minidb::byte_codec::readUint32(encoded, 4) == 1
+                && minidb::byte_codec::readUint32(encoded, 8) == 4096
+                && minidb::byte_codec::readUint32(encoded, 12) == 1
+                && minidb::byte_codec::readUint16(encoded, 16) == 1
+                && minidb::byte_codec::readUint16(encoded, 18) == 24
+                && minidb::byte_codec::readUint32(encoded, 20) == 0,
+            "Delta payload header is not exact little-endian encoding");
+    require(minidb::byte_codec::readUint16(encoded, 24) == 0x0102U
+                && minidb::byte_codec::readUint16(encoded, 26) == 2
+                && encoded[28] == std::byte{0xAA}
+                && encoded[29] == std::byte{0xBB}
+                && encoded[30] == std::byte{0xCC}
+                && encoded[31] == std::byte{0xDD},
+            "Delta range descriptor/data encoding changed");
+    require(minidb::decodePageDeltaUpdateLogPayload(encoded) == payload,
+            "Existing-page delta payload did not round-trip");
+
+    auto newPagePayload = representativeDelta(false);
+    newPagePayload.ranges[0].beforeBytes.assign(2, std::byte{0});
+    const auto newPageEncoded = minidb::encodePageDeltaUpdateLogPayload(newPagePayload);
+    require(newPageEncoded.size() == 30
+                && newPageEncoded[28] == std::byte{0xCC}
+                && newPageEncoded[29] == std::byte{0xDD},
+            "New-page delta encoded meaningless before bytes");
+    require(minidb::decodePageDeltaUpdateLogPayload(newPageEncoded) == newPagePayload,
+            "New-page delta payload did not reconstruct zero before bytes");
+
+    minidb::LogRecord record{
+        minidb::LogRecordType::PageDeltaUpdate,
+        0x0102030405060708ULL,
+        64,
+        encoded,
+        minidb::INVALID_LSN,
+    };
+    const auto walBytes = minidb::encodeWalRecord(record, 128);
+    require(walBytes.size() == 80
+                && minidb::byte_codec::readUint16(walBytes, 6) == 8
+                && minidb::byte_codec::readUint32(walBytes, 12) == 32,
+            "PAGE_DELTA_UPDATE outer record layout/type changed");
+    require(minidb::byte_codec::readUint32(walBytes, 40) == 0x037DC09EU,
+            "PAGE_DELTA_UPDATE representative CRC32C changed");
+    const auto decodedRecord = minidb::decodeWalRecord(walBytes, 128);
+    minidb::validateTransactionRecordPayload(decodedRecord);
+    require(decodedRecord.type == minidb::LogRecordType::PageDeltaUpdate
+                && minidb::decodePageDeltaUpdateLogPayload(decodedRecord.payload) == payload,
+            "PAGE_DELTA_UPDATE did not round-trip through the WAL codec");
+}
+
+void expectMalformed(std::vector<std::byte> bytes, std::string_view message) {
+    minidb::test::requireThrows<minidb::WalError>(
+        [&] { static_cast<void>(minidb::decodePageDeltaUpdateLogPayload(bytes)); },
+        message);
+}
+
+void testMalformedDeltaPayloads() {
+    const auto valid = minidb::encodePageDeltaUpdateLogPayload(representativeDelta());
+    for (const auto offset : {std::size_t{4}, std::size_t{8}, std::size_t{16},
+                              std::size_t{18}, std::size_t{20}}) {
+        auto bytes = valid;
+        bytes[offset] ^= std::byte{0x80};
+        expectMalformed(std::move(bytes), "Malformed delta fixed-header field was accepted");
+    }
+    auto bytes = valid;
+    minidb::byte_codec::writeUint32(bytes, 12, 0xFFFFFFFFU);
+    expectMalformed(std::move(bytes), "Huge delta range count was accepted");
+
+    bytes = valid;
+    minidb::byte_codec::writeUint16(bytes, 26, 0);
+    expectMalformed(std::move(bytes), "Zero-length delta range was accepted");
+    bytes = valid;
+    minidb::byte_codec::writeUint16(bytes, 24, 4095);
+    minidb::byte_codec::writeUint16(bytes, 26, 2);
+    expectMalformed(std::move(bytes), "Out-of-page delta range was accepted");
+
+    auto twoRanges = representativeDelta();
+    twoRanges.ranges.push_back(minidb::PageByteRange{
+        300, 1, {std::byte{1}}, {std::byte{2}}});
+    const auto canonical = minidb::encodePageDeltaUpdateLogPayload(twoRanges);
+    bytes = canonical;
+    minidb::byte_codec::writeUint16(bytes, 32, 260);
+    expectMalformed(std::move(bytes), "Adjacent delta ranges were accepted");
+    bytes = canonical;
+    minidb::byte_codec::writeUint16(bytes, 32, 259);
+    expectMalformed(std::move(bytes), "Overlapping delta ranges were accepted");
+    bytes = canonical;
+    minidb::byte_codec::writeUint16(bytes, 32, 1);
+    expectMalformed(std::move(bytes), "Out-of-order delta ranges were accepted");
+
+    bytes = valid;
+    bytes.pop_back();
+    expectMalformed(std::move(bytes), "Truncated delta after data was accepted");
+    bytes = valid;
+    bytes.erase(bytes.begin() + 28);
+    expectMalformed(std::move(bytes), "Truncated delta before data was accepted");
+    bytes = valid;
+    bytes.push_back(std::byte{0});
+    expectMalformed(std::move(bytes), "Trailing delta data was accepted");
+}
+
+void testDirectPhysicalRedoUndo() {
+    auto original = filledPage(std::byte{0x11});
+    auto updated = original;
+    for (std::size_t offset = 0; offset < updated.size(); ++offset) {
+        if ((offset % 7) == 0 || (offset >= 2000 && offset < 3000)) {
+            updated[offset] = static_cast<std::byte>((offset * 31U) & 0xFFU);
+        }
+    }
+    const minidb::PageDeltaUpdateLogPayload payload{
+        7, true, minidb::computePageDelta(original, updated)};
+    auto recoveryPage = original;
+    minidb::applyPageDeltaAfter(recoveryPage, payload);
+    require(recoveryPage == updated, "Physical delta REDO did not reproduce all 4096 bytes");
+    minidb::applyPageDeltaBefore(recoveryPage, payload);
+    require(recoveryPage == original, "Physical delta UNDO did not reproduce all 4096 bytes");
+}
+
+void testDeterministicDeltaDecoderFuzz() {
+    constexpr std::uint64_t SEED = 0x11D10001ULL;
+    constexpr std::size_t CANDIDATES = 10'000;
+    std::mt19937_64 random(SEED);
+    for (std::size_t candidate = 0; candidate < CANDIDATES; ++candidate) {
+        minidb::DiskManager::Page before{};
+        minidb::DiskManager::Page after{};
+        for (std::size_t offset = 0; offset < after.size(); ++offset) {
+            before[offset] = static_cast<std::byte>(random() & 0xFFU);
+            after[offset] = before[offset];
+        }
+        const auto mutationCount = 1U + static_cast<unsigned>(random() % 48U);
+        for (unsigned mutation = 0; mutation < mutationCount; ++mutation) {
+            const auto offset = static_cast<std::size_t>(random() % after.size());
+            after[offset] ^= static_cast<std::byte>(1U + (random() & 0xFFU));
+        }
+        if (before == after) after[0] ^= std::byte{1};
+        minidb::PageDeltaUpdateLogPayload payload{
+            static_cast<minidb::PageId>(1U + (random() & 0xFFFFU)),
+            true,
+            minidb::computePageDelta(before, after),
+        };
+        auto encoded = minidb::encodePageDeltaUpdateLogPayload(payload);
+        if ((candidate % 3U) == 0U) {
+            const auto offset = static_cast<std::size_t>(random() % encoded.size());
+            encoded[offset] ^= static_cast<std::byte>(1U << (random() % 8U));
+            try {
+                const auto decoded = minidb::decodePageDeltaUpdateLogPayload(encoded);
+                auto page = before;
+                minidb::applyPageDeltaAfter(page, decoded);
+            } catch (const minidb::WalError&) {
+                // Safe rejection is the expected outcome for most mutated candidates.
+            } catch (const std::runtime_error&) {
+                // Low-level bounded codec failures are also controlled rejection.
+            }
+        } else {
+            require(minidb::decodePageDeltaUpdateLogPayload(encoded) == payload,
+                    "Valid fuzz-generated delta failed round-trip (seed 0x11D10001)");
+        }
+    }
+}
+
 void testMalformedPayloads() {
     minidb::PageUpdateLogPayload payload;
     payload.pageId = 1;
@@ -82,6 +328,11 @@ int main() {
     try {
         testBeginPayload();
         testPageUpdatePayload();
+        testCanonicalPageDeltaComputation();
+        testExactDeltaPayloadAndWalCodec();
+        testMalformedDeltaPayloads();
+        testDirectPhysicalRedoUndo();
+        testDeterministicDeltaDecoderFuzz();
         testMalformedPayloads();
         testCommitAndAbortHaveExactEmptyPayloads();
         std::cout << "recovery_log_test passed\n";

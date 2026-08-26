@@ -31,6 +31,12 @@ enum class LogRecordType : std::uint16_t {
     Compensation = 5,
     CheckpointBegin = 6,
     CheckpointEnd = 7,
+    PageDeltaUpdate = 8,
+};
+
+enum class WalUpdateMode : std::uint8_t {
+    FullPage,
+    ByteRange,
 };
 
 [[nodiscard]] constexpr bool isValidLsn(Lsn lsn) noexcept {
@@ -40,7 +46,7 @@ enum class LogRecordType : std::uint16_t {
 [[nodiscard]] constexpr bool isValidLogRecordType(LogRecordType type) noexcept {
     const auto value = static_cast<std::uint16_t>(type);
     return value >= static_cast<std::uint16_t>(LogRecordType::Begin)
-        && value <= static_cast<std::uint16_t>(LogRecordType::CheckpointEnd);
+        && value <= static_cast<std::uint16_t>(LogRecordType::PageDeltaUpdate);
 }
 
 class WalFlushProvider {
