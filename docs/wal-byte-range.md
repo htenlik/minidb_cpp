@@ -183,14 +183,15 @@ times, reclaimed 1,095,738 bytes, and retained 21,796 bytes. This changes how of
 existing segment/checkpoint thresholds are reached; it does not change their algorithms.
 
 For 300 committed INSERTs, FullPage recovery scanned 10,040,096 bytes/1,816 records and
-took 115.98 ms total (113.08 ms analysis, 2.55 ms REDO, 1,212 page writes). ByteRange
-scanned 169,550 bytes/the same 1,816 records and took 9.90 ms (5.62 ms analysis,
-4.17 ms REDO, the same 1,212 writes). ByteRange reduced scanning/decoding volume but
+took 172.60 ms total (113.46 ms analysis, 2.53 ms REDO, 1,212 page writes). ByteRange
+scanned 169,550 bytes/the same 1,816 records and took 11.87 ms (5.38 ms analysis,
+4.16 ms REDO, the same 1,212 writes). ByteRange reduced scanning/decoding volume but
 spent more time reading and patching pages during REDO. With one appended-page loser,
-FullPage and ByteRange analyzed 1,818 records; total recovery was 116.61 ms versus
-9.83 ms, while loser UNDO/truncation measured 0.44 ms versus 0.15 ms. These runs use a
-sharp-checkpoint-aware production format with checkpoints disabled to expose the full
-history; checkpoint-bounded comparisons remain separately available.
+FullPage and ByteRange analyzed 1,818 records; total recovery was 169.47 ms versus
+12.03 ms, while loser UNDO/truncation measured 0.45 ms versus 0.11 ms. These runs pass
+through the production checkpoint-selection path with checkpoints disabled, so no slot
+is selected and the complete retained history is exposed; checkpoint-bounded comparisons
+remain separately available.
 
 ## Durability and research boundary
 

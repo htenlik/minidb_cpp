@@ -1304,7 +1304,10 @@ BenchmarkResult runRecoveryBenchmark(
         LogManager log(walPathForDatabase(config.databasePath), LogManager::DEFAULT_BUFFER_SIZE,
                        LogOpenMode::DeferredRecovery, WalStorageMode::Auto,
                        config.walSegmentBytes);
-        measure(latency, [&] { recovery = RecoveryManager(disk, log).recover(); });
+        CheckpointControl control(checkpointPathForDatabase(config.databasePath));
+        measure(latency, [&] {
+            recovery = RecoveryManager(disk, log, &control).recover();
+        });
     }
     {
         net::DatabaseServer validation(
