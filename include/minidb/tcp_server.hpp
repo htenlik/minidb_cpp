@@ -5,6 +5,7 @@
 #include "minidb/sql_executor.hpp"
 #include "minidb/segmented_wal.hpp"
 #include "minidb/tcp_transport.hpp"
+#include "minidb/wal_types.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,7 @@ struct ServerConfig {
     std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t checkpointStatements = 0;
     std::uint32_t walSegmentBytes = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY;
+    WalUpdateMode walUpdateMode = WalUpdateMode::FullPage;
 };
 
 class TcpServer {

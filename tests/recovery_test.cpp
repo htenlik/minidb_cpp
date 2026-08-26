@@ -31,13 +31,14 @@ std::byte diskByte(minidb::DiskManager& disk, minidb::PageId page, std::size_t o
     return bytes[offset];
 }
 
-void testCommitIsNoForceAndRedoSurvivesReopen() {
+void testCommitIsNoForceAndRedoSurvivesReopen(minidb::WalUpdateMode mode) {
     RecoveryFixture fixture("recovery_commit_redo");
     minidb::PageId pageId = minidb::INVALID_PAGE_ID;
     {
         minidb::DiskManager disk(fixture.database.path().string());
         minidb::LogManager log(fixture.wal);
-        minidb::RecoveryCoordinator coordinator(disk, log);
+        minidb::RecoveryCoordinator coordinator(
+            disk, log, minidb::INVALID_TRANSACTION_ID, mode);
         minidb::BufferPoolManager pool(disk, 2, 2, &log, &coordinator);
         coordinator.attachBufferPool(pool);
         coordinator.beginStatement();
@@ -60,7 +61,7 @@ void testCommitIsNoForceAndRedoSurvivesReopen() {
     }
 }
 
-void testStealLoserUndoAndTruncation() {
+void testStealLoserUndoAndTruncation(minidb::WalUpdateMode mode) {
     RecoveryFixture fixture("recovery_steal_undo");
     minidb::PageId existing = minidb::INVALID_PAGE_ID;
     std::uint64_t startCount = 0;
@@ -69,7 +70,8 @@ void testStealLoserUndoAndTruncation() {
         existing = disk.appendPage();
         startCount = disk.pageCount();
         minidb::LogManager log(fixture.wal);
-        minidb::RecoveryCoordinator coordinator(disk, log);
+        minidb::RecoveryCoordinator coordinator(
+            disk, log, minidb::INVALID_TRANSACTION_ID, mode);
         minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
         coordinator.attachBufferPool(pool);
         coordinator.beginStatement();
@@ -179,13 +181,14 @@ void testTailRepairAndChainValidation() {
         "Recovery accepted overlapping active transaction chains");
 }
 
-void testPageZeroCommitAndRollback() {
+void testPageZeroCommitAndRollback(minidb::WalUpdateMode mode) {
     RecoveryFixture fixture("recovery_page_zero");
     minidb::DiskManager disk(fixture.database.path().string());
     const auto rootA = disk.appendPage();
     const auto rootB = disk.appendPage();
     minidb::LogManager log(fixture.wal);
-    minidb::RecoveryCoordinator coordinator(disk, log);
+    minidb::RecoveryCoordinator coordinator(
+        disk, log, minidb::INVALID_TRANSACTION_ID, mode);
     minidb::BufferPoolManager pool(disk, 2, 2, &log, &coordinator);
     coordinator.attachBufferPool(pool);
     minidb::DatabaseMetadataManager metadata(disk, coordinator, log);
@@ -208,15 +211,154 @@ void testPageZeroCommitAndRollback() {
     allocator.validate();
 }
 
+void testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo() {
+    RecoveryFixture loserFixture("recovery_repeated_delta_loser");
+    minidb::PageId loserPage = minidb::INVALID_PAGE_ID;
+    {
+        minidb::DiskManager disk(loserFixture.database.path().string());
+        loserPage = disk.appendPage();
+        minidb::LogManager log(loserFixture.wal);
+        minidb::RecoveryCoordinator coordinator(
+            disk, log, minidb::INVALID_TRANSACTION_ID,
+            minidb::WalUpdateMode::ByteRange);
+        minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
+        coordinator.attachBufferPool(pool);
+        coordinator.beginStatement();
+        {
+            auto page = pool.fetchPageWrite(loserPage);
+            page->data()[10] = std::byte{0xAA};
+        }
+        require(pool.flushPage(loserPage), "Could not STEAL first delta state");
+        {
+            auto page = pool.fetchPageWrite(loserPage);
+            page->data()[10] = std::byte{0};
+            page->data()[20] = std::byte{0xBB};
+        }
+        require(pool.flushPage(loserPage), "Could not STEAL second delta state");
+        require(diskByte(disk, loserPage, 10) == std::byte{0}
+                    && diskByte(disk, loserPage, 20) == std::byte{0xBB},
+                "Repeated-delta loser setup did not reach the latest state");
+        const auto records = log.scan().records;
+        const auto latest = minidb::decodePageDeltaUpdateLogPayload(
+            records[records.size() - 1].payload);
+        require(latest.ranges.size() == 2
+                    && latest.ranges[0].offset == 10
+                    && latest.ranges[0].beforeBytes == latest.ranges[0].afterBytes,
+                "Latest delta omitted a reverted but transaction-touched byte");
+    }
+    {
+        minidb::DiskManager disk(loserFixture.database.path().string());
+        minidb::LogManager log(loserFixture.wal);
+        const auto stats = minidb::RecoveryManager(disk, log).recover();
+        require(stats.pagesUndone == 1
+                    && diskByte(disk, loserPage, 10) == std::byte{0}
+                    && diskByte(disk, loserPage, 20) == std::byte{0},
+                "Repeated-delta loser did not restore the full original page state");
+    }
+
+    RecoveryFixture winnerFixture("recovery_repeated_delta_winner");
+    minidb::PageId winnerPage = minidb::INVALID_PAGE_ID;
+    {
+        minidb::DiskManager disk(winnerFixture.database.path().string());
+        winnerPage = disk.appendPage();
+        minidb::LogManager log(winnerFixture.wal);
+        minidb::RecoveryCoordinator coordinator(
+            disk, log, minidb::INVALID_TRANSACTION_ID,
+            minidb::WalUpdateMode::ByteRange);
+        minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
+        coordinator.attachBufferPool(pool);
+        coordinator.beginStatement();
+        {
+            auto page = pool.fetchPageWrite(winnerPage);
+            page->data()[10] = std::byte{0xAA};
+        }
+        require(pool.flushPage(winnerPage), "Could not log first winner delta state");
+        {
+            auto page = pool.fetchPageWrite(winnerPage);
+            page->data()[10] = std::byte{0};
+            page->data()[20] = std::byte{0xCC};
+        }
+        coordinator.commitStatement();
+        pool.discardPageForRecovery(winnerPage);
+    }
+    {
+        minidb::DiskManager disk(winnerFixture.database.path().string());
+        minidb::LogManager log(winnerFixture.wal);
+        const auto stats = minidb::RecoveryManager(disk, log).recover();
+        require(stats.pagesRedone == 2
+                    && diskByte(disk, winnerPage, 10) == std::byte{0}
+                    && diskByte(disk, winnerPage, 20) == std::byte{0xCC},
+                "Repeated-delta winner REDO lost a reverted or latest byte");
+    }
+}
+
+void commitOneByte(
+    RecoveryFixture& fixture,
+    minidb::PageId pageId,
+    std::size_t offset,
+    std::byte value,
+    minidb::WalUpdateMode mode) {
+    minidb::DiskManager disk(fixture.database.path().string());
+    minidb::LogManager log(fixture.wal);
+    const auto startup = minidb::RecoveryManager(disk, log).recover();
+    minidb::RecoveryCoordinator coordinator(
+        disk, log, startup.nextTransactionId, mode);
+    minidb::BufferPoolManager pool(disk, 2, 2, &log, &coordinator);
+    coordinator.attachBufferPool(pool);
+    coordinator.beginStatement();
+    {
+        auto page = pool.fetchPageWrite(pageId);
+        page->data()[offset] = value;
+    }
+    coordinator.commitStatement();
+    pool.discardPageForRecovery(pageId);
+}
+
+void testMixedFullPageAndDeltaHistory() {
+    RecoveryFixture fixture("recovery_mixed_update_history");
+    minidb::PageId pageId = minidb::INVALID_PAGE_ID;
+    {
+        minidb::DiskManager disk(fixture.database.path().string());
+        pageId = disk.appendPage();
+    }
+    commitOneByte(
+        fixture, pageId, 1, std::byte{0x11}, minidb::WalUpdateMode::FullPage);
+    commitOneByte(
+        fixture, pageId, 2, std::byte{0x22}, minidb::WalUpdateMode::ByteRange);
+    commitOneByte(
+        fixture, pageId, 3, std::byte{0x33}, minidb::WalUpdateMode::FullPage);
+
+    minidb::DiskManager disk(fixture.database.path().string());
+    minidb::LogManager log(fixture.wal);
+    static_cast<void>(minidb::RecoveryManager(disk, log).recover());
+    require(diskByte(disk, pageId, 1) == std::byte{0x11}
+                && diskByte(disk, pageId, 2) == std::byte{0x22}
+                && diskByte(disk, pageId, 3) == std::byte{0x33},
+            "Mixed full-page/delta history did not recover its final state");
+    bool sawFullPage = false;
+    bool sawDelta = false;
+    for (const auto& record : log.scan().records) {
+        sawFullPage = sawFullPage || record.type == minidb::LogRecordType::PageUpdate;
+        sawDelta = sawDelta || record.type == minidb::LogRecordType::PageDeltaUpdate;
+    }
+    require(sawFullPage && sawDelta,
+            "Mixed-history fixture did not retain both update encodings");
+}
+
 } // namespace
 
 int main() {
     try {
-        testCommitIsNoForceAndRedoSurvivesReopen();
-        testStealLoserUndoAndTruncation();
+        for (const auto mode : {minidb::WalUpdateMode::FullPage,
+                                minidb::WalUpdateMode::ByteRange}) {
+            testCommitIsNoForceAndRedoSurvivesReopen(mode);
+            testStealLoserUndoAndTruncation(mode);
+            testPageZeroCommitAndRollback(mode);
+        }
         testExplicitRollbackAndZeroMutation();
         testTailRepairAndChainValidation();
-        testPageZeroCommitAndRollback();
+        testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo();
+        testMixedFullPageAndDeltaHistory();
         std::cout << "recovery_test passed\n";
         return 0;
     } catch (const std::exception& error) {

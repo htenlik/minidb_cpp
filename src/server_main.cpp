@@ -38,11 +38,19 @@ std::uint64_t parseNonnegativeUint64(std::string_view text, const char* option) 
     return value;
 }
 
+minidb::WalUpdateMode parseWalUpdateMode(std::string_view text) {
+    if (text == "full-page") return minidb::WalUpdateMode::FullPage;
+    if (text == "byte-range") return minidb::WalUpdateMode::ByteRange;
+    throw std::invalid_argument(
+        "invalid --wal-update-mode value (expected full-page or byte-range)");
+}
+
 void usage() {
     std::cerr
         << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
            "[--buffer-frames N] [--lru-k N] [--checkpoint-wal-bytes N] "
-           "[--checkpoint-statements N] [--wal-segment-bytes N]\n";
+           "[--checkpoint-statements N] [--wal-segment-bytes N] "
+           "[--wal-update-mode full-page|byte-range]\n";
 }
 
 } // namespace
@@ -77,6 +85,8 @@ int main(int argc, char** argv) {
                     throw std::invalid_argument("invalid --wal-segment-bytes value");
                 }
                 config.walSegmentBytes = static_cast<std::uint32_t>(value);
+            } else if (argument == "--wal-update-mode" && index + 1 < argc) {
+                config.walUpdateMode = parseWalUpdateMode(argv[++index]);
             } else {
                 usage();
                 return 2;

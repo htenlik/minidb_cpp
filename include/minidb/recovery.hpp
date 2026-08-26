@@ -3,6 +3,7 @@
 #include "minidb/page_recovery.hpp"
 #include "minidb/recovery_log.hpp"
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -82,7 +83,8 @@ public:
     RecoveryCoordinator(
         DiskManager& diskManager,
         LogManager& logManager,
-        TransactionId nextTransactionId = INVALID_TRANSACTION_ID);
+        TransactionId nextTransactionId = INVALID_TRANSACTION_ID,
+        WalUpdateMode updateMode = WalUpdateMode::FullPage);
 
     void attachBufferPool(BufferPoolManager& bufferPool) noexcept;
     void beginStatement();
@@ -93,6 +95,7 @@ public:
     [[nodiscard]] bool rollbackActive() const noexcept { return rollbackActive_; }
     [[nodiscard]] TransactionId activeTransactionId() const noexcept;
     [[nodiscard]] TransactionId nextTransactionId() const noexcept { return nextTransactionId_; }
+    [[nodiscard]] WalUpdateMode updateMode() const noexcept { return updateMode_; }
     [[nodiscard]] const TransactionRuntimeStats& stats() const noexcept { return stats_; }
     void resetStats() noexcept { stats_ = {}; }
 
@@ -106,6 +109,7 @@ private:
         bool beforeExisted = false;
         DiskManager::Page before{};
         std::optional<DiskManager::Page> latestAfter;
+        std::array<bool, database_format::PAGE_SIZE> touchedOffsets{};
         Lsn latestLsn = INVALID_LSN;
     };
 
@@ -121,6 +125,7 @@ private:
     LogManager& logManager_;
     BufferPoolManager* bufferPool_ = nullptr;
     TransactionId nextTransactionId_ = 1;
+    WalUpdateMode updateMode_ = WalUpdateMode::FullPage;
     std::optional<ActiveStatement> active_;
     bool rollbackActive_ = false;
     TransactionRuntimeStats stats_{};

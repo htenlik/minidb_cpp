@@ -189,7 +189,23 @@ RecoveryStats RecoveryManager::recover() {
             || record.prevLsn != found->second.lastLsn) {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
-        if (record.type == LogRecordType::PageUpdate) {
+        if (record.type == LogRecordType::PageUpdate
+            || record.type == LogRecordType::PageDeltaUpdate) {
+            PageId pageId = INVALID_PAGE_ID;
+            bool beforePageExisted = false;
+            if (record.type == LogRecordType::PageUpdate) {
+                const auto update = decodePageUpdateLogPayload(record.payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+            } else {
+                const auto update = decodePageDeltaUpdateLogPayload(record.payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+            }
+            if (beforePageExisted != (pageId < found->second.begin.startPageCount)) {
+                throw WalError(WalErrorKind::CorruptRecord,
+                               "Page-update existence flag contradicts transaction BEGIN");
+            }
             found->second.updates.push_back(&record);
         } else if (record.type == LogRecordType::Commit) {
             found->second.status = TransactionStatus::Committed;
@@ -232,9 +248,19 @@ RecoveryStats RecoveryManager::recover() {
             std::chrono::steady_clock::now() - analysisStart).count());
     const auto redoStart = std::chrono::steady_clock::now();
     for (const auto* record : redo) {
-        const auto update = decodePageUpdateLogPayload(record->payload);
         const auto beforeCount = diskManager_.pageCount();
-        diskManager_.writePhysicalPage(update.pageId, update.afterImage);
+        if (record->type == LogRecordType::PageUpdate) {
+            const auto update = decodePageUpdateLogPayload(record->payload);
+            diskManager_.writePhysicalPage(update.pageId, update.afterImage);
+        } else {
+            const auto update = decodePageDeltaUpdateLogPayload(record->payload);
+            DiskManager::Page page{};
+            if (update.pageId < diskManager_.pageCount()) {
+                diskManager_.readPhysicalPage(update.pageId, page);
+            }
+            applyPageDeltaAfter(page, update);
+            diskManager_.writePhysicalPage(update.pageId, page);
+        }
         stats.databasePagesExtended += diskManager_.pageCount() - beforeCount;
         ++stats.databaseWrites;
         ++stats.pagesRedone;
@@ -248,9 +274,30 @@ RecoveryStats RecoveryManager::recover() {
     if (loser != nullptr) {
         std::unordered_set<PageId> restored;
         for (auto iterator = loser->updates.rbegin(); iterator != loser->updates.rend(); ++iterator) {
-            const auto update = decodePageUpdateLogPayload((*iterator)->payload);
-            if (update.beforePageExisted && restored.insert(update.pageId).second) {
-                diskManager_.writePhysicalPage(update.pageId, update.beforeImage);
+            PageId pageId = INVALID_PAGE_ID;
+            bool beforePageExisted = false;
+            bool restoredNow = false;
+            if ((*iterator)->type == LogRecordType::PageUpdate) {
+                const auto update = decodePageUpdateLogPayload((*iterator)->payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+                if (beforePageExisted && restored.insert(pageId).second) {
+                    diskManager_.writePhysicalPage(pageId, update.beforeImage);
+                    restoredNow = true;
+                }
+            } else {
+                const auto update = decodePageDeltaUpdateLogPayload((*iterator)->payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+                if (beforePageExisted && restored.insert(pageId).second) {
+                    DiskManager::Page page{};
+                    diskManager_.readPhysicalPage(pageId, page);
+                    applyPageDeltaBefore(page, update);
+                    diskManager_.writePhysicalPage(pageId, page);
+                    restoredNow = true;
+                }
+            }
+            if (restoredNow) {
                 ++stats.databaseWrites;
                 ++stats.pagesUndone;
                 recoveryFailPoint("recovery_after_undo_page");
@@ -287,11 +334,13 @@ RecoveryStats RecoveryManager::recover() {
 RecoveryCoordinator::RecoveryCoordinator(
     DiskManager& diskManager,
     LogManager& logManager,
-    TransactionId nextTransactionId)
+    TransactionId nextTransactionId,
+    WalUpdateMode updateMode)
     : diskManager_(diskManager),
       logManager_(logManager),
       nextTransactionId_(nextTransactionId == INVALID_TRANSACTION_ID
-          ? nextTransactionIdFrom(logManager.scan()) : nextTransactionId) {}
+          ? nextTransactionIdFrom(logManager.scan()) : nextTransactionId),
+      updateMode_(updateMode) {}
 
 void RecoveryCoordinator::attachBufferPool(BufferPoolManager& bufferPool) noexcept {
     bufferPool_ = &bufferPool;
@@ -325,6 +374,7 @@ void RecoveryCoordinator::notePageWriteIntent(
         existed,
         existed ? before : DiskManager::Page{},
         std::nullopt,
+        {},
         INVALID_LSN,
     });
     ++stats_.pagesFirstWritten;
@@ -363,15 +413,29 @@ Lsn RecoveryCoordinator::preparePageForWrite(
     auto& state = found->second;
     const auto& comparison = state.latestAfter.has_value() ? *state.latestAfter : state.before;
     if (comparison == after) return state.latestLsn;
-    const auto lsn = appendTransactionRecord(
-        LogRecordType::PageUpdate,
-        encodePageUpdateLogPayload(PageUpdateLogPayload{
-            pageId, state.beforeExisted, state.before, after,
-        }));
+    for (std::size_t offset = 0; offset < after.size(); ++offset) {
+        if (comparison[offset] != after[offset]) state.touchedOffsets[offset] = true;
+    }
+    Lsn lsn = INVALID_LSN;
+    if (updateMode_ == WalUpdateMode::FullPage) {
+        lsn = appendTransactionRecord(
+            LogRecordType::PageUpdate,
+            encodePageUpdateLogPayload(PageUpdateLogPayload{
+                pageId, state.beforeExisted, state.before, after,
+            }));
+        stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
+    } else {
+        lsn = appendTransactionRecord(
+            LogRecordType::PageDeltaUpdate,
+            encodePageDeltaUpdateLogPayload(PageDeltaUpdateLogPayload{
+                pageId,
+                state.beforeExisted,
+                computePageDelta(state.before, after, state.touchedOffsets),
+            }));
+    }
     state.latestAfter = after;
     state.latestLsn = lsn;
     ++stats_.pageUpdateRecords;
-    stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
     recoveryFailPoint("after_page_update_append");
     return lsn;
 }
