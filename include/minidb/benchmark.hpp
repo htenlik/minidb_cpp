@@ -85,6 +85,7 @@ struct EnvironmentMetadata {
 struct WalBenchmarkMetrics {
     std::uint64_t walRecords = 0;
     std::uint64_t walPayloadBytes = 0;
+    std::uint64_t physicalWalBytesBefore = 0;
     double payloadBytesPerSecond = 0.0;
     LogManagerStats manager;
     TimingMetrics appendTiming;

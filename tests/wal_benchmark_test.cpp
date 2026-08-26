@@ -63,7 +63,9 @@ int main() {
                     && results[0].wal.manager.segmentRotations > 0
                     && (name != "wal_reclamation"
                         || (results[0].wal.manager.segmentsDeleted > 0
-                            && results[0].checkpoint.walBytesReclaimed > 0)),
+                            && results[0].checkpoint.walBytesReclaimed > 0
+                            && results[0].wal.physicalWalBytesBefore
+                                > results[0].wal.manager.physicalWalBytes)),
                 "segmented WAL benchmark did not expose rotation/reclamation metrics");
         }
         std::cout << "WAL benchmark tests passed\n";

@@ -328,12 +328,11 @@ BenchmarkResult runWalReclamation(const BenchmarkConfig& config) {
     result.timing = summarizeTimings(latency, totalLatency(latency));
     result.wal.walRecords = config.operations;
     result.wal.walPayloadBytes = config.operations * config.walPayloadBytes;
+    result.wal.physicalWalBytesBefore = before.physicalWalBytes;
     result.wal.manager = after;
     result.checkpoint.segmentsReclaimed = after.segmentsDeleted;
     result.checkpoint.walBytesReclaimed = reclaimed;
     result.checkpoint.reclamationDurationNs = totalLatency(latency);
-    result.storageBefore.databaseBytes = before.physicalWalBytes;
-    result.storageAfter.databaseBytes = after.physicalWalBytes;
     result.environment = currentEnvironment();
     result.validationPassed = true;
     cleanupDatabase(config);

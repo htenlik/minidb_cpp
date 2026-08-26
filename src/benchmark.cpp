@@ -404,6 +404,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
         writeBufferJson(output, result.buffer);
         output << ",\"wal\":{\"wal_records\":" << result.wal.walRecords
                << ",\"wal_payload_bytes\":" << result.wal.walPayloadBytes
+               << ",\"physical_wal_bytes_before\":"
+               << result.wal.physicalWalBytesBefore
                << ",\"payload_bytes_per_second\":"
                << result.wal.payloadBytesPerSecond
                << ",\"wal_bytes_written\":" << result.wal.manager.bytesWritten
@@ -538,6 +540,14 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.wal.appendTiming.p99Nanoseconds << '/'
            << result.wal.flushTiming.p95Nanoseconds << '/'
            << result.wal.flushTiming.p99Nanoseconds << '\n'
+           << "wal segments created/deleted/rotations/retained, bytes before/after/reclaimed: "
+           << result.wal.manager.segmentsCreated << '/'
+           << result.wal.manager.segmentsDeleted << '/'
+           << result.wal.manager.segmentRotations << '/'
+           << result.wal.manager.retainedSegments << '/'
+           << result.wal.physicalWalBytesBefore << '/'
+           << result.wal.manager.physicalWalBytes << '/'
+           << result.wal.manager.walBytesReclaimed << '\n'
            << "txn begun/committed/page updates/full-image bytes: "
            << result.recovery.transactions.transactionsBegun << '/'
            << result.recovery.transactions.transactionsCommitted << '/'
@@ -593,7 +603,7 @@ EnvironmentMetadata currentEnvironment() {
     const std::string buildType = std::string(MINIDB_BUILD_TYPE).empty()
         ? "unspecified" : MINIDB_BUILD_TYPE;
     return EnvironmentMetadata{
-        "v0.1.0 frozen MVP + Milestone 11C.1 sharp checkpoints",
+        "v0.1.0 frozen MVP + Milestone 11C.2 segmented WAL",
         MINIDB_GIT_COMMIT,
         __VERSION__,
         buildType,

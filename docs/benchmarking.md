@@ -229,7 +229,7 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 - `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
   evictions, pin activity, appended pages, WAL force requests, gauges, and capacity;
 - `wal`: record/payload counts, payload throughput, encoded bytes written, physical
-  retained bytes, logical end, active/retained segment identities, rotations/deletions,
+  retained bytes before/after reclamation, logical end, active/retained segment identities, rotations/deletions,
   buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
 - `recovery`: transaction/page-update/full-image counters, WAL/logical bytes and
   amplification, checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
