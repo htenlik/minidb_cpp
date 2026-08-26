@@ -1,241 +1,261 @@
 # MiniDB++
 
-A small educational database engine written from scratch in C++20.
+MiniDB++ is a relational database engine built from scratch in C++20 to explore
+database storage, indexing, query execution, buffering, durability, and crash recovery.
+It is an educational systems project with explicit binary formats and deliberately
+visible storage-engine boundaries—not a production database.
 
-The `v0.1.0` end-to-end MVP is implemented: a TCP-accessible database accepts a
-deliberately small SQL subset, stores tuples persistently, and uses a B+ tree primary
-index for efficient key lookup and range scans.
+## Highlights
 
-## v0.1.0 MVP
-
-The frozen MVP contains a persistent slotted-page heap, persistent B+ tree, reusable
-page allocator, schema/catalog/table layer, SQL parser and executor with primary-key
-access, versioned TCP protocol/server/client, and structural validation and tests.
+- Persistent storage built from fixed 4 KiB pages and variable-length slotted pages
+- Durable tuple heaps addressed by stable `(PageId, SlotId)` record identifiers
+- Page-native B+ tree primary indexes with split, merge, deletion, and page reclamation
+- Persistent schema, catalog, and table layers
+- Hand-written SQL lexer, parser, AST, semantic binder, and executor
+- Primary-key lookup or deterministic heap-scan access paths
+- Bounded buffer pool with move-only RAII page guards and LRU-K eviction
+- Persistent free-page reuse through a validated global free list
+- Versioned binary TCP protocol with command-line server and client
+- CRC32C-protected, segmented write-ahead log with safe segment reclamation
+- Implicit atomic recovery units for mutating SQL statements
+- STEAL / NO-FORCE physical REDO and UNDO using full-page images
+- Sharp checkpoints and checkpoint-bounded startup recovery
+- Subprocess crash-injection, randomized differential, corruption, and sanitizer tests
+- Deterministic benchmark and observability framework
 
 ## Architecture
 
-```text
-TCP Client -> Wire Protocol -> TCP Server -> SQL Lexer / Parser -> Semantic Executor
-                                                               |
-                                                               v
-                                                        Catalog / Table
-                                                         /           \
-                                                        v             v
-                                                   TupleStore      B+ Tree
-                                                        |
-                                                        v
-                                                   SlottedPage
-                                                        |
-                                                        v
-                                                   PageAllocator
-                                                        |
-                                                        v
-                                             BufferPoolManager / LRU-K
-                                                /               \
-                                               v                 v
-                                              LogManager    DiskManager
-                                               |                 |
-                                               v                 v
-                                        database.db.wal.d/   database.db
+```mermaid
+flowchart TB
+    Client[CLI client] --> Wire[Versioned TCP wire protocol]
+    Wire --> Engine[SqlEngine]
+    Engine --> SQL[Parser / semantic binding / executor]
+    SQL --> Relational[Catalog / Table]
+    Relational --> Storage[B+ tree + TupleStore]
+    Storage --> Allocator[PageAllocator]
+    Allocator --> Pool[BufferPoolManager]
+    Pool --> Replacer[LRU-K]
+    Pool --> Disk[DiskManager]
+    Disk --> Database[(database.db)]
+
+    Recovery[RecoveryCoordinator] --> Log[LogManager]
+    Log --> WAL[(segmented WAL)]
+    Recovery --> Pool
+    Checkpoint[CheckpointManager] --> Pool
+    Checkpoint --> Log
 ```
 
-## Milestones
+Persistent structures reference pages by `PageId`; transient buffer frames have a
+separate `FrameId`. The active relational path uses the bounded buffer pool. The legacy
+Pager and fixed-row RecordStore remain for historical and educational regression tests.
 
-1. **Pager / fixed-size disk pages** ✅
-2. **Row serialization/deserialization** ✅
-3. **Persistent RID-based record storage** ✅
-4. **In-memory and persistent B+ tree (Milestones 4A–4B.2)** ✅
-5. **Variable-length storage and relational layer (Milestones 5A–5B)** ✅
-6. **SQL lexer/parser/AST (Milestone 6)** ✅
-7. **SQL semantic analysis/query execution (Milestone 7)** ✅
-8. **TCP server/client protocol (Milestone 8)** ✅
+## Quick start
 
-The original MiniDB++ end-to-end MVP is frozen at tag `v0.1.0`.
-
-### Advanced database-systems roadmap
-
-9. **Benchmarking and storage-observability baseline** ✅
-10A. **DiskManager, bounded buffer pool, page guards, and LRU-K** ✅
-10B. **Engine-wide buffer-pool migration** ✅
-11A. **WAL foundation and buffer-pool write-ahead ordering** ✅
-11B. **Crash recovery and statement atomicity** ✅
-11C.1. **Sharp checkpoints and bounded recovery scan** ✅
-11C.2. **Segmented WAL, global logical LSNs, and safe reclamation** ✅
-11D. **Recovery/logging refinement experiments** — next
-12. **Transactions and concurrency** — planned
-13. **Experimental and paper-driven work** — later
-
-Milestones 11A–11C.2 add versioned WAL, global logical LSNs, CRC32C,
-WAL-before-page ordering, implicit atomic mutating statements, full-page before/after
-images, NO-FORCE durable commit, STEAL-safe eviction, startup REDO/UNDO, and a quiescent
-checkpoint whose double-slotted `database.db.ckpt` pointer bounds normal recovery to the
-post-checkpoint WAL tail. Active WAL lives in `database.db.wal.d/`; obsolete whole
-segments are deleted without rebasing LSNs. See [docs/wal.md](docs/wal.md),
-[docs/wal-segments.md](docs/wal-segments.md), [docs/recovery.md](docs/recovery.md), and
-[docs/checkpoints.md](docs/checkpoints.md).
-
-Milestone 10B routes the active TupleStore, persistent index, Catalog/Table, SQL, and TCP
-paths through move-only page guards, the bounded BufferPoolManager, and DiskManager.
-The legacy unbounded Pager remains for v0.1.x compatibility, fixed RecordStore tests,
-and explicitly labeled low-level benchmarks. Persistent formats did not change. See
-[docs/disk-manager.md](docs/disk-manager.md),
-[docs/buffer-pool.md](docs/buffer-pool.md),
-[docs/storage-architecture.md](docs/storage-architecture.md),
-[docs/benchmarking.md](docs/benchmarking.md), and
-[benchmarks/README.md](benchmarks/README.md).
-
-**Milestone 2.5 — versioned database metadata page** ✅
-
-## On-disk format
-
-```text
-MiniDB++ database file
-
-Page 0: database metadata / file header
-Page 1: allocatable storage
-Page 2: allocatable storage
-...
-```
-
-New databases begin with one 4096-byte metadata page, so the first normal allocation
-returns page ID 1. Existing databases are validated for the MiniDB++ magic, format
-version, page size, header size, and whole-page file size before normal pages are exposed.
-See [docs/storage-format.md](docs/storage-format.md) for the exact version 1 byte layout.
-
-## Row serialization
-
-Rows contain a 32-bit ID, a username of at most 32 bytes, and an email address of at most
-255 bytes. Every row serializes to exactly 294 bytes using this layout:
-
-| Offset | Size | Field |
-| ---: | ---: | --- |
-| 0 | 4 | ID (`uint32_t`, little-endian) |
-| 4 | 1 | Username length (`uint8_t`) |
-| 5 | 32 | Username bytes, followed by zero padding |
-| 37 | 2 | Email length (`uint16_t`, little-endian) |
-| 39 | 255 | Email bytes, followed by zero padding |
-
-Explicit serialization produces a stable, deterministic disk format. Writing a C++
-`Row` object directly would instead persist implementation details such as `std::string`
-pointers and capacity, along with potentially platform-dependent padding and byte order;
-those bytes would not reconstruct valid strings in another process.
-
-The 294-byte row layout and the database file format version are separate concerns. The
-file header identifies the surrounding database format; row encoding describes how an
-individual legacy row is converted to bytes within its fixed RecordPage layer.
-
-## Record storage
-
-The record store persists rows in fixed-slot RecordPages linked through page IDs. Each
-record is addressed by a stable `RecordId { pageId, slotId }`; scans visit linked pages
-in order and occupied slots in increasing order. Deletes do not compact or move other
-records, and freed slots can be reused by later inserts. Record-heap head page IDs remain
-explicit caller-owned values; the Milestone 5B Catalog uses the newer TupleStore rather
-than retrofitting catalog ownership onto this legacy heap format.
-
-The exact RecordPage version 1 header, occupancy bitmap, capacity calculation, and RID
-semantics are documented in [docs/storage-format.md](docs/storage-format.md).
-
-Milestone 5A adds a separate variable-length `TupleStore`. It persists opaque byte
-sequences in compacting slotted pages, preserves `(PageId, SlotId)` identifiers while
-payload bytes move, and reclaims empty pages through the global allocator. The legacy
-fixed-row format remains supported unchanged. See
-[docs/slotted-pages.md](docs/slotted-pages.md) for the exact layouts and heap semantics.
-
-## Primary index
-
-The Milestone 4A B+ tree is an in-memory unique primary index mapping 32-bit keys to
-existing `RecordId` values. It implements logarithmic lookup, insertion and deletion,
-linked-leaf range scans, redistribution, merging, root growth/shrink, and structural
-validation. Tree nodes are deliberately not persisted or assigned Pager page IDs yet.
-See [docs/bplus-tree.md](docs/bplus-tree.md) for its invariants and the Milestone 4B
-persistence boundary.
-
-Milestones 4B.1–4B.2 add a separate page-native persistent B+ tree with a stable index
-metadata page identity, explicitly encoded leaf/internal pages, insertion and splitting,
-lookup, linked-leaf scans, deletion and rebalancing, root shrinking, reusable free pages,
-reopen support, and disk-structure validation. See
-[docs/bplus-tree-storage.md](docs/bplus-tree-storage.md) for the exact byte layouts.
-The global allocation/free-list format is documented in
-[docs/page-allocation.md](docs/page-allocation.md).
-
-## Relational storage layer
-
-Milestone 5B adds immutable schemas, canonical versioned tuple encoding, a persistent
-catalog rooted through database metadata, and schema-aware tables that coordinate a
-TupleStore with an optional `UINT32` primary-key B+ tree. See
-[docs/schema-and-tuples.md](docs/schema-and-tuples.md),
-[docs/catalog.md](docs/catalog.md), and [docs/table-layer.md](docs/table-layer.md).
-
-## SQL front end
-
-Milestone 6 adds a separate database-independent `minidb_sql` library with a hand-written
-lexer, structured source diagnostics, move-only AST, and recursive-descent parser for
-CREATE TABLE, INSERT, SELECT, UPDATE, and DELETE. It performs no Catalog lookup and no
-execution. See [docs/sql-parser.md](docs/sql-parser.md) for the exact dialect and grammar.
-
-Milestone 7 adds source-aware semantic binding and execution for that existing grammar.
-It performs strict schema-directed literal conversion, SQL three-valued WHERE logic,
-structured results/statistics, primary-key equality lookups, and heap-scan fallback
-through Catalog and Table. See [docs/sql-execution.md](docs/sql-execution.md).
-
-## TCP server and client
-
-Milestone 8 adds a big-endian, versioned binary protocol and POSIX TCP server/client.
-Structured command results, SELECT values/RIDs/statistics, and source-aware errors survive
-the network round trip. Database execution is serial; mutating success is returned only
-after durable WAL COMMIT, without forcing database pages. The server binds
-`127.0.0.1:7432` by default. See
-[docs/wire-protocol.md](docs/wire-protocol.md) and
-[docs/server-client.md](docs/server-client.md).
-
-Protocol v1 is plaintext and has no authentication or authorization. It is for trusted
-local development, not untrusted networks.
-
-## Build
+Requirements are CMake 3.20 or newer, a C++20 compiler, and a POSIX platform for the
+TCP and crash-injection tests.
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-./build/minidb demo.db
-./build/minidb_server demo.db --port 7432 --buffer-frames 128 --lru-k 2 \
-  --checkpoint-wal-bytes 67108864 --wal-segment-bytes 16777216
-./build/minidb_client --port 7432 --execute "SELECT * FROM users;"
 ```
 
-For representative benchmarks, configure a Release build and run the curated suite:
+Start a database server (default address `127.0.0.1:7432`):
 
 ```bash
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release
-./build-release/minidb_bench --suite baseline --json benchmarks/results/baseline.json
+./build/minidb_server demo.db
 ```
 
-Machine-specific benchmark results are intentionally not committed.
+In another terminal, start the interactive client:
 
-Example:
+```bash
+./build/minidb_client
+```
+
+Both programs accept `--host` and `--port`. The client also supports one-shot execution
+with `--execute SQL` and access-path counters with `--stats`. Run either executable with
+invalid arguments to see its concise usage line.
+
+## Demo
+
+With the server running, these one-shot requests exercise the implemented SQL path:
+
+```bash
+./build/minidb_client --execute \
+  "CREATE TABLE users (id UINT32 PRIMARY KEY, username VARCHAR(64) NOT NULL, score INT64, active BOOLEAN NOT NULL);"
+./build/minidb_client --execute \
+  "INSERT INTO users VALUES (1, 'alice', 10, TRUE);"
+./build/minidb_client --execute \
+  "INSERT INTO users VALUES (2, 'bob', 20, FALSE);"
+./build/minidb_client --execute \
+  "UPDATE users SET score = 25, active = TRUE WHERE id = 2;"
+./build/minidb_client --execute \
+  "SELECT id, username, score FROM users WHERE id >= 1 AND active = TRUE;"
+./build/minidb_client --execute \
+  "DELETE FROM users WHERE id = 1;"
+```
+
+The `SELECT` response is rendered as a small text table:
 
 ```text
-minidb> .pages
-1 page(s)
-minidb> .alloc
-allocated page 1
-minidb> .flush
-flushed
-minidb> .quit
+id | username | score
+---+----------+------
+1  | alice    | 10
+2  | bob      | 25
+2 rows
 ```
 
-Restarting with the same file should show that the allocated page still exists.
+## SQL scope
 
-## Why 4096-byte pages?
+| Statement | Current support |
+| --- | --- |
+| `CREATE TABLE` | Columns, nullability, and one `UINT32 PRIMARY KEY` |
+| `INSERT` | One `VALUES` row, with or without an explicit column list |
+| `SELECT` | `*` or named projections, optional `WHERE` |
+| `UPDATE` | Literal assignments with optional `WHERE` |
+| `DELETE` | Optional `WHERE` |
 
-Databases generally group storage into fixed-size pages instead of performing arbitrary
-small disk operations per record. A page becomes the unit for caching, indexing,
-serialization, and disk I/O.
+The type system contains `UINT32`, `INT64`, `BOOLEAN`, and `VARCHAR(1..4000)`, plus
+`NULL` for nullable columns. `WHERE` supports `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`,
+parentheses, `NOT`, `AND`, and `OR`, with SQL three-valued logic. A suitable primary-key
+equality predicate uses the persistent B+ tree; other predicates use a heap scan.
 
-## Scope
+The current grammar intentionally excludes joins, aggregation and `GROUP BY`,
+`ORDER BY`, `LIMIT`/`OFFSET`, aliases, subqueries, set operations, secondary indexes,
+schema alteration, query optimization, and user-visible `BEGIN`/`COMMIT` transactions.
 
-This is intentionally not PostgreSQL or SQLite. The point is to implement enough of the
-stack ourselves to demonstrate disk/page management, serialization, tree indexing,
-query parsing/execution, networking, testing, and benchmarking.
+## Storage engine
+
+Every database file begins with a versioned metadata page, followed by fixed 4096-byte
+pages. `PageAllocator` allocates or reuses validated free pages. Variable-length tuple
+bytes live in slotted pages; a `RecordId` combines a page ID and stable slot ID, so
+in-page compaction can move bytes without invalidating an index entry. `TupleStore`
+links those pages into a persistent heap. A page-native B+ tree maps `UINT32` primary
+keys to RIDs and maintains its own stable metadata-page identity as roots change.
+
+The exact layouts and invariants are documented in
+[storage-format.md](docs/storage-format.md), [slotted-pages.md](docs/slotted-pages.md),
+and [bplus-tree-storage.md](docs/bplus-tree-storage.md).
+
+## Buffer pool
+
+The active engine has a fixed number of in-memory frames—128 by default—and uses LRU-K
+with `K = 2` by default. A `PageId` identifies persistent storage; a `FrameId` identifies
+only a resident cache frame. Fetching pins a frame, and the move-only `ReadPageGuard`
+and `WritePageGuard` release that pin through RAII. Write guards carry dirty-page intent.
+Only unpinned frames are evictable, and a dirty victim is written after the WAL rule is
+satisfied. See [buffer-pool.md](docs/buffer-pool.md).
+
+## Durability and crash recovery
+
+MiniDB++ treats each mutating SQL statement as one implicit recovery unit; it does not
+expose user-managed transactions. Physical WAL records contain complete 4096-byte page
+before- and after-images, transaction chains, LSNs, and CRC32C validation. The buffer
+pool may write an uncommitted dirty page (STEAL) and need not force committed pages at
+commit (NO-FORCE), so startup recovery redoes committed winners and undoes the final
+uncommitted loser.
+
+The observable commit rule is:
+
+```text
+durable COMMIT    -> recover the statement as committed
+no durable COMMIT -> recover the statement as aborted
+```
+
+A successful mutation is returned to the client only after its COMMIT record is
+fsynced. Sharp, quiescent checkpoints flush the bounded pool and publish a double-slot
+recovery pointer. The WAL is split into fixed-capacity segments; after checkpoint
+publication, obsolete whole segments behind the retained recovery boundary are safely
+reclaimed. This is a correctness-first full-page design and does not claim ARIES,
+general transactions, or crash-safe operation without the WAL sidecars.
+
+Recovery is tested by real subprocess termination with `_exit`, bypassing normal
+destructors. Directed cases include crashes before and after COMMIT fsync, dirty STEAL
+before commit, NO-FORCE winners, repeated crashes during REDO or UNDO, checkpoint
+publication boundaries, legacy-WAL migration, segment rotation, and reclamation.
+See [wal.md](docs/wal.md), [recovery.md](docs/recovery.md),
+[checkpoints.md](docs/checkpoints.md), and [wal-segments.md](docs/wal-segments.md).
+
+## Benchmarks
+
+The benchmark runner emits versioned JSON with configuration, latency distributions,
+storage/WAL counters, and environment metadata. One deterministic Release measurement
+on a single development machine showed the recovery scan boundary effect:
+
+| Recovery mode | Elapsed | WAL scanned |
+| --- | ---: | ---: |
+| Full historical scan | ~204.97 ms | 33.70 MiB |
+| Checkpoint-aware scan | ~2.13 ms | ~331 KiB |
+
+These are reproducible experiment results, not universal performance claims or a
+comparison with another database. The suite also includes controlled LRU-K, storage,
+SQL, TCP, WAL, transaction, checkpoint, and segment-lifecycle workloads. See
+[benchmarking.md](docs/benchmarking.md) and [benchmarks/README.md](benchmarks/README.md).
+
+## Testing
+
+Configure and run the complete suite with warnings enabled:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic"
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+The suite covers byte-level format validation, deterministic state models, randomized
+differential tests, malformed and fuzz-like inputs, real reopen boundaries, TCP
+integration, and subprocess crash recovery. The clean Release verification for
+`v0.2.0` runs 54 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer
+builds are also used during release verification.
+
+## Documentation
+
+- [Storage architecture](docs/storage-architecture.md)
+- [Database storage formats](docs/storage-format.md)
+- [Buffer pool and LRU-K](docs/buffer-pool.md)
+- [Write-ahead log](docs/wal.md)
+- [Crash recovery](docs/recovery.md)
+- [Sharp checkpoints](docs/checkpoints.md)
+- [Segmented WAL lifecycle](docs/wal-segments.md)
+- [Benchmarking](docs/benchmarking.md)
+- [Wire protocol](docs/wire-protocol.md)
+- [Server and client](docs/server-client.md)
+- [SQL parsing](docs/sql-parser.md) and [execution](docs/sql-execution.md)
+
+## Known limitations
+
+- Database execution is single-threaded, with at most one active mutating statement.
+- There is no user-visible transaction syntax, MVCC, locking, or isolation model.
+- Full-page WAL is simple and robust but has high write amplification.
+- Sharp checkpoints are synchronous and require a quiescent engine.
+- There is no point-in-time recovery or WAL archive.
+- Query planning, joins, aggregation, and secondary indexes are not implemented.
+- The TCP endpoint has no TLS, authentication, authorization, or multi-client execution;
+  it is intended for local development and protocol experimentation.
+
+## Roadmap
+
+Completed broad phases:
+
+- Persistent page, tuple-heap, catalog, and primary-index storage
+- SQL execution and versioned TCP client/server protocol
+- Bounded buffer pool with LRU-K
+- WAL, crash recovery, sharp checkpoints, and segmented WAL lifecycle
+
+Future research directions include finer-grained logging and recovery experiments,
+concurrency and explicit transactions, additional query/index capabilities, and
+storage-performance experiments.
+
+## Project history
+
+- `v0.1.0` is the frozen original end-to-end MVP.
+- `v0.2.0` is the first public portfolio release, adding the bounded active storage
+  path, durability/recovery, checkpoints, segmented WAL, tests, and observability work.
+
+## Development
+
+The project uses C++20 and CMake. Keep normal builds warning-clean under
+`-Wall -Wextra -Wpedantic`, preserve documented persistent and wire formats, and add
+focused tests for behavioral or format changes. Generated builds, database files, WAL
+sidecars, and benchmark JSON are intentionally ignored.
