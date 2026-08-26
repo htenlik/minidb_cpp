@@ -173,6 +173,7 @@ private:
 void migrateLegacyWalToSegments(
     const std::string& legacyWalPath,
     const std::string& segmentedDirectory,
-    std::uint32_t payloadCapacity = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY);
+    std::uint32_t payloadCapacity = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY,
+    Lsn migrationBaseLsn = INVALID_LSN);
 
 } // namespace minidb

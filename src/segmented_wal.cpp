@@ -253,7 +253,7 @@ encodeWalSegmentManifest(const WalSegmentManifest& manifest) {
         || !isValidLsn(manifest.initialLsn)
         || manifest.initialLsn < wal_file_layout::HEADER_SIZE
         || (manifest.migrationBaseLsn != INVALID_LSN
-            && manifest.migrationBaseLsn < manifest.initialLsn)) {
+            && manifest.migrationBaseLsn != manifest.initialLsn)) {
         throw WalError(WalErrorKind::InvalidArgument, "Invalid segmented-WAL manifest fields");
     }
     std::array<std::byte, HEADER_SIZE> bytes{};
@@ -294,7 +294,7 @@ WalSegmentManifest decodeWalSegmentManifest(std::span<const std::byte> bytes) {
         || !isValidLsn(manifest.initialLsn)
         || manifest.initialLsn < wal_file_layout::HEADER_SIZE
         || (manifest.migrationBaseLsn != INVALID_LSN
-            && manifest.migrationBaseLsn < manifest.initialLsn)) {
+            && manifest.migrationBaseLsn != manifest.initialLsn)) {
         throw WalError(WalErrorKind::CorruptHeader, "Malformed segmented-WAL manifest fields");
     }
     return manifest;
@@ -345,7 +345,8 @@ void SegmentedWalStorage::createNewStore(
     }
     manifest_.payloadCapacity = payloadCapacity;
     manifest_.firstRetainedSegmentId = 1;
-    manifest_.initialLsn = wal_file_layout::HEADER_SIZE;
+    manifest_.initialLsn = migrationBaseLsn == INVALID_LSN
+        ? wal_file_layout::HEADER_SIZE : migrationBaseLsn;
     manifest_.migrationBaseLsn = migrationBaseLsn;
     publishManifest();
     createSegment(manifest_.initialLsn);
@@ -658,7 +659,8 @@ std::uint64_t SegmentedWalStorage::reclaimBefore(
 void migrateLegacyWalToSegments(
     const std::string& legacyWalPath,
     const std::string& segmentedDirectory,
-    std::uint32_t payloadCapacity) {
+    std::uint32_t payloadCapacity,
+    Lsn migrationBaseLsn) {
     if (std::filesystem::exists(segmentedDirectory)) return;
     const auto scan = scanWalFile(legacyWalPath);
     if (scan.truncatedTail) {
@@ -666,18 +668,27 @@ void migrateLegacyWalToSegments(
                        "Cannot migrate a legacy WAL with an incomplete tail");
     }
     const auto temporary = segmentedDirectory + ".tmp";
+    auto first = scan.records.begin();
+    if (migrationBaseLsn != INVALID_LSN) {
+        first = std::lower_bound(
+            scan.records.begin(), scan.records.end(), migrationBaseLsn,
+            [](const LogRecord& record, Lsn lsn) { return record.lsn < lsn; });
+        if (first == scan.records.end() || first->lsn != migrationBaseLsn) {
+            throw WalError(WalErrorKind::InvalidArgument,
+                           "Legacy migration base is not a WAL record boundary");
+        }
+    }
+    const auto migrationBase = first == scan.records.end()
+        ? wal_file_layout::HEADER_SIZE : first->lsn;
     std::error_code error;
     std::filesystem::remove_all(temporary, error);
     recoveryFailPoint("wal_migration_after_temp_cleanup");
     {
-        const auto migrationBase = scan.records.empty()
-            ? wal_file_layout::HEADER_SIZE : scan.records.front().lsn;
         SegmentedWalStorage storage(temporary, payloadCapacity, true, migrationBase);
         recoveryFailPoint("wal_migration_after_temp_create");
-        for (std::size_t index = 0; index < scan.records.size(); ++index) {
-            const auto& record = scan.records[index];
-            storage.appendRecord(record.lsn, encodeWalRecord(record, record.lsn));
-            if (index == 0) recoveryFailPoint("wal_migration_after_first_record");
+        for (auto record = first; record != scan.records.end(); ++record) {
+            storage.appendRecord(record->lsn, encodeWalRecord(*record, record->lsn));
+            if (record == first) recoveryFailPoint("wal_migration_after_first_record");
         }
         storage.flush();
         recoveryFailPoint("wal_migration_after_final_record");

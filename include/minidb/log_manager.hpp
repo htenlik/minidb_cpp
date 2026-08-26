@@ -100,7 +100,7 @@ public:
     void rotateSegment();
     [[nodiscard]] std::uint64_t reclaimSegmentsBefore(
         Lsn floorLsn, std::size_t extraSegments = 0);
-    void migrateLegacyToSegmented();
+    void migrateLegacyToSegmented(Lsn migrationBaseLsn = INVALID_LSN);
 
     [[nodiscard]] LogManagerStats stats() const noexcept;
     void resetStats() noexcept;

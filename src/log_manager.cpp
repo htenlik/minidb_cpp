@@ -479,10 +479,11 @@ std::uint64_t LogManager::reclaimSegmentsBefore(
     return reclaimed;
 }
 
-void LogManager::migrateLegacyToSegmented() {
+void LogManager::migrateLegacyToSegmented(Lsn migrationBaseLsn) {
     if (!legacyMigrationPending()) return;
     flushAll();
-    migrateLegacyWalToSegments(path_, segmentedPath_, segmentPayloadCapacity_);
+    migrateLegacyWalToSegments(
+        path_, segmentedPath_, segmentPayloadCapacity_, migrationBaseLsn);
     if (descriptor_ >= 0) {
         ::close(descriptor_);
         descriptor_ = -1;

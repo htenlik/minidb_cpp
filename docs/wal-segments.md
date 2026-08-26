@@ -85,7 +85,7 @@ small and not rewritten during ordinary appends.
 | 16 | 4 | persisted segment payload capacity |
 | 20 | 4 | flags, zero |
 | 24 | 8 | first retained segment ID |
-| 32 | 8 | initial logical LSN (`64`) |
+| 32 | 8 | first retained logical LSN (`64` native; migration checkpoint BEGIN otherwise) |
 | 40 | 8 | first migrated legacy LSN, or `INVALID_LSN` for a native store |
 | 48 | 8 | reserved zero |
 | 56 | 4 | CRC32C with this field zeroed |
@@ -126,7 +126,8 @@ control sidecar is not a single point of recoverability.
 `database.db.wal` remains the legacy v1 monolithic path. Production startup prefers a
 valid published segmented directory. Otherwise it opens legacy WAL, completes normal
 REDO/UNDO (including durable ABORT for a loser), takes a sharp checkpoint, and migrates
-the complete compatible logical record stream.
+the complete checkpoint BEGIN/END pair plus every later record. Earlier legacy history
+is omitted; retained records keep their original logical LSN, `prevLSN`, and CRC bytes.
 
 Migration builds `database.db.wal.d.tmp`, writes/fsyncs its manifest and segment files,
 fsyncs the temporary directory, atomically renames it to `database.db.wal.d`, and

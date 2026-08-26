@@ -72,12 +72,12 @@ void testExactCodecs() {
     require(minidb::decodeWalSegmentHeader(bytes) == header,
             "Segment header round trip changed fields");
 
-    const minidb::WalSegmentManifest manifest{4096, 9, 64, 1234};
+    const minidb::WalSegmentManifest manifest{4096, 9, 64, 64};
     const auto manifestBytes = minidb::encodeWalSegmentManifest(manifest);
     require(minidb::byte_codec::readUint32(manifestBytes, 16) == 4096
                 && minidb::byte_codec::readUint64(manifestBytes, 24) == 9
                 && minidb::byte_codec::readUint64(manifestBytes, 32) == 64
-                && minidb::byte_codec::readUint64(manifestBytes, 40) == 1234
+                && minidb::byte_codec::readUint64(manifestBytes, 40) == 64
                 && minidb::decodeWalSegmentManifest(manifestBytes) == manifest,
             "Segment manifest layout/round trip changed");
 

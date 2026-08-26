@@ -74,6 +74,9 @@ void testCommittedLegacyMigration() {
         require(!std::filesystem::exists(minidb::walPathForDatabase(path))
                     && std::filesystem::exists(minidb::segmentedWalPathForDatabase(path)),
                 "Published migration did not retire the legacy WAL");
+        require(server.logManager().oldestRetainedLsn()
+                    > minidb::wal_file_layout::HEADER_SIZE,
+                "Production migration retained obsolete pre-checkpoint WAL history");
         migratedHighWater = server.logManager().lastValidOffset();
         nextTransaction = server.recoveryCoordinator().nextTransactionId();
         server.catalog().validate();

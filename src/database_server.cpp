@@ -20,7 +20,11 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
         recoveryStats_, CheckpointPolicy{config.checkpointWalBytes, config.checkpointStatements});
     if (logManager_.legacyMigrationPending()) {
         static_cast<void>(checkpoints_->checkpoint());
-        logManager_.migrateLegacyToSegmented();
+        const auto checkpointEnd = logManager_.readRecordAt(
+            checkpoints_->stats().lastCheckpointEndLsn);
+        const auto migrationBase = decodeCheckpointEndLogPayload(
+            checkpointEnd.payload).checkpointBeginLsn;
+        logManager_.migrateLegacyToSegmented(migrationBase);
     }
     metadataManager_ = std::make_unique<DatabaseMetadataManager>(
         diskManager_, *recovery_, logManager_);
