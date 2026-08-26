@@ -108,6 +108,15 @@ void testCrossSegmentLoserUndo() {
     }
 }
 
+[[noreturn]] void reclaimedHistoryLoserChild(
+    const std::string& path, std::uint32_t segmentBytes, std::uint32_t key) {
+    ::setenv("MINIDB_FAILPOINT", "before_commit_append", 1);
+    minidb::net::DatabaseServer server(path, config(segmentBytes, 1));
+    static_cast<void>(server.sqlEngine().execute(
+        "INSERT INTO items VALUES (" + std::to_string(key) + ", 'loser')"));
+    ::_exit(90);
+}
+
 void testManyCheckpointReclamationCyclesAndLostControl() {
     minidb::test::TemporaryDatabase database("wal_many_reclaim_cycles");
     constexpr std::uint32_t SEGMENT_BYTES = 40U * 1024U;
@@ -134,13 +143,22 @@ void testManyCheckpointReclamationCyclesAndLostControl() {
         server.catalog().validate();
     }
 
+    const auto child = ::fork();
+    if (child < 0) throw std::runtime_error("fork failed");
+    if (child == 0) reclaimedHistoryLoserChild(path, SEGMENT_BYTES, nextKey);
+    int status = 0;
+    static_cast<void>(::waitpid(child, &status, 0));
+    require(WIFEXITED(status) && WEXITSTATUS(status) == 86,
+            "Post-reclamation loser child missed pre-COMMIT failpoint");
+
     std::filesystem::remove(minidb::checkpointPathForDatabase(path));
     {
         minidb::net::DatabaseServer recovered(path, config(SEGMENT_BYTES, 4));
         require(recovered.startupRecoveryStats().checkpointUsed
                     && !recovered.startupRecoveryStats().fullScanFallback
+                    && recovered.startupRecoveryStats().loserTransactions == 1
                     && rowCount(recovered, "items") == nextKey,
-                "Control loss after many reclamation cycles was not recoverable from WAL");
+                "Retained-WAL checkpoint discovery did not undo the post-cycle loser");
         require(recovered.checkpointControl().select(recovered.logManager()).slot.has_value(),
                 "Control loss fallback did not rebuild checkpoint metadata");
         recovered.catalog().validate();
