@@ -165,7 +165,9 @@ for those semantics.
 TCP. They report statement percentiles, WAL/fsync and buffer counters,
 PAGE_UPDATE/full-image bytes, and WAL bytes divided by an explicit 32-byte-per-operation
 logical-change estimate. That ratio is an experiment-specific amplification indicator,
-not a universal efficiency claim. `recovery_full_scan` builds deterministic committed
+not a universal efficiency claim. Their `wal_bytes_scanned` is the logical tail that a
+restart at the latest currently selectable checkpoint would scan; it is a projected
+byte count, not a timed recovery run. `recovery_full_scan` builds deterministic committed
 history, measures analysis/REDO/UNDO separately, and validates through normal reopen.
 There are no CI timing thresholds.
 

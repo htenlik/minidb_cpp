@@ -1219,6 +1219,15 @@ BenchmarkResult runTransactional(
         result.recovery.loggingAmplification =
             static_cast<double>(result.recovery.walBytes)
             / static_cast<double>(result.recovery.logicalChangedBytes);
+        const auto checkpoint = server.checkpointControl().select(server.logManager());
+        const auto recoveryStart = checkpoint.slot.has_value()
+            ? checkpoint.slot->recoveryStartOffset : server.logManager().oldestRetainedLsn();
+        result.recovery.recovery.checkpointUsed = checkpoint.slot.has_value();
+        result.recovery.recovery.recoveryStartOffset = recoveryStart;
+        result.recovery.recovery.walBytesSkipped = recoveryStart
+            - server.logManager().oldestRetainedLsn();
+        result.recovery.recovery.walBytesScanned =
+            server.logManager().lastValidOffset() - recoveryStart;
     }
     cleanupDatabase(config);
     return result;
