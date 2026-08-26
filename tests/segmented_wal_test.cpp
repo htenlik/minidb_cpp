@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <span>
 #include <string>
@@ -331,6 +332,76 @@ void testDiscoveryCorruptionAndFuzz() {
     require(rejected == CASES, "Malformed segment-header fuzz corpus was accepted");
 }
 
+void testDeterministicSegmentStoreModel() {
+    minidb::test::TemporaryDatabase database("segmented_model");
+    const auto directory = minidb::segmentedWalPathForDatabase(database.path().string());
+    constexpr std::uint32_t CAPACITY = 512;
+    constexpr std::uint32_t SEED = 0x11C20003U;
+    constexpr std::size_t OPERATIONS = 5000;
+    std::mt19937 random(SEED);
+    auto storage = std::make_unique<minidb::SegmentedWalStorage>(directory, CAPACITY, true);
+    std::vector<minidb::LogRecord> model;
+    minidb::Lsn previous = minidb::INVALID_LSN;
+    minidb::WalSegmentId highestSegmentId = 0;
+    bool appendedSinceRotation = false;
+
+    const auto compareModel = [&] {
+        const auto scan = storage->scan();
+        const auto oldest = storage->segments().front().header.startLsn;
+        const auto first = std::lower_bound(
+            model.begin(), model.end(), oldest,
+            [](const minidb::LogRecord& value, minidb::Lsn lsn) {
+                return value.lsn < lsn;
+            });
+        require(scan.records.size() == static_cast<std::size_t>(model.end() - first)
+                    && std::equal(scan.records.begin(), scan.records.end(), first),
+                "Segment store diverged from deterministic logical-record model");
+        minidb::WalSegmentId prior = 0;
+        for (const auto& segment : storage->segments()) {
+            require(segment.header.segmentId > prior,
+                    "Segment IDs were reused or moved backwards");
+            prior = segment.header.segmentId;
+        }
+        require(prior >= highestSegmentId, "Highest SegmentId moved backwards");
+        highestSegmentId = prior;
+    };
+
+    for (std::size_t operation = 0; operation < OPERATIONS; ++operation) {
+        if (operation != 0 && operation % 509 == 0 && storage->segments().size() > 4) {
+            const auto scan = storage->scan();
+            const auto floor = scan.records[scan.records.size() * 2 / 3].lsn;
+            static_cast<void>(storage->reclaimBefore(floor, random() % 2));
+        } else if (operation != 0 && operation % 173 == 0 && appendedSinceRotation) {
+            storage->rotate();
+            appendedSinceRotation = false;
+        } else {
+            const auto payloadSize = 1U + random() % 91U;
+            auto value = record(payloadSize, operation + 1, previous);
+            const auto lsn = storage->logicalEnd();
+            const auto encoded = minidb::encodeWalRecord(value, lsn);
+            storage->appendRecord(lsn, encoded);
+            value.lsn = lsn;
+            model.push_back(std::move(value));
+            previous = lsn;
+            appendedSinceRotation = true;
+        }
+
+        if (operation % 101 == 0) {
+            storage->flush();
+            require(storage->durableLsn() == storage->lastRecordLsn(),
+                    "Durable LSN did not follow the flushed logical record");
+        }
+        if (operation != 0 && operation % 211 == 0) {
+            storage.reset();
+            storage = std::make_unique<minidb::SegmentedWalStorage>(
+                directory, CAPACITY, false);
+        }
+        if (operation % 47 == 0) compareModel();
+    }
+    storage->flush();
+    compareModel();
+}
+
 } // namespace
 
 int main() {
@@ -342,6 +413,7 @@ int main() {
         testRetainedCheckpointFallbackAndControlRebuild();
         testLegacyMigration();
         testDiscoveryCorruptionAndFuzz();
+        testDeterministicSegmentStoreModel();
         std::cout << "segmented_wal_test passed\n";
         return 0;
     } catch (const std::exception& error) {
