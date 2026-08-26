@@ -1,16 +1,16 @@
 # Write-ahead log and recovery records
 
-Milestone 11A adds a versioned sidecar write-ahead log, log sequence
-numbers (LSNs), buffered append and `fsync` durability, safe scanning, and write-ahead
-ordering in the buffer pool. Milestone 11B uses that substrate for full-page physical
-before/after logging, implicit durable statement commit, and startup REDO/UNDO. It is
-not ARIES; [recovery.md](recovery.md) defines the simpler protocol.
+MiniDB++ uses a versioned sidecar write-ahead log with log sequence numbers (LSNs),
+buffered append and `fsync` durability, safe scanning, write-ahead ordering, implicit
+durable statement commit, and startup REDO/UNDO. Full-page physical updates remain the
+default; an opt-in physical byte-range encoding is documented in
+[wal-byte-range.md](wal-byte-range.md). This protocol is not ARIES;
+[recovery.md](recovery.md) defines its recovery boundary.
 
 A bounded pool can evict dirty frames (the storage pressure behind a STEAL-style
 design), while logical success need not force every data page immediately (the
 motivation behind NO-FORCE). Those choices require log-before-data ordering plus
-REDO/UNDO. 11A established the ordering substrate and 11B completes this serial,
-statement-scoped baseline.
+REDO/UNDO in a serial, statement-scoped recovery model.
 
 For database path `database.db`, active WAL now lives in `database.db.wal.d/`.
 `database.db.wal` remains the readable legacy-v1 migration source. Exact segment and
@@ -55,15 +55,16 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 | 8 | 4 | total record length | header plus payload |
 | 12 | 4 | payload length | total length minus 48 |
 | 16 | 8 | LSN | equals this record's global logical position |
-| 24 | 8 | `TransactionId` | grouping identity reserved for 11B |
+| 24 | 8 | `TransactionId` | statement transaction identity |
 | 32 | 8 | previous LSN | earlier record or `INVALID_LSN` |
 | 40 | 4 | checksum | CRC32C of the complete record with these four bytes zero |
 | 44 | 4 | flags/reserved | zero in version 1 |
 | 48 | variable | payload | interpreted by recovery according to record type |
 
 Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
-`5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, and `7 CHECKPOINT_END`. Production uses the
-transaction records and both checkpoint records; COMPENSATION remains reserved.
+`5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, `7 CHECKPOINT_END`, and
+`8 PAGE_DELTA_UPDATE`. Production uses both physical update encodings and both
+checkpoint records; COMPENSATION remains reserved.
 `TransactionId` is `uint64_t`, with zero reserved
 as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
 16 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
@@ -90,7 +91,7 @@ rejects an unknown LSN, writes pending bytes, calls POSIX `fsync`, and only then
 the durable LSN. Because the whole current buffer is flushed, durability can advance
 beyond the requested target to the latest appended record. Repeating a request already
 covered by `durableLsn` is a no-op. There is no background logger or asynchronous/group
-commit in 11A.
+commit in the current single-threaded design.
 
 Standalone/eager opening validates and scans every complete record, reconstructing its
 next, last-appended, and current durable positions. The standalone scanner validates
@@ -126,7 +127,7 @@ Each `BufferFrame` now has volatile `pageLsn`, initialized to `INVALID_LSN` on a
 page, frame reuse, and disk reload. `WritePageGuard::setPageLsn()` requires a write pin,
 a record known by the attached `WalFlushProvider`, and a value no older than the
 frame's current LSN. Equal assignment is idempotent; regression and unknown/invalid LSNs
-are rejected. The page LSN is not stored in any database-page byte in 11A.
+are rejected. The page LSN is not stored in any database-page byte.
 
 For a dirty frame with a valid page LSN, the buffer pool enforces:
 
@@ -144,7 +145,7 @@ frames, forces once through that point, then writes the pages. A clean frame nev
 WAL; it can retain a volatile LSN until reuse, when the LSN is reset.
 
 The provider remains optional for legacy and low-level tests. With no provider,
-unlogged dirty pages have `INVALID_LSN` and preserve Milestone 10 behavior. Production
+unlogged dirty pages have `INVALID_LSN` and preserve low-level compatibility. Production
 `DatabaseServer` attaches LogManager and RecoveryCoordinator so page write intent and
 pre-persistence preparation generate records centrally.
 
@@ -168,10 +169,10 @@ A batch size of 1, 10, or 100 is a synchronous experiment, not group commit.
 
 ## Current boundary
 
-11B guarantees statement atomicity across tested process crashes: durable-COMMIT winners
-are REDOed and a tail loser is undone. 11C.1 adds sharp checkpoints that bound normal
-recovery analysis to the post-checkpoint tail. 11C.2 adds 16-MiB segments and safe
-whole-segment deletion behind that boundary. Logical WAL generation continues to rise,
+MiniDB++ guarantees statement atomicity across tested process crashes: durable-COMMIT
+winners are REDOed and a tail loser is undone. Sharp checkpoints bound normal recovery
+analysis to the post-checkpoint tail, while segmented WAL permits safe whole-segment
+deletion behind that boundary. Logical WAL generation continues to rise,
 while retained physical bytes drop after checkpoints. There is no archive/PITR,
 persistent pageLSN, fuzzy checkpoint, CLR, user transaction SQL, concurrency, or group
 commit.

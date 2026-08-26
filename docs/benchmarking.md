@@ -1,17 +1,15 @@
 # Benchmarking and storage observability
 
-Milestone 9 established the repeatable post-`v0.1.0` baseline; 10A added standalone
-buffer workloads; 10B migrated active engine workloads to the bounded pool; 11A adds
-standalone WAL append/force experiments; 11B adds durable transaction and full-history
-recovery experiments; 11C.1 adds sharp-checkpoint latency and bounded-tail recovery;
-11C.2 adds segment-rotation and reclamation experiments. The harness reports measurements, not
-performance claims.
+The harness covers the legacy Pager, bounded buffer pool, storage/index/SQL paths,
+standalone WAL append/force behavior, durable transaction and recovery paths, sharp
+checkpoints, segment rotation/reclamation, and full-page versus physical byte-range
+logging. It reports measurements, not performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
 
 ## Storage backends
 
-> The v0.1.x Pager retains accessed pages in an unbounded in-memory cache for the
+> The legacy Pager retains accessed pages in an unbounded in-memory cache for the
 > lifetime of the Pager.
 
 This cache has no capacity limit, replacement policy, pin/unpin protocol, eviction,
@@ -114,8 +112,8 @@ The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sq
 | TCP loopback | `tcp_pk_lookup`, `tcp_heap_scan`, `tcp_insert`, `tcp_mixed` |
 | Mixed profiles | `mixed_read_heavy`, `mixed_write_heavy` (local SQL) |
 | WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush`, `wal_segment_rotation`, `wal_reclamation` |
-| Durable statements | `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed` |
-| Recovery | `recovery_full_scan` |
+| Durable statements | `txn_insert`, `txn_update`, `txn_varchar_update`, `txn_delete`, `txn_bplus_insert`, `txn_mixed` |
+| Recovery | `recovery_full_scan`, `recovery_loser` |
 
 `wal_append_buffered` appends all records then performs one final synchronous force.
 `wal_append_flush_each` forces every record. `wal_batch_flush` forces every
@@ -162,13 +160,16 @@ are not forced per response. They must not be compared to local SQL without acco
 for those semantics.
 
 `txn_*` workloads use the production recovery-enabled `DatabaseServer` graph without
-TCP. They report statement percentiles, WAL/fsync and buffer counters,
-PAGE_UPDATE/full-image bytes, and WAL bytes divided by an explicit 32-byte-per-operation
-logical-change estimate. That ratio is an experiment-specific amplification indicator,
-not a universal efficiency claim. Their `wal_bytes_scanned` is the logical tail that a
-restart at the latest currently selectable checkpoint would scan; it is a projected
-byte count, not a timed recovery run. `recovery_full_scan` builds deterministic committed
-history, measures analysis/REDO/UNDO separately, and validates through normal reopen.
+TCP. They report statement percentiles, WAL/fsync and buffer counters, observed logical
+page-byte transitions, update payload/total bytes, per-mode update counts, record-size
+percentiles, delta range distribution, and delta-computation nanoseconds. Payload and
+total amplification divide measured bytes by observed transitions; they do not use a
+tuple-size estimate and are not universal efficiency claims. Their `wal_bytes_scanned`
+is the logical tail that a restart at the latest currently selectable checkpoint would
+scan; it is a projected byte count, not a timed recovery run. `recovery_full_scan`
+builds deterministic committed history and measures winner REDO; `recovery_loser` adds
+an uncommitted appended page and measures loser UNDO/truncation. Both validate through
+normal reopen.
 There are no CI timing thresholds.
 
 All workloads validate their relevant storage/tree/catalog/model after measurement.
@@ -212,6 +213,19 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 ./build-release/minidb_bench --benchmark txn_mixed --rows 1000 --operations 1000
 ./build-release/minidb_bench --benchmark recovery_full_scan --operations 1000
 
+# Controlled WAL encoding pair: change only --wal-update-mode
+./build-release/minidb_bench --benchmark txn_update --rows 1000 --operations 1000 \
+  --buffer-frames 64 --lru-k 2 --seed 12345 --wal-update-mode full-page
+./build-release/minidb_bench --benchmark txn_update --rows 1000 --operations 1000 \
+  --buffer-frames 64 --lru-k 2 --seed 12345 --wal-update-mode byte-range
+
+# Other logging-comparison categories
+./build-release/minidb_bench --benchmark txn_varchar_update --rows 1000 --operations 1000
+./build-release/minidb_bench --benchmark txn_insert --operations 1000
+./build-release/minidb_bench --benchmark txn_delete --rows 1000 --operations 1000
+./build-release/minidb_bench --benchmark txn_bplus_insert --rows 406 --operations 16
+./build-release/minidb_bench --benchmark txn_mixed --rows 1000 --operations 1000
+
 # Sharp-checkpoint cost and full-scan versus checkpoint-tail recovery
 ./build-release/minidb_bench --benchmark checkpoint_latency --rows 1000 --operations 256
 ./build-release/minidb_bench --benchmark recovery_checkpoint_compare --operations 1000
@@ -225,7 +239,8 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 
 - `benchmark`, explicit `storage_backend`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
-  repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer/segment sizes, mode, and tuple sizes;
+  repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer/segment sizes, WAL
+  update mode, cache mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
 - `pager`: all nine Pager statistics;
 - `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
@@ -233,8 +248,9 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 - `wal`: record/payload counts, payload throughput, encoded bytes written, physical
   retained bytes before/after reclamation, logical end, active/retained segment identities, rotations/deletions,
   buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
-- `recovery`: transaction/page-update/full-image counters, WAL/logical bytes and
-  amplification, checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
+- `recovery`: transaction/per-encoding update counters, observed/represented bytes,
+  payload and total WAL amplification, record-size and range distributions, delta CPU
+  nanoseconds, checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
   REDO/UNDO counts, and phase/total recovery nanoseconds;
 - `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, checkpoint
   latency, and separately reclaimed segments/bytes/reclamation latency; configuration

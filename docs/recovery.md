@@ -1,15 +1,16 @@
 # Crash recovery and implicit statement transactions
 
-Milestone 11B makes each mutating `CREATE TABLE`, `INSERT`, `UPDATE`, or `DELETE`
-statement one internal atomic recovery unit. `SELECT` is read-only, and there is no
+Each mutating `CREATE TABLE`, `INSERT`, `UPDATE`, or `DELETE` statement is one internal
+atomic recovery unit. `SELECT` is read-only, and there is no
 user-visible transaction grammar. MiniDB++ still executes serially with at most one
 active mutation.
 
-The implementation uses physical full-page logging. Every changed database page is
-represented by its complete 4096-byte before- and after-image. This is deliberately a
-correctness-first baseline: it covers every guarded page type at one interception point
-and makes REDO/UNDO idempotent, but produces large WAL records and retains about 4096
-bytes of before-image memory per distinct page touched by the active statement.
+The default implementation uses physical full-page logging: every changed database page
+is represented by its complete 4096-byte before- and after-image. An explicit opt-in
+mode uses versioned physical byte ranges while retaining the same transaction and
+durability semantics. Both are described in [wal-byte-range.md](wal-byte-range.md).
+The full-page mode remains a correctness-first baseline that covers every guarded page
+type at one interception point, but produces large WAL records.
 
 ## Transaction records
 
@@ -63,7 +64,7 @@ Table / B+ tree / TupleStore
         v
 BufferPoolManager -- write intent --> RecoveryCoordinator --> LogManager
         |                                      |
-        | prepare before physical write        | PAGE_UPDATE LSN
+             | prepare before physical write        | update-record LSN
         +---------------------------------------+
         |
         v
@@ -76,8 +77,8 @@ from a page-guard destructor: allocation, buffering, or file I/O may fail and mu
 through an explicit operation.
 
 Before dirty persistence, `preparePageForWrite` compares current bytes with the last
-logged after-image. It appends a new PAGE_UPDATE only when needed, advances `prevLSN`,
-and returns its LSN. The volatile frame pageLSN then drives the Milestone 11A rule that
+logged after-image. It appends the selected update record only when needed, advances
+`prevLSN`, and returns its LSN. The volatile frame pageLSN then drives the rule that
 WAL is fsynced before the database page is written. Dirty eviction is therefore STEAL-
 safe. On frame reuse, reload, and restart pageLSN returns to `INVALID_LSN`; no persistent
 page format was changed.
@@ -103,8 +104,8 @@ expensive ordering avoids compensation log records while statement errors are un
 
 ## Startup recovery
 
-Milestones 11C.1–11C.2 first select a durable sharp checkpoint when possible, so production
-startup is ordered as follows:
+Startup first selects a durable sharp checkpoint when possible, so production is ordered
+as follows:
 
 ```text
 DiskManager -> deferred LogManager -> checkpoint control -> tail repair -> analysis
@@ -121,11 +122,12 @@ magic/version/length/checksum corruption is fatal and is never treated as a tail
 Analysis validates one BEGIN, exact same-transaction `prevLSN` chains, terminal-record
 ordering, and the single-active-transaction model.
 
-- A winner has durable COMMIT. Its after-images are written in ascending LSN order.
+- A winner has durable COMMIT. Its full after-images or delta after-ranges are applied
+  in ascending LSN order.
 - A transaction with durable ABORT is skipped because rollback preceded that ABORT.
 - A loser has BEGIN/PAGE_UPDATE records but no terminal record and must be the final
-  active transaction. Existing-page original images are written, then appended pages
-  are truncated using BEGIN's page count.
+  active transaction. Existing-page original images or delta before-ranges are applied,
+  then appended pages are truncated using BEGIN's page count.
 
 Recovery runs REDO winners, then UNDO the tail loser, fsyncs the database, and finally
 appends/fsyncs the loser's ABORT. Full-page replacement, repeated original before-images,
@@ -144,9 +146,10 @@ failures, full-scan fallback, recovery start, and skipped/scanned WAL bytes. The
 scanned records/transactions, winners/aborts/losers,
 REDO/UNDO/truncation/extension, database writes/syncs, repaired tail bytes, and analysis,
 REDO, UNDO, and total nanoseconds. Runtime transaction statistics report logical begins,
-commits/rollbacks/zero-write units, first-written pages, PAGE_UPDATE count, full-image
-bytes, commit fsyncs, and rollback writes. Benchmarks report WAL bytes divided by an
-explicit logical-change estimate as logging amplification.
+commits/rollbacks/zero-write units, first-written pages, per-encoding update counts,
+observed logical byte transitions, payload/total WAL bytes, represented bytes, range
+counts, record-size samples, delta-computation time, commit fsyncs, and rollback writes.
+Benchmarks derive amplification from those observed transitions.
 
 There is a quiescent sharp checkpoint, documented in [checkpoints.md](checkpoints.md).
 Obsolete whole WAL segments are now deleted after sharp checkpoints; see
@@ -159,5 +162,5 @@ tokens.
 
 This design is not ARIES. ARIES supports physiological logging, persistent pageLSNs,
 repeating history, compensation records, checkpoints, fine-grained locking, and partial
-rollback. MiniDB++ 11B instead uses a serial full-page baseline chosen for transparent
+rollback. MiniDB++ instead uses a serial physical baseline chosen for transparent
 correctness and experimentation. See the full citation in [wal.md](wal.md).

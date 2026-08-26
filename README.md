@@ -17,7 +17,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - Versioned binary TCP protocol with command-line server and client
 - CRC32C-protected, segmented write-ahead log with safe segment reclamation
 - Implicit atomic recovery units for mutating SQL statements
-- STEAL / NO-FORCE physical REDO and UNDO using full-page images
+- STEAL / NO-FORCE physical REDO and UNDO with full-page or byte-range WAL
 - Sharp checkpoints and checkpoint-bounded startup recovery
 - Subprocess crash-injection, randomized differential, corruption, and sanitizer tests
 - Deterministic benchmark and observability framework
@@ -148,8 +148,9 @@ satisfied. See [buffer-pool.md](docs/buffer-pool.md).
 ## WAL and crash recovery
 
 MiniDB++ treats each mutating SQL statement as one implicit recovery unit; it does not
-expose user-managed transactions. Physical WAL records contain complete 4096-byte page
-before- and after-images, transaction chains, LSNs, and CRC32C validation. The buffer
+expose user-managed transactions. Physical WAL supports complete 4096-byte page images
+and an opt-in byte-range before/after encoding, with transaction chains, LSNs, and
+CRC32C validation. Full-page logging remains the default. The buffer
 pool may write an uncommitted dirty page (STEAL) and need not force committed pages at
 commit (NO-FORCE), so startup recovery redoes committed winners and undoes the final
 uncommitted loser.
@@ -169,7 +170,8 @@ Recovery is tested by real subprocess termination with `_exit`, bypassing normal
 destructors. Directed cases include crashes before and after COMMIT fsync, dirty STEAL
 before commit, NO-FORCE winners, repeated crashes during REDO or UNDO, checkpoint
 publication boundaries, legacy-WAL migration, segment rotation, and reclamation.
-See [wal.md](docs/wal.md) and [recovery.md](docs/recovery.md).
+See [wal.md](docs/wal.md), [wal-byte-range.md](docs/wal-byte-range.md), and
+[recovery.md](docs/recovery.md).
 
 ## Checkpoints and segmented WAL
 
@@ -218,6 +220,7 @@ used during release verification.
 - [Database storage formats](docs/storage-format.md)
 - [Buffer pool and LRU-K](docs/buffer-pool.md)
 - [Write-ahead log](docs/wal.md)
+- [Physical byte-range WAL experiment](docs/wal-byte-range.md)
 - [Crash recovery](docs/recovery.md)
 - [Sharp checkpoints](docs/checkpoints.md)
 - [Segmented WAL lifecycle](docs/wal-segments.md)
@@ -230,7 +233,8 @@ used during release verification.
 
 - Database execution is single-threaded, with at most one active mutating statement.
 - There is no user-visible transaction syntax, MVCC, locking, or isolation model.
-- Full-page WAL is simple and robust but has high write amplification.
+- Byte-range WAL reduces many update records but adds diff CPU cost and can expand
+  fragmented page changes; full-page logging remains the default.
 - Sharp checkpoints are synchronous and require a quiescent engine.
 - There is no point-in-time recovery or WAL archive.
 - Query planning, joins, aggregation, and secondary indexes are not implemented.
@@ -239,7 +243,7 @@ used during release verification.
 
 ## Future work
 
-- Finer-grained WAL and recovery experiments
+- Finer-grained physiological/logical WAL and recovery experiments
 - Persistent pageLSNs and more advanced checkpointing
 - Multi-transaction concurrency and isolation
 - Additional indexes and query-planning functionality

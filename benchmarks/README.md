@@ -25,6 +25,7 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--wal-batch-size N` | 10 | Records between forces in `wal_batch_flush` |
 | `--wal-buffer-bytes N` | 65536 | LogManager memory-buffer capacity |
 | `--wal-segment-bytes N` | 16777216 | Fixed segmented-WAL payload capacity |
+| `--wal-update-mode MODE` | `full-page` | `full-page` or experimental `byte-range` page updates |
 | `--checkpoint-wal-bytes N` | 67108864 | Automatic checkpoint growth threshold; zero disables |
 | `--checkpoint-statements N` | 0 | Automatic checkpoint commit threshold; zero disables |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |
@@ -47,11 +48,13 @@ The WAL workloads are `wal_append_buffered`, `wal_append_flush_each`, and
 bytes, buffer drains, writes, and fsyncs. The same configuration object records frame/K
 and WAL payload/batch/buffer controls for controlled comparisons.
 
-Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_delete`, `txn_mixed`,
-`recovery_full_scan`, `checkpoint_latency`, `recovery_checkpoint_compare`,
+Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_varchar_update`,
+`txn_delete`, `txn_bplus_insert`, `txn_mixed`, `recovery_full_scan`, `recovery_loser`,
+`checkpoint_latency`, `recovery_checkpoint_compare`,
 `wal_segment_rotation`, and `wal_reclamation`.
-Transaction results include full-page record counts, WAL bytes, fsyncs, and logging
-amplification. Checkpoint results include dirty writes, required syncs, and latency; the
+Transaction results include per-encoding record counts, observed byte changes,
+payload/total WAL amplification, record-size/range distributions, diff CPU time, and
+fsyncs. Checkpoint results include dirty writes, required syncs, and latency; the
 comparison reports full-history versus checkpoint-tail records/bytes/time. Configure
 automatic-policy metadata with `--checkpoint-wal-bytes` and `--checkpoint-statements`
 (zero disables). These are deterministic baselines, not timing-gated CI assertions.

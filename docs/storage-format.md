@@ -186,6 +186,7 @@ composition with TupleStore and the persistent primary index is described in
 
 WAL, checkpoint control, and WAL segment manifests are sidecars rather than 4096-byte
 database pages; they do not change any layout above. The record/control formats are in
-[wal.md](wal.md) and [checkpoints.md](checkpoints.md). The active segmented directory,
+[wal.md](wal.md), [wal-byte-range.md](wal-byte-range.md), and
+[checkpoints.md](checkpoints.md). The active segmented directory,
 64-byte manifest, 64-byte segment header, logical-LSN mapping, and reclamation rules are
 specified in [wal-segments.md](wal-segments.md).
