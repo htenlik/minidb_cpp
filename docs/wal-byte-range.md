@@ -1,11 +1,13 @@
 # Physical byte-range WAL experiment
 
-MiniDB++ supports two physical page-update encodings. `FullPage` is the production
+MiniDB++ supports two physical page-update encodings and three generation modes.
+`FullPage` is the production
 default and retains the established `PAGE_UPDATE` record with complete 4096-byte
 before/after images. The opt-in `ByteRange` mode writes `PAGE_DELTA_UPDATE` records
 containing only transaction-touched byte ranges. Both encodings participate in the same
 statement transaction chain, STEAL / NO-FORCE protocol, sharp checkpoints, segmented
-WAL, and REDO/UNDO implementation.
+WAL, and REDO/UNDO implementation. `Adaptive` chooses the smaller complete encoding per
+record as documented in [wal-adaptive.md](wal-adaptive.md).
 
 This is a controlled logging-format experiment, not a claim that byte ranges always
 win. A scattered update can create many range descriptors, and an existing-page delta
@@ -94,6 +96,7 @@ The server and transaction/recovery benchmarks accept:
 ```text
 --wal-update-mode full-page   # default
 --wal-update-mode byte-range  # opt-in experiment
+--wal-update-mode adaptive    # opt-in per-record minimum-size selection
 ```
 
 Invalid values are rejected. Selection affects newly generated page-update records
@@ -112,7 +115,8 @@ Transaction metrics use observed page bytes rather than a tuple-size estimate:
 - `changedBytes`: bytes represented by update records (4096 per full-page record, range
   lengths per delta record);
 - `updateRecordCount`, per-mode record counts, record-size samples, and
-  `deltaComputationNs`.
+  `deltaComputationNs`; Adaptive adds candidate-byte, selection-count/tie, saved-byte,
+  and selection-time counters described in [wal-adaptive.md](wal-adaptive.md).
 
 The benchmark JSON reports mean/p50/p95/p99/max update-record bytes and
 mean/p50/p95/max ranges per delta. It derives payload amplification as

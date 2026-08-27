@@ -213,11 +213,13 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 ./build-release/minidb_bench --benchmark txn_mixed --rows 1000 --operations 1000
 ./build-release/minidb_bench --benchmark recovery_full_scan --operations 1000
 
-# Controlled WAL encoding pair: change only --wal-update-mode
+# Controlled WAL encoding comparison: change only --wal-update-mode
 ./build-release/minidb_bench --benchmark txn_update --rows 1000 --operations 1000 \
   --buffer-frames 64 --lru-k 2 --seed 12345 --wal-update-mode full-page
 ./build-release/minidb_bench --benchmark txn_update --rows 1000 --operations 1000 \
   --buffer-frames 64 --lru-k 2 --seed 12345 --wal-update-mode byte-range
+./build-release/minidb_bench --benchmark txn_update --rows 1000 --operations 1000 \
+  --buffer-frames 64 --lru-k 2 --seed 12345 --wal-update-mode adaptive
 
 # Other logging-comparison categories
 ./build-release/minidb_bench --benchmark txn_varchar_update --rows 1000 --operations 1000
@@ -225,6 +227,12 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 ./build-release/minidb_bench --benchmark txn_delete --rows 1000 --operations 1000
 ./build-release/minidb_bench --benchmark txn_bplus_insert --rows 406 --operations 16
 ./build-release/minidb_bench --benchmark txn_mixed --rows 1000 --operations 1000
+
+# Directed adaptive-selection workloads
+./build-release/minidb_bench --benchmark txn_wal_delta_friendly --operations 1000 \
+  --wal-update-mode adaptive
+./build-release/minidb_bench --benchmark txn_wal_fragmentation --operations 1000 \
+  --wal-update-mode adaptive
 
 # Sharp-checkpoint cost and full-scan versus checkpoint-tail recovery
 ./build-release/minidb_bench --benchmark checkpoint_latency --rows 1000 --operations 256
@@ -250,7 +258,8 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
   buffer drains, force requests/fsyncs, last/durable LSN, and append/force p95/p99;
 - `recovery`: transaction/per-encoding update counters, observed/represented bytes,
   payload and total WAL amplification, record-size and range distributions, delta CPU
-  nanoseconds, checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
+  nanoseconds, adaptive choice/tie/candidate/saved-byte and selection-time counters,
+  checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
   REDO/UNDO counts, and phase/total recovery nanoseconds;
 - `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, checkpoint
   latency, and separately reclaimed segments/bytes/reclamation latency; configuration
@@ -266,6 +275,12 @@ Generated `.json`, `.benchmark.json`, and benchmark `.db` files are ignored. The
 repository commits definitions and schema, not machine-specific performance numbers.
 A comparison parser/tool is deferred; compare JSON only across controlled equivalent
 machine/build configurations.
+
+The `txn_wal_delta_friendly` workload flips one 16-byte contiguous run in a raw allocated
+page per statement. `txn_wal_fragmentation` flips alternating bytes, producing 2,048
+canonical one-byte ranges. These are controlled physical logging experiments; they do
+not represent SQL throughput. See [wal-adaptive.md](wal-adaptive.md) for the three-way
+Release snapshot and recovery comparison.
 
 ## Limitations and interpretation
 

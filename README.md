@@ -148,8 +148,9 @@ satisfied. See [buffer-pool.md](docs/buffer-pool.md).
 ## WAL and crash recovery
 
 MiniDB++ treats each mutating SQL statement as one implicit recovery unit; it does not
-expose user-managed transactions. Physical WAL supports complete 4096-byte page images
-and an opt-in byte-range before/after encoding, with transaction chains, LSNs, and
+expose user-managed transactions. Physical WAL supports complete 4096-byte page images,
+an opt-in byte-range before/after encoding, and opt-in per-record adaptive selection,
+with transaction chains, LSNs, and
 CRC32C validation. Full-page logging remains the default. The buffer
 pool may write an uncommitted dirty page (STEAL) and need not force committed pages at
 commit (NO-FORCE), so startup recovery redoes committed winners and undoes the final
@@ -163,14 +164,15 @@ no durable COMMIT -> recover the statement as aborted
 ```
 
 A successful mutation is returned to the client only after its COMMIT record is
-fsynced. This is a correctness-first full-page design and does not claim ARIES,
+fsynced. This is a correctness-first physical logging design and does not claim ARIES,
 general transactions, or crash-safe operation without the WAL sidecars.
 
 Recovery is tested by real subprocess termination with `_exit`, bypassing normal
 destructors. Directed cases include crashes before and after COMMIT fsync, dirty STEAL
 before commit, NO-FORCE winners, repeated crashes during REDO or UNDO, checkpoint
 publication boundaries, legacy-WAL migration, segment rotation, and reclamation.
-See [wal.md](docs/wal.md), [wal-byte-range.md](docs/wal-byte-range.md), and
+See [wal.md](docs/wal.md), [wal-byte-range.md](docs/wal-byte-range.md),
+[wal-adaptive.md](docs/wal-adaptive.md), and
 [recovery.md](docs/recovery.md).
 
 ## Checkpoints and segmented WAL
@@ -221,6 +223,7 @@ used during release verification.
 - [Buffer pool and LRU-K](docs/buffer-pool.md)
 - [Write-ahead log](docs/wal.md)
 - [Physical byte-range WAL experiment](docs/wal-byte-range.md)
+- [Adaptive physical WAL update encoding](docs/wal-adaptive.md)
 - [Crash recovery](docs/recovery.md)
 - [Sharp checkpoints](docs/checkpoints.md)
 - [Segmented WAL lifecycle](docs/wal-segments.md)
@@ -233,8 +236,8 @@ used during release verification.
 
 - Database execution is single-threaded, with at most one active mutating statement.
 - There is no user-visible transaction syntax, MVCC, locking, or isolation model.
-- Byte-range WAL reduces many update records but adds diff CPU cost and can expand
-  fragmented page changes; full-page logging remains the default.
+- Byte-range/adaptive WAL adds diff CPU cost; adaptive bounds each update to the smaller
+  existing physical encoding, while full-page logging remains the default.
 - Sharp checkpoints are synchronous and require a quiescent engine.
 - There is no point-in-time recovery or WAL archive.
 - Query planning, joins, aggregation, and secondary indexes are not implemented.

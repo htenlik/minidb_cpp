@@ -4,7 +4,8 @@ MiniDB++ uses a versioned sidecar write-ahead log with log sequence numbers (LSN
 buffered append and `fsync` durability, safe scanning, write-ahead ordering, implicit
 durable statement commit, and startup REDO/UNDO. Full-page physical updates remain the
 default; an opt-in physical byte-range encoding is documented in
-[wal-byte-range.md](wal-byte-range.md). This protocol is not ARIES;
+[wal-byte-range.md](wal-byte-range.md), and opt-in per-record minimum-size selection is
+documented in [wal-adaptive.md](wal-adaptive.md). This protocol is not ARIES;
 [recovery.md](recovery.md) defines its recovery boundary.
 
 A bounded pool can evict dirty frames (the storage pressure behind a STEAL-style
@@ -69,6 +70,10 @@ checkpoint records; COMPENSATION remains reserved.
 as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
 16 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
 [recovery.md](recovery.md).
+
+Generation mode is not persisted as a new format. `full-page` always emits type 2,
+`byte-range` always emits type 8, and `adaptive` compares their complete encoded sizes
+for each update and emits one of those existing types. Recovery remains record-driven.
 
 The maximum complete record is 1 MiB, so the maximum payload is 1,048,528 bytes. Length
 checks happen before allocation. CRC32C uses the Castagnoli polynomial (reflected
