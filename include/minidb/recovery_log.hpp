@@ -85,6 +85,21 @@ struct PageDeltaUpdateLogPayload {
     bool operator==(const PageDeltaUpdateLogPayload&) const = default;
 };
 
+inline constexpr std::size_t FULL_PAGE_UPDATE_RECORD_SIZE =
+    wal_record_layout::HEADER_SIZE + page_update_log_layout::PAYLOAD_SIZE;
+
+struct AdaptivePageUpdateDecision {
+    LogRecordType recordType = LogRecordType::PageUpdate;
+    std::size_t fullPageRecordBytes = 0;
+    std::size_t deltaRecordBytes = 0;
+    std::size_t rangeCount = 0;
+    std::size_t changedByteCount = 0;
+
+    [[nodiscard]] bool isTie() const noexcept {
+        return fullPageRecordBytes == deltaRecordBytes;
+    }
+};
+
 [[nodiscard]] std::vector<std::byte> encodeBeginLogPayload(BeginLogPayload payload);
 [[nodiscard]] BeginLogPayload decodeBeginLogPayload(std::span<const std::byte> bytes);
 [[nodiscard]] std::vector<std::byte> encodePageUpdateLogPayload(
@@ -100,6 +115,12 @@ struct PageDeltaUpdateLogPayload {
     std::span<const bool> requiredOffsets);
 [[nodiscard]] std::vector<std::byte> encodePageDeltaUpdateLogPayload(
     const PageDeltaUpdateLogPayload& payload);
+[[nodiscard]] std::size_t pageDeltaUpdatePayloadEncodedSize(
+    const PageDeltaUpdateLogPayload& payload);
+[[nodiscard]] std::size_t pageDeltaUpdateRecordEncodedSize(
+    const PageDeltaUpdateLogPayload& payload);
+[[nodiscard]] AdaptivePageUpdateDecision selectAdaptivePageUpdateEncoding(
+    const PageDeltaUpdateLogPayload& deltaPayload);
 [[nodiscard]] PageDeltaUpdateLogPayload decodePageDeltaUpdateLogPayload(
     std::span<const std::byte> bytes);
 void applyPageDeltaAfter(

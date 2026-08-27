@@ -158,24 +158,87 @@ void validateDeltaRanges(const PageDeltaUpdateLogPayload& payload, WalErrorKind 
     }
 }
 
+std::size_t checkedAdd(std::size_t left, std::size_t right, const char* message) {
+    if (right > std::numeric_limits<std::size_t>::max() - left) {
+        throw WalError(WalErrorKind::InvalidArgument, message);
+    }
+    return left + right;
+}
+
+std::size_t checkedMultiply(std::size_t left, std::size_t right, const char* message) {
+    if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
+        throw WalError(WalErrorKind::InvalidArgument, message);
+    }
+    return left * right;
+}
+
 } // namespace
 
-std::vector<std::byte> encodePageDeltaUpdateLogPayload(
+std::size_t pageDeltaUpdatePayloadEncodedSize(
     const PageDeltaUpdateLogPayload& payload) {
     using namespace page_delta_update_log_layout;
     validateDeltaRanges(payload, WalErrorKind::InvalidArgument);
     std::size_t payloadSize = HEADER_SIZE;
+    const auto copies = payload.beforePageExisted ? std::size_t{2} : std::size_t{1};
     for (const auto& range : payload.ranges) {
-        const auto copies = payload.beforePageExisted ? 2U : 1U;
-        const auto dataBytes = static_cast<std::size_t>(range.length) * copies;
-        if (payloadSize > wal_record_layout::MAX_PAYLOAD_SIZE - RANGE_HEADER_SIZE
-            || payloadSize + RANGE_HEADER_SIZE
-                > wal_record_layout::MAX_PAYLOAD_SIZE - dataBytes) {
+        const auto dataBytes = checkedMultiply(
+            static_cast<std::size_t>(range.length), copies,
+            "PAGE_DELTA_UPDATE size calculation overflowed");
+        payloadSize = checkedAdd(
+            payloadSize, RANGE_HEADER_SIZE,
+            "PAGE_DELTA_UPDATE size calculation overflowed");
+        payloadSize = checkedAdd(
+            payloadSize, dataBytes,
+            "PAGE_DELTA_UPDATE size calculation overflowed");
+        if (payloadSize > wal_record_layout::MAX_PAYLOAD_SIZE) {
             throw WalError(WalErrorKind::InvalidArgument,
                            "PAGE_DELTA_UPDATE payload is too large");
         }
-        payloadSize += RANGE_HEADER_SIZE + dataBytes;
     }
+    if (payloadSize > std::numeric_limits<std::uint32_t>::max()) {
+        throw WalError(WalErrorKind::InvalidArgument,
+                       "PAGE_DELTA_UPDATE payload length is not encodable");
+    }
+    return payloadSize;
+}
+
+std::size_t pageDeltaUpdateRecordEncodedSize(
+    const PageDeltaUpdateLogPayload& payload) {
+    const auto payloadSize = pageDeltaUpdatePayloadEncodedSize(payload);
+    const auto recordSize = checkedAdd(
+        wal_record_layout::HEADER_SIZE, payloadSize,
+        "PAGE_DELTA_UPDATE record size calculation overflowed");
+    if (recordSize > wal_record_layout::MAX_RECORD_SIZE
+        || recordSize > std::numeric_limits<std::uint32_t>::max()) {
+        throw WalError(WalErrorKind::InvalidArgument,
+                       "PAGE_DELTA_UPDATE record length is not encodable");
+    }
+    return recordSize;
+}
+
+AdaptivePageUpdateDecision selectAdaptivePageUpdateEncoding(
+    const PageDeltaUpdateLogPayload& deltaPayload) {
+    const auto deltaBytes = pageDeltaUpdateRecordEncodedSize(deltaPayload);
+    std::size_t changedBytes = 0;
+    for (const auto& range : deltaPayload.ranges) {
+        changedBytes = checkedAdd(
+            changedBytes, static_cast<std::size_t>(range.length),
+            "PAGE_DELTA_UPDATE changed-byte count overflowed");
+    }
+    return AdaptivePageUpdateDecision{
+        deltaBytes < FULL_PAGE_UPDATE_RECORD_SIZE
+            ? LogRecordType::PageDeltaUpdate : LogRecordType::PageUpdate,
+        FULL_PAGE_UPDATE_RECORD_SIZE,
+        deltaBytes,
+        deltaPayload.ranges.size(),
+        changedBytes,
+    };
+}
+
+std::vector<std::byte> encodePageDeltaUpdateLogPayload(
+    const PageDeltaUpdateLogPayload& payload) {
+    using namespace page_delta_update_log_layout;
+    const auto payloadSize = pageDeltaUpdatePayloadEncodedSize(payload);
     std::vector<std::byte> bytes(payloadSize);
     byte_codec::writeUint32(bytes, PAGE_ID_OFFSET, payload.pageId);
     byte_codec::writeUint32(

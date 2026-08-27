@@ -41,8 +41,9 @@ std::uint64_t parseNonnegativeUint64(std::string_view text, const char* option) 
 minidb::WalUpdateMode parseWalUpdateMode(std::string_view text) {
     if (text == "full-page") return minidb::WalUpdateMode::FullPage;
     if (text == "byte-range") return minidb::WalUpdateMode::ByteRange;
+    if (text == "adaptive") return minidb::WalUpdateMode::Adaptive;
     throw std::invalid_argument(
-        "invalid --wal-update-mode value (expected full-page or byte-range)");
+        "invalid --wal-update-mode value (expected full-page, byte-range, or adaptive)");
 }
 
 void usage() {
@@ -50,7 +51,7 @@ void usage() {
         << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
            "[--buffer-frames N] [--lru-k N] [--checkpoint-wal-bytes N] "
            "[--checkpoint-statements N] [--wal-segment-bytes N] "
-           "[--wal-update-mode full-page|byte-range]\n";
+           "[--wal-update-mode full-page|byte-range|adaptive]\n";
 }
 
 } // namespace

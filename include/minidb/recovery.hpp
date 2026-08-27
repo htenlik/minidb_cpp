@@ -65,6 +65,15 @@ struct TransactionRuntimeStats {
     std::uint64_t fullPageUpdateRecords = 0;
     std::uint64_t byteRangeUpdateRecords = 0;
     std::uint64_t deltaComputationNs = 0;
+    std::uint64_t adaptiveSelectionNs = 0;
+    std::uint64_t adaptiveFullPageSelections = 0;
+    std::uint64_t adaptiveDeltaSelections = 0;
+    std::uint64_t adaptiveTies = 0;
+    std::uint64_t bytesIfFullPage = 0;
+    std::uint64_t bytesIfDelta = 0;
+    std::uint64_t bytesActuallyChosen = 0;
+    std::uint64_t bytesSavedByAdaptive = 0;
+    std::uint64_t bytesSavedVersusByteRange = 0;
     std::uint64_t commitFsyncs = 0;
     std::uint64_t rollbackDatabaseWrites = 0;
     std::vector<std::uint64_t> updateRecordBytes;

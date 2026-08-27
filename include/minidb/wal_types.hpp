@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <string_view>
 
 namespace minidb {
 
@@ -37,7 +38,18 @@ enum class LogRecordType : std::uint16_t {
 enum class WalUpdateMode : std::uint8_t {
     FullPage,
     ByteRange,
+    Adaptive,
 };
+
+[[nodiscard]] constexpr std::string_view walUpdateModeName(
+    WalUpdateMode mode) noexcept {
+    switch (mode) {
+    case WalUpdateMode::FullPage: return "full-page";
+    case WalUpdateMode::ByteRange: return "byte-range";
+    case WalUpdateMode::Adaptive: return "adaptive";
+    }
+    return "unknown";
+}
 
 [[nodiscard]] constexpr bool isValidLsn(Lsn lsn) noexcept {
     return lsn != INVALID_LSN;

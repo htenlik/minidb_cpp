@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <map>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -426,6 +427,7 @@ Lsn RecoveryCoordinator::preparePageForWrite(
     }
     Lsn lsn = INVALID_LSN;
     std::vector<std::byte> payload;
+    LogRecordType recordType = LogRecordType::PageUpdate;
     if (updateMode_ == WalUpdateMode::FullPage) {
         payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
             pageId, state.beforeExisted, state.before, after,
@@ -439,17 +441,55 @@ Lsn RecoveryCoordinator::preparePageForWrite(
         stats_.deltaComputationNs += static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - deltaStart).count());
-        for (const auto& range : ranges) stats_.changedBytes += range.length;
-        stats_.rangeCount += ranges.size();
-        stats_.deltaRangeCounts.push_back(ranges.size());
-        payload = encodePageDeltaUpdateLogPayload(PageDeltaUpdateLogPayload{
+        PageDeltaUpdateLogPayload deltaPayload{
             pageId, state.beforeExisted, std::move(ranges),
-        });
-        ++stats_.byteRangeUpdateRecords;
+        };
+        const auto changedBytes = std::accumulate(
+            deltaPayload.ranges.begin(), deltaPayload.ranges.end(), std::uint64_t{0},
+            [](std::uint64_t sum, const PageByteRange& range) {
+                return sum + range.length;
+            });
+        stats_.rangeCount += deltaPayload.ranges.size();
+        stats_.deltaRangeCounts.push_back(deltaPayload.ranges.size());
+        if (updateMode_ == WalUpdateMode::Adaptive) {
+            const auto selectionStart = std::chrono::steady_clock::now();
+            const auto decision = selectAdaptivePageUpdateEncoding(deltaPayload);
+            stats_.adaptiveSelectionNs += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - selectionStart).count());
+            stats_.bytesIfFullPage += decision.fullPageRecordBytes;
+            stats_.bytesIfDelta += decision.deltaRecordBytes;
+            const auto chosenBytes = std::min(
+                decision.fullPageRecordBytes, decision.deltaRecordBytes);
+            stats_.bytesActuallyChosen += chosenBytes;
+            stats_.bytesSavedByAdaptive +=
+                decision.fullPageRecordBytes - chosenBytes;
+            stats_.bytesSavedVersusByteRange +=
+                decision.deltaRecordBytes - chosenBytes;
+            if (decision.isTie()) ++stats_.adaptiveTies;
+            recordType = decision.recordType;
+            if (recordType == LogRecordType::PageUpdate) {
+                ++stats_.adaptiveFullPageSelections;
+                payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
+                    pageId, state.beforeExisted, state.before, after,
+                });
+                stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
+                stats_.changedBytes += database_format::PAGE_SIZE;
+                ++stats_.fullPageUpdateRecords;
+            } else {
+                ++stats_.adaptiveDeltaSelections;
+                payload = encodePageDeltaUpdateLogPayload(deltaPayload);
+                stats_.changedBytes += changedBytes;
+                ++stats_.byteRangeUpdateRecords;
+            }
+        } else {
+            recordType = LogRecordType::PageDeltaUpdate;
+            payload = encodePageDeltaUpdateLogPayload(deltaPayload);
+            stats_.changedBytes += changedBytes;
+            ++stats_.byteRangeUpdateRecords;
+        }
     }
     const auto payloadBytes = payload.size();
-    const auto recordType = updateMode_ == WalUpdateMode::FullPage
-        ? LogRecordType::PageUpdate : LogRecordType::PageDeltaUpdate;
     lsn = appendTransactionRecord(recordType, std::move(payload));
     stats_.logicalBytesChanged += logicalBytesChanged;
     stats_.walUpdatePayloadBytes += payloadBytes;
