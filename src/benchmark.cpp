@@ -185,9 +185,11 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
                 result.config.walUpdateMode = WalUpdateMode::FullPage;
             } else if (mode == "byte-range") {
                 result.config.walUpdateMode = WalUpdateMode::ByteRange;
+            } else if (mode == "adaptive") {
+                result.config.walUpdateMode = WalUpdateMode::Adaptive;
             } else {
                 throw std::invalid_argument(
-                    "wal update mode must be 'full-page' or 'byte-range'");
+                    "wal update mode must be 'full-page', 'byte-range', or 'adaptive'");
             }
         } else if (argument == "--checkpoint-wal-bytes") {
             result.config.checkpointWalBytes = parseUnsigned(
@@ -241,7 +243,7 @@ std::string usageText() {
         "  --wal-batch-size N    records per synchronous batch flush (default 10)\n"
         "  --wal-buffer-bytes N  in-memory WAL buffer capacity (default 65536)\n"
         "  --wal-segment-bytes N fixed WAL segment payload capacity (default 16777216)\n"
-        "  --wal-update-mode MODE full-page (default) or byte-range page updates\n"
+        "  --wal-update-mode MODE full-page (default), byte-range, or adaptive updates\n"
         "  --checkpoint-wal-bytes N automatic checkpoint WAL-growth bytes; 0 disables\n"
         "  --checkpoint-statements N automatic checkpoint commit count; 0 disables\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
@@ -269,7 +271,8 @@ std::vector<std::string> supportedBenchmarkNames() {
         "wal", "wal_append_buffered", "wal_append_flush_each", "wal_batch_flush",
         "wal_segment_rotation", "wal_reclamation",
         "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
-        "txn_bplus_insert", "txn_mixed", "recovery_full_scan", "recovery_loser",
+        "txn_bplus_insert", "txn_mixed", "txn_wal_delta_friendly",
+        "txn_wal_fragmentation", "recovery_full_scan", "recovery_loser",
         "checkpoint_latency", "recovery_checkpoint_compare",
     };
 }
@@ -394,8 +397,7 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_buffer_bytes\":" << config.walBufferBytes
                << ",\"wal_segment_bytes\":" << config.walSegmentBytes
                << ",\"wal_update_mode\":\""
-               << (config.walUpdateMode == WalUpdateMode::FullPage
-                       ? "full-page" : "byte-range") << '"'
+               << walUpdateModeName(config.walUpdateMode) << '"'
                << ",\"checkpoint_wal_bytes\":" << config.checkpointWalBytes
                << ",\"checkpoint_statements\":" << config.checkpointStatements
                << ",\"checkpoint_enabled\":"
@@ -468,6 +470,24 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.transactions.byteRangeUpdateRecords
                << ",\"delta_computation_ns\":"
                << result.recovery.transactions.deltaComputationNs
+               << ",\"adaptive_selection_ns\":"
+               << result.recovery.transactions.adaptiveSelectionNs
+               << ",\"adaptive_full_page_selections\":"
+               << result.recovery.transactions.adaptiveFullPageSelections
+               << ",\"adaptive_delta_selections\":"
+               << result.recovery.transactions.adaptiveDeltaSelections
+               << ",\"adaptive_ties\":"
+               << result.recovery.transactions.adaptiveTies
+               << ",\"bytes_if_full_page\":"
+               << result.recovery.transactions.bytesIfFullPage
+               << ",\"bytes_if_delta\":"
+               << result.recovery.transactions.bytesIfDelta
+               << ",\"bytes_actually_chosen\":"
+               << result.recovery.transactions.bytesActuallyChosen
+               << ",\"bytes_saved_by_adaptive\":"
+               << result.recovery.transactions.bytesSavedByAdaptive
+               << ",\"bytes_saved_versus_byte_range\":"
+               << result.recovery.transactions.bytesSavedVersusByteRange
                << ",\"wal_bytes\":" << result.recovery.walBytes
                << ",\"logical_changed_bytes\":" << result.recovery.logicalChangedBytes
                << ",\"logging_amplification\":" << result.recovery.loggingAmplification
@@ -491,6 +511,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"records_analyzed\":" << result.recovery.recovery.recordsAnalyzed
                << ",\"pages_redone\":" << result.recovery.recovery.pagesRedone
                << ",\"pages_undone\":" << result.recovery.recovery.pagesUndone
+               << ",\"database_writes\":"
+               << result.recovery.recovery.databaseWrites
                << ",\"analysis_ns\":" << result.recovery.recovery.analysisNs
                << ",\"redo_ns\":" << result.recovery.recovery.redoNs
                << ",\"undo_ns\":" << result.recovery.recovery.undoNs
@@ -551,8 +573,7 @@ std::string formatHuman(const BenchmarkResult& result) {
            << "seed/mode: " << result.seed << '/'
            << (result.configuration.cacheMode == CacheMode::Hot ? "hot" : "reopen") << '\n'
            << "WAL update mode: "
-           << (result.configuration.walUpdateMode == WalUpdateMode::FullPage
-                   ? "full-page" : "byte-range") << '\n'
+           << walUpdateModeName(result.configuration.walUpdateMode) << '\n'
            << "environment: " << result.environment.versionContext << ", git "
            << result.environment.gitCommit << ", " << result.environment.compiler << ", "
            << result.environment.buildType << ", " << result.environment.platform << '\n'
@@ -611,6 +632,17 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.recovery.transactions.rangeCount << '/'
            << result.recovery.transactions.changedBytes << '/'
            << result.recovery.transactions.deltaComputationNs << '\n'
+           << "adaptive selections full/delta/ties, candidate full/delta/chosen bytes: "
+           << result.recovery.transactions.adaptiveFullPageSelections << '/'
+           << result.recovery.transactions.adaptiveDeltaSelections << '/'
+           << result.recovery.transactions.adaptiveTies << '/'
+           << result.recovery.transactions.bytesIfFullPage << '/'
+           << result.recovery.transactions.bytesIfDelta << '/'
+           << result.recovery.transactions.bytesActuallyChosen << '\n'
+           << "adaptive bytes saved vs full/byte-range, selection ns: "
+           << result.recovery.transactions.bytesSavedByAdaptive << '/'
+           << result.recovery.transactions.bytesSavedVersusByteRange << '/'
+           << result.recovery.transactions.adaptiveSelectionNs << '\n'
            << "update record bytes mean/p50/p95/p99/max: "
            << result.recovery.updateRecordBytes.mean << '/'
            << result.recovery.updateRecordBytes.p50 << '/'

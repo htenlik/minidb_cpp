@@ -10,7 +10,8 @@ int main() {
                                  std::string("recovery_full_scan"),
                                  std::string("recovery_loser")}) {
             for (const auto mode : {minidb::WalUpdateMode::FullPage,
-                                    minidb::WalUpdateMode::ByteRange}) {
+                                    minidb::WalUpdateMode::ByteRange,
+                                    minidb::WalUpdateMode::Adaptive}) {
             minidb::bench::BenchmarkConfig config;
             config.benchmark = name;
             config.rows = 8;
@@ -42,12 +43,22 @@ int main() {
                             && results[0].recovery.rangesPerDelta.count
                                 == results[0].recovery.transactions.updateRecordCount,
                         "Byte-range benchmark omitted range/diff diagnostics");
-                } else {
+                } else if (mode == minidb::WalUpdateMode::FullPage) {
                     minidb::test::require(
                         results[0].recovery.transactions.fullPageUpdateRecords
                                 == results[0].recovery.transactions.updateRecordCount
                             && results[0].recovery.rangesPerDelta.count == 0,
                         "Full-page benchmark reported byte-range diagnostics");
+                } else {
+                    minidb::test::require(
+                        results[0].recovery.transactions.adaptiveFullPageSelections
+                                + results[0].recovery.transactions.adaptiveDeltaSelections
+                            == results[0].recovery.transactions.updateRecordCount
+                            && results[0].recovery.transactions.bytesActuallyChosen
+                                <= results[0].recovery.transactions.bytesIfFullPage
+                            && results[0].recovery.transactions.bytesActuallyChosen
+                                <= results[0].recovery.transactions.bytesIfDelta,
+                        "Adaptive benchmark omitted minimum-size diagnostics");
                 }
             } else {
                 minidb::test::require(
@@ -64,6 +75,34 @@ int main() {
                 json.find("\"logging_amplification\"") != std::string::npos
                     && json.find("\"analysis_ns\"") != std::string::npos,
                 "Recovery benchmark JSON omitted diagnostics");
+            }
+        }
+        for (const auto& name : {std::string("txn_wal_delta_friendly"),
+                                 std::string("txn_wal_fragmentation")}) {
+            minidb::bench::BenchmarkConfig config;
+            config.benchmark = name;
+            config.operations = 4;
+            config.bufferFrames = 2;
+            config.walUpdateMode = minidb::WalUpdateMode::Adaptive;
+            config.databasePath = (std::filesystem::temp_directory_path()
+                / ("minidb_" + name + ".db")).string();
+            const auto result = minidb::bench::runConfiguredBenchmarks(config).front();
+            const auto& stats = result.recovery.transactions;
+            minidb::test::require(
+                result.validationPassed && stats.updateRecordCount == config.operations
+                    && stats.bytesActuallyChosen <= stats.bytesIfFullPage
+                    && stats.bytesActuallyChosen <= stats.bytesIfDelta,
+                "Adaptive controlled workload violated minimum-size selection");
+            if (name == "txn_wal_delta_friendly") {
+                minidb::test::require(
+                    stats.adaptiveDeltaSelections == config.operations
+                        && stats.adaptiveFullPageSelections == 0,
+                    "Delta-friendly workload did not select delta consistently");
+            } else {
+                minidb::test::require(
+                    stats.adaptiveFullPageSelections == config.operations
+                        && stats.adaptiveDeltaSelections == 0,
+                    "Fragmentation workload did not select full-page consistently");
             }
         }
         std::cout << "recovery_benchmark_test passed\n";

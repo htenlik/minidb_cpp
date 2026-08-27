@@ -124,6 +124,10 @@ void testConfigurationParsing() {
         std::vector<std::string_view>{
             "--benchmark", "txn_insert", "--wal-update-mode", "delta"})); },
         "unknown WAL update mode was accepted");
+    const auto adaptive = parseArguments(std::vector<std::string_view>{
+        "--benchmark", "txn_insert", "--wal-update-mode", "adaptive"}).config;
+    minidb::test::require(adaptive.walUpdateMode == minidb::WalUpdateMode::Adaptive,
+                          "adaptive WAL update mode was not parsed");
 }
 
 void testJson() {

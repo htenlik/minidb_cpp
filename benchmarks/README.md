@@ -25,7 +25,7 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--wal-batch-size N` | 10 | Records between forces in `wal_batch_flush` |
 | `--wal-buffer-bytes N` | 65536 | LogManager memory-buffer capacity |
 | `--wal-segment-bytes N` | 16777216 | Fixed segmented-WAL payload capacity |
-| `--wal-update-mode MODE` | `full-page` | `full-page` or experimental `byte-range` page updates |
+| `--wal-update-mode MODE` | `full-page` | `full-page`, `byte-range`, or `adaptive` page updates |
 | `--checkpoint-wal-bytes N` | 67108864 | Automatic checkpoint growth threshold; zero disables |
 | `--checkpoint-statements N` | 0 | Automatic checkpoint commit threshold; zero disables |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |

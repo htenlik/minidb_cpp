@@ -1179,11 +1179,21 @@ BenchmarkResult runTransactional(
                               config.walSegmentBytes,
                               config.walUpdateMode});
         auto& engine = server.sqlEngine();
-        createUsers(engine);
-        const auto setupRows = name == "txn_insert" ? 0U
-            : name == "txn_bplus_insert" ? config.rows
-            : std::max(config.rows, config.operations);
-        populateUsers(engine, setupRows);
+        const bool rawWalWorkload = name == "txn_wal_delta_friendly"
+            || name == "txn_wal_fragmentation";
+        PageId rawWalPage = INVALID_PAGE_ID;
+        std::uint64_t setupRows = 0;
+        if (rawWalWorkload) {
+            server.recoveryCoordinator().beginStatement();
+            rawWalPage = server.pageAllocator().allocatePage();
+            server.recoveryCoordinator().commitStatement();
+        } else {
+            createUsers(engine);
+            setupRows = name == "txn_insert" ? 0U
+                : name == "txn_bplus_insert" ? config.rows
+                : std::max(config.rows, config.operations);
+            populateUsers(engine, setupRows);
+        }
         server.bufferPool().flushAll();
         const auto before = storageMetrics(
             server.diskManager(), server.bufferPool(), server.pageAllocator());
@@ -1192,7 +1202,29 @@ BenchmarkResult runTransactional(
         server.recoveryCoordinator().resetStats();
         server.checkpointManager().resetStats();
         for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
-            if (name == "txn_insert" || name == "txn_bplus_insert") {
+            if (rawWalWorkload) {
+                measure(latencies, [&] {
+                    server.recoveryCoordinator().beginStatement();
+                    {
+                        auto page = requireWritePage(
+                            server.bufferPool(), rawWalPage, "run WAL encoding workload");
+                        if (name == "txn_wal_fragmentation") {
+                            for (std::size_t offset = 0; offset < page.data().size();
+                                 offset += 2) {
+                                page.data()[offset] ^= std::byte{0x5A};
+                            }
+                        } else {
+                            constexpr std::size_t BEGIN = 128;
+                            constexpr std::size_t LENGTH = 16;
+                            for (std::size_t offset = BEGIN; offset < BEGIN + LENGTH;
+                                 ++offset) {
+                                page.data()[offset] ^= std::byte{0x33};
+                            }
+                        }
+                    }
+                    server.recoveryCoordinator().commitStatement();
+                });
+            } else if (name == "txn_insert" || name == "txn_bplus_insert") {
                 const auto key = name == "txn_insert" ? operation : setupRows + operation;
                 measure(latencies, [&] { static_cast<void>(engine.execute(
                     "INSERT INTO users VALUES (" + std::to_string(key)
@@ -1228,13 +1260,14 @@ BenchmarkResult runTransactional(
             }
         }
         server.catalog().validate();
+        server.pageAllocator().validate();
         const auto after = storageMetrics(
             server.diskManager(), server.bufferPool(), server.pageAllocator());
         result = finish(
             name, config, std::move(latencies), {}, before, after,
             0.0, 0.0, server.bufferPool().stats());
-        result.storageBackend = config.walUpdateMode == WalUpdateMode::FullPage
-            ? "buffer_pool_full_page_wal" : "buffer_pool_byte_range_wal";
+        result.storageBackend = "buffer_pool_" + std::string(walUpdateModeName(
+            config.walUpdateMode)) + "_wal";
         result.wal.manager = server.logManager().stats();
         result.wal.walRecords = result.wal.manager.recordsAppended;
         result.recovery.transactions = server.recoveryCoordinator().stats();
