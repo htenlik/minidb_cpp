@@ -129,6 +129,163 @@ minidb::PageDeltaUpdateLogPayload representativeDelta(bool existing = true) {
     return payload;
 }
 
+minidb::AdaptivePageUpdateDecision decisionForPages(
+    const minidb::DiskManager::Page& before,
+    const minidb::DiskManager::Page& after,
+    bool beforeExisted = true) {
+    return minidb::selectAdaptivePageUpdateEncoding({
+        7, beforeExisted, minidb::computePageDelta(before, after),
+    });
+}
+
+void testAdaptiveSelectionExamplesAndBoundary() {
+    const minidb::DiskManager::Page before{};
+    auto after = before;
+    after[17] = std::byte{1};
+    require(decisionForPages(before, after).recordType
+                == minidb::LogRecordType::PageDeltaUpdate,
+            "Adaptive selector did not choose delta for one changed byte");
+
+    after = before;
+    std::fill(after.begin() + 100, after.begin() + 164, std::byte{2});
+    require(decisionForPages(before, after).recordType
+                == minidb::LogRecordType::PageDeltaUpdate,
+            "Adaptive selector did not choose delta for a small contiguous run");
+
+    after.fill(std::byte{0xFF});
+    auto decision = decisionForPages(before, after);
+    require(decision.recordType == minidb::LogRecordType::PageUpdate
+                && decision.fullPageRecordBytes < decision.deltaRecordBytes,
+            "Adaptive selector did not choose the exact smaller whole-page encoding");
+
+    after = before;
+    for (std::size_t offset = 0; offset < after.size(); offset += 2) {
+        after[offset] = std::byte{0xA5};
+    }
+    decision = decisionForPages(before, after);
+    require(decision.recordType == minidb::LogRecordType::PageUpdate
+                && decision.rangeCount == 2048,
+            "Adaptive selector did not choose full-page for fragmented changes");
+
+    const auto contiguousDecision = [&](std::size_t length) {
+        auto candidate = before;
+        std::fill_n(candidate.begin(), length, std::byte{0x7F});
+        return decisionForPages(before, candidate);
+    };
+    const auto below = contiguousDecision(4089);
+    const auto tie = contiguousDecision(4090);
+    const auto above = contiguousDecision(4091);
+    require(below.deltaRecordBytes + 2 == below.fullPageRecordBytes
+                && below.recordType == minidb::LogRecordType::PageDeltaUpdate,
+            "Adaptive selector's below-boundary result is incorrect");
+    require(tie.deltaRecordBytes == tie.fullPageRecordBytes
+                && tie.isTie()
+                && tie.recordType == minidb::LogRecordType::PageUpdate,
+            "Adaptive exact-size tie did not prefer full-page");
+    require(above.deltaRecordBytes == above.fullPageRecordBytes + 2
+                && above.recordType == minidb::LogRecordType::PageUpdate,
+            "Adaptive selector's above-boundary result is incorrect");
+
+    const auto newPage = decisionForPages(before, filledPage(std::byte{0x33}), false);
+    require(newPage.recordType == minidb::LogRecordType::PageDeltaUpdate,
+            "Adaptive new-page selection did not use its one-image delta layout");
+}
+
+void testAdaptiveCandidateSizesMatchEncodedOutput() {
+    constexpr std::uint64_t SEED = 0x11D20051ULL;
+    std::mt19937_64 random(SEED);
+    for (std::size_t candidate = 0; candidate < 2'000; ++candidate) {
+        auto before = filledPage(static_cast<std::byte>(random() & 0xFFU));
+        auto after = before;
+        const auto begin = static_cast<std::size_t>(random() % after.size());
+        const auto maximum = after.size() - begin;
+        const auto length = 1U + static_cast<std::size_t>(random() % maximum);
+        for (std::size_t offset = begin; offset < begin + length; ++offset) {
+            after[offset] ^= static_cast<std::byte>(1U + (random() & 0xFFU));
+        }
+        const bool existed = (candidate % 3U) != 0;
+        if (!existed) before.fill(std::byte{0});
+        const minidb::PageDeltaUpdateLogPayload delta{
+            9, existed, minidb::computePageDelta(before, after),
+        };
+        const auto decision = minidb::selectAdaptivePageUpdateEncoding(delta);
+        const auto encodedDelta = minidb::encodePageDeltaUpdateLogPayload(delta);
+        const auto encodedFull = minidb::encodePageUpdateLogPayload({
+            9, existed, before, after,
+        });
+        require(decision.fullPageRecordBytes
+                    == minidb::wal_record_layout::HEADER_SIZE + encodedFull.size()
+                    && decision.deltaRecordBytes
+                    == minidb::wal_record_layout::HEADER_SIZE + encodedDelta.size()
+                    && minidb::pageDeltaUpdatePayloadEncodedSize(delta)
+                    == encodedDelta.size()
+                    && minidb::pageDeltaUpdateRecordEncodedSize(delta)
+                    == decision.deltaRecordBytes,
+                "Adaptive calculated candidate size drifted from encoded output (seed 0x11D20051)");
+    }
+}
+
+void testRandomizedAdaptiveMinimumInvariant() {
+    constexpr std::uint64_t SEED = 0x11D2A11ULL;
+    constexpr std::size_t PAIRS = 10'000;
+    std::mt19937_64 random(SEED);
+    for (std::size_t candidate = 0; candidate < PAIRS; ++candidate) {
+        minidb::DiskManager::Page before{};
+        minidb::DiskManager::Page after{};
+        for (std::size_t offset = 0; offset < before.size(); ++offset) {
+            before[offset] = static_cast<std::byte>(random() & 0xFFU);
+        }
+        after = before;
+        switch (candidate % 5U) {
+        case 0: {
+            const auto mutations = 1U + static_cast<unsigned>(random() % 32U);
+            for (unsigned index = 0; index < mutations; ++index) {
+                const auto offset = static_cast<std::size_t>(random() % after.size());
+                after[offset] ^= std::byte{0x5A};
+            }
+            break;
+        }
+        case 1: {
+            const auto begin = static_cast<std::size_t>(random() % after.size());
+            const auto length = 1U + static_cast<std::size_t>(
+                random() % (after.size() - begin));
+            for (std::size_t offset = begin; offset < begin + length; ++offset) {
+                after[offset] ^= std::byte{0x33};
+            }
+            break;
+        }
+        case 2: {
+            const auto threshold = static_cast<unsigned>(random() % 101U);
+            for (auto& byte : after) {
+                if ((random() % 100U) < threshold) byte ^= std::byte{0xC3};
+            }
+            break;
+        }
+        case 3:
+            for (std::size_t offset = candidate & 1U; offset < after.size(); offset += 2) {
+                after[offset] ^= std::byte{0xA5};
+            }
+            break;
+        case 4:
+            for (auto& byte : after) byte ^= std::byte{0xFF};
+            break;
+        }
+        if (before == after) after[candidate % after.size()] ^= std::byte{1};
+        const minidb::PageDeltaUpdateLogPayload delta{
+            11, true, minidb::computePageDelta(before, after),
+        };
+        const auto decision = minidb::selectAdaptivePageUpdateEncoding(delta);
+        const auto chosen = decision.recordType == minidb::LogRecordType::PageUpdate
+            ? decision.fullPageRecordBytes : decision.deltaRecordBytes;
+        require(chosen <= decision.fullPageRecordBytes
+                    && chosen <= decision.deltaRecordBytes,
+                "Adaptive minimum-size invariant failed (seed 0x11D2A11)");
+        require(!decision.isTie()
+                    || decision.recordType == minidb::LogRecordType::PageUpdate,
+                "Adaptive randomized tie did not prefer full-page (seed 0x11D2A11)");
+    }
+}
+
 void testExactDeltaPayloadAndWalCodec() {
     const auto payload = representativeDelta();
     const auto encoded = minidb::encodePageDeltaUpdateLogPayload(payload);
@@ -330,6 +487,9 @@ int main() {
         testPageUpdatePayload();
         testCanonicalPageDeltaComputation();
         testExactDeltaPayloadAndWalCodec();
+        testAdaptiveSelectionExamplesAndBoundary();
+        testAdaptiveCandidateSizesMatchEncodedOutput();
+        testRandomizedAdaptiveMinimumInvariant();
         testMalformedDeltaPayloads();
         testDirectPhysicalRedoUndo();
         testDeterministicDeltaDecoderFuzz();
