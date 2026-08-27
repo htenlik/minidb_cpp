@@ -336,22 +336,35 @@ void testMixedFullPageAndDeltaHistory() {
     commitOneByte(
         fixture, pageId, 4, std::byte{0x44}, minidb::WalUpdateMode::Adaptive);
 
-    minidb::DiskManager disk(fixture.database.path().string());
-    minidb::LogManager log(fixture.wal);
-    static_cast<void>(minidb::RecoveryManager(disk, log).recover());
-    require(diskByte(disk, pageId, 1) == std::byte{0x11}
-                && diskByte(disk, pageId, 2) == std::byte{0x22}
-                && diskByte(disk, pageId, 3) == std::byte{0x33}
-                && diskByte(disk, pageId, 4) == std::byte{0x44},
-            "Mixed full-page/delta history did not recover its final state");
-    bool sawFullPage = false;
-    bool sawDelta = false;
-    for (const auto& record : log.scan().records) {
-        sawFullPage = sawFullPage || record.type == minidb::LogRecordType::PageUpdate;
-        sawDelta = sawDelta || record.type == minidb::LogRecordType::PageDeltaUpdate;
+    {
+        minidb::DiskManager disk(fixture.database.path().string());
+        minidb::LogManager log(fixture.wal);
+        static_cast<void>(minidb::RecoveryManager(disk, log).recover());
+        require(diskByte(disk, pageId, 1) == std::byte{0x11}
+                    && diskByte(disk, pageId, 2) == std::byte{0x22}
+                    && diskByte(disk, pageId, 3) == std::byte{0x33}
+                    && diskByte(disk, pageId, 4) == std::byte{0x44},
+                "Mixed full-page/delta/adaptive history did not recover its final state");
+        bool sawFullPage = false;
+        bool sawDelta = false;
+        for (const auto& record : log.scan().records) {
+            sawFullPage = sawFullPage || record.type == minidb::LogRecordType::PageUpdate;
+            sawDelta = sawDelta || record.type == minidb::LogRecordType::PageDeltaUpdate;
+        }
+        require(sawFullPage && sawDelta,
+                "Mixed-history fixture did not retain both update encodings");
     }
-    require(sawFullPage && sawDelta,
-            "Mixed-history fixture did not retain both update encodings");
+    for (const auto mode : {minidb::WalUpdateMode::FullPage,
+                            minidb::WalUpdateMode::ByteRange,
+                            minidb::WalUpdateMode::Adaptive}) {
+        minidb::DiskManager disk(fixture.database.path().string());
+        minidb::LogManager log(fixture.wal);
+        const auto startup = minidb::RecoveryManager(disk, log).recover();
+        minidb::RecoveryCoordinator coordinator(disk, log, startup.nextTransactionId, mode);
+        require(coordinator.updateMode() == mode
+                    && diskByte(disk, pageId, 4) == std::byte{0x44},
+                "Retained mixed WAL depended on the current generation mode");
+    }
 }
 
 void runMixedAdaptiveTransactionCrash(bool committed) {
