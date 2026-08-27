@@ -199,6 +199,10 @@ void testPageZeroCommitAndRollback(minidb::WalUpdateMode mode) {
     coordinator.commitStatement();
     require(disk.databaseHeader().catalogRootPageId == rootA,
             "Committed catalog-root page-0 update was lost");
+    if (mode == minidb::WalUpdateMode::Adaptive) {
+        require(coordinator.stats().adaptiveDeltaSelections > 0,
+                "Adaptive page-0 update bypassed ordinary selection logic");
+    }
 
     coordinator.beginStatement();
     metadata.updateCatalogRootPageId(rootB);
@@ -212,7 +216,8 @@ void testPageZeroCommitAndRollback(minidb::WalUpdateMode mode) {
     allocator.validate();
 }
 
-void testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo() {
+void testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo(
+    minidb::WalUpdateMode mode) {
     RecoveryFixture loserFixture("recovery_repeated_delta_loser");
     minidb::PageId loserPage = minidb::INVALID_PAGE_ID;
     {
@@ -221,7 +226,7 @@ void testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo() {
         minidb::LogManager log(loserFixture.wal);
         minidb::RecoveryCoordinator coordinator(
             disk, log, minidb::INVALID_TRANSACTION_ID,
-            minidb::WalUpdateMode::ByteRange);
+            mode);
         minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
         coordinator.attachBufferPool(pool);
         coordinator.beginStatement();
@@ -265,7 +270,7 @@ void testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo() {
         minidb::LogManager log(winnerFixture.wal);
         minidb::RecoveryCoordinator coordinator(
             disk, log, minidb::INVALID_TRANSACTION_ID,
-            minidb::WalUpdateMode::ByteRange);
+            mode);
         minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
         coordinator.attachBufferPool(pool);
         coordinator.beginStatement();
@@ -423,7 +428,10 @@ int main() {
         }
         testExplicitRollbackAndZeroMutation();
         testTailRepairAndChainValidation();
-        testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo();
+        testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo(
+            minidb::WalUpdateMode::ByteRange);
+        testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo(
+            minidb::WalUpdateMode::Adaptive);
         testMixedFullPageAndDeltaHistory();
         runMixedAdaptiveTransactionCrash(false);
         runMixedAdaptiveTransactionCrash(true);

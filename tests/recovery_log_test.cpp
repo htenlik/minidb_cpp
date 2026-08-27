@@ -189,6 +189,9 @@ void testAdaptiveSelectionExamplesAndBoundary() {
     const auto newPage = decisionForPages(before, filledPage(std::byte{0x33}), false);
     require(newPage.recordType == minidb::LogRecordType::PageDeltaUpdate,
             "Adaptive new-page selection did not use its one-image delta layout");
+    const auto fragmentedNewPage = decisionForPages(before, after, false);
+    require(fragmentedNewPage.recordType == minidb::LogRecordType::PageUpdate,
+            "Adaptive fragmented new-page selection assumed delta always wins");
 }
 
 void testAdaptiveCandidateSizesMatchEncodedOutput() {

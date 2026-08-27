@@ -142,9 +142,10 @@ void testCreateCrashBoundary(minidb::WalUpdateMode mode) {
 void initializeUpdateDatabase(const std::string& path, minidb::WalUpdateMode mode) {
     minidb::net::DatabaseServer server(path, serverConfig(4, mode));
     static_cast<void>(server.sqlEngine().execute(
-        "CREATE TABLE docs (id UINT32 PRIMARY KEY, body VARCHAR(3000) NOT NULL)"));
-    static_cast<void>(server.sqlEngine().execute("INSERT INTO docs VALUES (1, 'old')"));
-    static_cast<void>(server.sqlEngine().execute("INSERT INTO docs VALUES (2, 'filler')"));
+        "CREATE TABLE docs (id UINT32 PRIMARY KEY, body VARCHAR(3000) NOT NULL, "
+        "score UINT32 NOT NULL)"));
+    static_cast<void>(server.sqlEngine().execute("INSERT INTO docs VALUES (1, 'old', 10)"));
+    static_cast<void>(server.sqlEngine().execute("INSERT INTO docs VALUES (2, 'filler', 20)"));
 }
 
 void testUpdatePrimaryKeyAndDeleteCrashBoundaries(minidb::WalUpdateMode mode) {
@@ -164,6 +165,17 @@ void testUpdatePrimaryKeyAndDeleteCrashBoundaries(minidb::WalUpdateMode mode) {
                     && std::get<std::string>(updated[0][0])
                         == (committed ? largeValue : std::string("old")),
                 "Large tuple update mixed pre/post-transaction state");
+
+        minidb::test::TemporaryDatabase scalarDb(
+            committed ? "scalar_after_commit" : "scalar_before_commit");
+        const auto scalarPath = scalarDb.path().string();
+        initializeUpdateDatabase(scalarPath, mode);
+        expectCrash(scalarPath, failpoint, "UPDATE docs SET score = 99 WHERE id = 1", mode);
+        const auto scalar = query(scalarPath, "SELECT score FROM docs WHERE id = 1", mode);
+        require(scalar.size() == 1
+                    && std::get<std::uint32_t>(scalar[0][0])
+                        == (committed ? 99U : 10U),
+                "Scalar UPDATE visibility disagrees with durable COMMIT boundary");
 
         minidb::test::TemporaryDatabase pkDb(
             committed ? "pk_after_commit" : "pk_before_commit");
