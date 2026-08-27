@@ -281,7 +281,8 @@ void testTcpCrashRestartCommitBoundary(minidb::WalUpdateMode mode) {
 int main() {
     try {
         for (const auto mode : {minidb::WalUpdateMode::FullPage,
-                                minidb::WalUpdateMode::ByteRange}) {
+                                minidb::WalUpdateMode::ByteRange,
+                                minidb::WalUpdateMode::Adaptive}) {
             testCommittedCrashRedoAndInterruptedRecovery(mode);
             testStealCrashUndo(mode);
             testPrecommitCrashPoints(mode);

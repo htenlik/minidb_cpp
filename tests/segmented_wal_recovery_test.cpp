@@ -1,4 +1,7 @@
 #include "minidb/database_server.hpp"
+#include "minidb/buffer_pool_manager.hpp"
+#include "minidb/log_manager.hpp"
+#include "minidb/recovery.hpp"
 #include "minidb/segmented_wal.hpp"
 #include "test_utils.hpp"
 
@@ -175,16 +178,111 @@ void testManyCheckpointReclamationCyclesAndLostControl(minidb::WalUpdateMode mod
     }
 }
 
+std::byte diskByte(
+    minidb::DiskManager& disk,
+    minidb::PageId pageId,
+    std::size_t offset) {
+    minidb::DiskManager::Page page{};
+    disk.readPage(pageId, page);
+    return page[offset];
+}
+
+void testMixedAdaptiveTransactionAcrossSegments(bool committed) {
+    minidb::test::TemporaryDatabase database(committed
+        ? "wal_adaptive_segment_winner" : "wal_adaptive_segment_loser");
+    constexpr std::uint32_t SEGMENT_BYTES = 8'300;
+    const auto path = database.path().string();
+    const auto walPath = minidb::walPathForDatabase(path);
+    minidb::PageId sparsePage = minidb::INVALID_PAGE_ID;
+    minidb::PageId densePage = minidb::INVALID_PAGE_ID;
+    minidb::TransactionId transactionId = minidb::INVALID_TRANSACTION_ID;
+    {
+        minidb::DiskManager disk(path);
+        sparsePage = disk.appendPage();
+        densePage = disk.appendPage();
+        minidb::LogManager log(
+            walPath, minidb::LogManager::DEFAULT_BUFFER_SIZE,
+            minidb::LogOpenMode::EagerValidated,
+            minidb::WalStorageMode::Segmented, SEGMENT_BYTES);
+        minidb::RecoveryCoordinator coordinator(
+            disk, log, minidb::INVALID_TRANSACTION_ID,
+            minidb::WalUpdateMode::Adaptive);
+        minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
+        coordinator.attachBufferPool(pool);
+        coordinator.beginStatement();
+        transactionId = coordinator.activeTransactionId();
+        {
+            auto page = pool.fetchPageWrite(sparsePage);
+            page->data()[9] = std::byte{0x19};
+        }
+        {
+            auto page = pool.fetchPageWrite(densePage);
+            std::fill(page->data().begin(), page->data().end(), std::byte{0xE4});
+        }
+        require(pool.flushPage(densePage), "Could not flush dense segmented page");
+        if (committed) coordinator.commitStatement();
+        const auto stats = coordinator.stats();
+        require(stats.adaptiveDeltaSelections == 1
+                    && stats.adaptiveFullPageSelections == 1,
+                "Segmented adaptive transaction did not select both encodings");
+        if (pool.isResident(densePage)) pool.discardPageForRecovery(densePage);
+    }
+
+    minidb::SegmentedWalStorage storage(
+        minidb::segmentedWalPathForDatabase(path), SEGMENT_BYTES, false);
+    std::set<minidb::WalSegmentId> transactionSegments;
+    bool sawFull = false;
+    bool sawDelta = false;
+    bool sawCommit = false;
+    for (const auto& record : storage.scan().records) {
+        if (record.transactionId != transactionId) continue;
+        sawFull = sawFull || record.type == minidb::LogRecordType::PageUpdate;
+        sawDelta = sawDelta || record.type == minidb::LogRecordType::PageDeltaUpdate;
+        sawCommit = sawCommit || record.type == minidb::LogRecordType::Commit;
+        for (const auto& segment : storage.segments()) {
+            if (record.lsn >= segment.header.startLsn
+                && record.lsn < segment.logicalEndLsn) {
+                transactionSegments.insert(segment.header.segmentId);
+                break;
+            }
+        }
+    }
+    require(sawFull && sawDelta && sawCommit == committed
+                && transactionSegments.size() >= 2,
+            "Mixed adaptive transaction did not span segments with a valid chain");
+
+    {
+        minidb::DiskManager disk(path);
+        minidb::LogManager log(
+            walPath, minidb::LogManager::DEFAULT_BUFFER_SIZE,
+            minidb::LogOpenMode::DeferredRecovery,
+            minidb::WalStorageMode::Auto, SEGMENT_BYTES);
+        const auto recovery = minidb::RecoveryManager(disk, log).recover();
+        const auto sparse = committed ? std::byte{0x19} : std::byte{0};
+        const auto dense = committed ? std::byte{0xE4} : std::byte{0};
+        require(diskByte(disk, sparsePage, 9) == sparse
+                    && diskByte(disk, densePage, 0) == dense
+                    && diskByte(disk, densePage, 4095) == dense,
+                "Mixed adaptive cross-segment recovery produced the wrong state");
+        require(committed ? recovery.pagesRedone == 2 : recovery.pagesUndone == 2,
+                "Cross-segment adaptive recovery processed the wrong update count");
+        log.validate();
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         for (const auto mode : {minidb::WalUpdateMode::FullPage,
-                                minidb::WalUpdateMode::ByteRange}) {
+                                minidb::WalUpdateMode::ByteRange,
+                                minidb::WalUpdateMode::Adaptive}) {
             testCrossSegmentCommitAndReopen(mode);
             testCrossSegmentLoserUndo(mode);
             testManyCheckpointReclamationCyclesAndLostControl(mode);
         }
+        testMixedAdaptiveTransactionAcrossSegments(false);
+        testMixedAdaptiveTransactionAcrossSegments(true);
         std::cout << "segmented_wal_recovery_test passed\n";
         return 0;
     } catch (const std::exception& error) {

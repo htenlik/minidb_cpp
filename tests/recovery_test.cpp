@@ -5,6 +5,7 @@
 #include "minidb/page_allocator.hpp"
 #include "test_utils.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -327,13 +328,16 @@ void testMixedFullPageAndDeltaHistory() {
         fixture, pageId, 2, std::byte{0x22}, minidb::WalUpdateMode::ByteRange);
     commitOneByte(
         fixture, pageId, 3, std::byte{0x33}, minidb::WalUpdateMode::FullPage);
+    commitOneByte(
+        fixture, pageId, 4, std::byte{0x44}, minidb::WalUpdateMode::Adaptive);
 
     minidb::DiskManager disk(fixture.database.path().string());
     minidb::LogManager log(fixture.wal);
     static_cast<void>(minidb::RecoveryManager(disk, log).recover());
     require(diskByte(disk, pageId, 1) == std::byte{0x11}
                 && diskByte(disk, pageId, 2) == std::byte{0x22}
-                && diskByte(disk, pageId, 3) == std::byte{0x33},
+                && diskByte(disk, pageId, 3) == std::byte{0x33}
+                && diskByte(disk, pageId, 4) == std::byte{0x44},
             "Mixed full-page/delta history did not recover its final state");
     bool sawFullPage = false;
     bool sawDelta = false;
@@ -345,12 +349,74 @@ void testMixedFullPageAndDeltaHistory() {
             "Mixed-history fixture did not retain both update encodings");
 }
 
+void runMixedAdaptiveTransactionCrash(bool committed) {
+    RecoveryFixture fixture(committed
+        ? "recovery_adaptive_mixed_winner" : "recovery_adaptive_mixed_loser");
+    minidb::PageId sparsePage = minidb::INVALID_PAGE_ID;
+    minidb::PageId densePage = minidb::INVALID_PAGE_ID;
+    {
+        minidb::DiskManager disk(fixture.database.path().string());
+        sparsePage = disk.appendPage();
+        densePage = disk.appendPage();
+        minidb::LogManager log(fixture.wal);
+        minidb::RecoveryCoordinator coordinator(
+            disk, log, minidb::INVALID_TRANSACTION_ID,
+            minidb::WalUpdateMode::Adaptive);
+        minidb::BufferPoolManager pool(disk, 1, 2, &log, &coordinator);
+        coordinator.attachBufferPool(pool);
+        coordinator.beginStatement();
+        {
+            auto page = pool.fetchPageWrite(sparsePage);
+            page->data()[31] = std::byte{0x31};
+        }
+        {
+            auto page = pool.fetchPageWrite(densePage);
+            std::fill(page->data().begin(), page->data().end(), std::byte{0xD2});
+        }
+        require(pool.flushPage(densePage),
+                "Could not STEAL dense adaptive page before crash");
+        const auto transactionStats = coordinator.stats();
+        require(transactionStats.adaptiveDeltaSelections == 1
+                    && transactionStats.adaptiveFullPageSelections == 1
+                    && transactionStats.bytesActuallyChosen
+                        <= transactionStats.bytesIfFullPage
+                    && transactionStats.bytesActuallyChosen
+                        <= transactionStats.bytesIfDelta,
+                "One adaptive transaction did not choose both physical encodings");
+        if (committed) coordinator.commitStatement();
+        const auto records = log.scan().records;
+        bool sawFull = false;
+        bool sawDelta = false;
+        for (const auto& record : records) {
+            sawFull = sawFull || record.type == minidb::LogRecordType::PageUpdate;
+            sawDelta = sawDelta || record.type == minidb::LogRecordType::PageDeltaUpdate;
+        }
+        require(sawFull && sawDelta,
+                "Adaptive mixed transaction WAL lacks one selected record type");
+        if (pool.isResident(densePage)) pool.discardPageForRecovery(densePage);
+    }
+    {
+        minidb::DiskManager disk(fixture.database.path().string());
+        minidb::LogManager log(fixture.wal);
+        const auto recovery = minidb::RecoveryManager(disk, log).recover();
+        const auto expectedSparse = committed ? std::byte{0x31} : std::byte{0};
+        const auto expectedDense = committed ? std::byte{0xD2} : std::byte{0};
+        require(diskByte(disk, sparsePage, 31) == expectedSparse
+                    && diskByte(disk, densePage, 0) == expectedDense
+                    && diskByte(disk, densePage, 4095) == expectedDense,
+                "Mixed adaptive transaction did not recover atomically");
+        require(committed ? recovery.pagesRedone == 2 : recovery.pagesUndone == 2,
+                "Mixed adaptive recovery processed the wrong page count");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         for (const auto mode : {minidb::WalUpdateMode::FullPage,
-                                minidb::WalUpdateMode::ByteRange}) {
+                                minidb::WalUpdateMode::ByteRange,
+                                minidb::WalUpdateMode::Adaptive}) {
             testCommitIsNoForceAndRedoSurvivesReopen(mode);
             testStealLoserUndoAndTruncation(mode);
             testPageZeroCommitAndRollback(mode);
@@ -359,6 +425,8 @@ int main() {
         testTailRepairAndChainValidation();
         testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo();
         testMixedFullPageAndDeltaHistory();
+        runMixedAdaptiveTransactionCrash(false);
+        runMixedAdaptiveTransactionCrash(true);
         std::cout << "recovery_test passed\n";
         return 0;
     } catch (const std::exception& error) {
