@@ -242,6 +242,16 @@ std::optional<DiskManager::Page> BufferPoolManager::residentPageCopy(PageId page
     return frames_[found->second].data;
 }
 
+void BufferPoolManager::prepareResidentPageForCommit(PageId pageId) {
+    const auto found = pageTable_.find(pageId);
+    if (found == pageTable_.end()) return;
+    auto& frame = frames_[found->second];
+    if (frame.pinCount != 0) {
+        throw std::logic_error("Cannot finalize WAL state for a pinned page");
+    }
+    prepareFrameForWrite(frame);
+}
+
 std::uint64_t BufferPoolManager::totalPinCount() const noexcept {
     std::uint64_t total = 0;
     for (const auto& frame : frames_) total += frame.valid ? frame.pinCount : 0;

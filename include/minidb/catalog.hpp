@@ -32,10 +32,13 @@ inline constexpr std::size_t FLAGS_OFFSET = 20;
 inline constexpr std::size_t NEXT_TABLE_ID_OFFSET = 24;
 inline constexpr std::size_t TABLE_COUNT_OFFSET = 32;
 inline constexpr std::size_t RESERVED_OFFSET = 40;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = 64;
 inline constexpr std::size_t RESERVED_SIZE = HEADER_SIZE - RESERVED_OFFSET;
 
 static_assert(HEADER_SIZE == 64);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 
 } // namespace catalog_metadata_layout
 

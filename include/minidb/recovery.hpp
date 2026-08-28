@@ -16,6 +16,11 @@ class BufferPoolManager;
 class CheckpointControl;
 class LogManager;
 
+enum class RedoPolicy : std::uint8_t {
+    AlwaysRedo,
+    PageLsnSelectiveRedo,
+};
+
 struct RecoveryStats {
     std::uint64_t recordsAnalyzed = 0;
     std::uint64_t transactionsAnalyzed = 0;
@@ -28,6 +33,13 @@ struct RecoveryStats {
     std::uint64_t databasePagesExtended = 0;
     std::uint64_t databaseWrites = 0;
     std::uint64_t databaseSyncCalls = 0;
+    std::uint64_t pageLsnChecks = 0;
+    std::uint64_t pageLsnUnknown = 0;
+    std::uint64_t redoSkippedByPageLsn = 0;
+    std::uint64_t redoAppliedAfterPageLsnCheck = 0;
+    std::uint64_t legacyRedoRecords = 0;
+    std::uint64_t recoveryPageReads = 0;
+    std::uint64_t recoveryPageWrites = 0;
     std::uint64_t tailBytesTruncated = 0;
     std::uint64_t analysisNs = 0;
     std::uint64_t redoNs = 0;
@@ -46,6 +58,12 @@ struct RecoveryStats {
     CheckpointId highestCheckpointId = INVALID_CHECKPOINT_ID;
     TransactionId nextTransactionId = 1;
     bool repairedTail = false;
+
+    [[nodiscard]] double redoSkipRatio() const noexcept {
+        return pageLsnChecks == 0 ? 0.0
+            : static_cast<double>(redoSkippedByPageLsn)
+                / static_cast<double>(pageLsnChecks);
+    }
 };
 
 struct TransactionRuntimeStats {
@@ -74,6 +92,9 @@ struct TransactionRuntimeStats {
     std::uint64_t bytesActuallyChosen = 0;
     std::uint64_t bytesSavedByAdaptive = 0;
     std::uint64_t bytesSavedVersusByteRange = 0;
+    std::uint64_t persistentPageLsnAssignments = 0;
+    std::uint64_t v1PagesObserved = 0;
+    std::uint64_t v2PagesWithKnownLsn = 0;
     std::uint64_t commitFsyncs = 0;
     std::uint64_t rollbackDatabaseWrites = 0;
     std::vector<std::uint64_t> updateRecordBytes;
@@ -86,9 +107,11 @@ public:
         DiskManager& diskManager,
         LogManager& logManager,
         CheckpointControl* checkpointControl = nullptr,
-        bool forceFullScan = false)
+        bool forceFullScan = false,
+        RedoPolicy redoPolicy = RedoPolicy::PageLsnSelectiveRedo)
         : diskManager_(diskManager), logManager_(logManager),
-          checkpointControl_(checkpointControl), forceFullScan_(forceFullScan) {}
+          checkpointControl_(checkpointControl), forceFullScan_(forceFullScan),
+          redoPolicy_(redoPolicy) {}
 
     [[nodiscard]] RecoveryStats recover();
 
@@ -97,6 +120,7 @@ private:
     LogManager& logManager_;
     CheckpointControl* checkpointControl_;
     bool forceFullScan_;
+    RedoPolicy redoPolicy_;
 };
 
 class RecoveryCoordinator final : public PageRecoveryHook {
@@ -123,12 +147,13 @@ public:
     void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) override;
     [[nodiscard]] Lsn preparePageForWrite(
         PageId pageId,
-        const DiskManager::Page& after) override;
+        DiskManager::Page& after) override;
 
 private:
     struct PageState {
         bool beforeExisted = false;
         DiskManager::Page before{};
+        Lsn beforePageLsn = INVALID_LSN;
         std::optional<DiskManager::Page> latestAfter;
         std::array<bool, database_format::PAGE_SIZE> touchedOffsets{};
         Lsn latestLsn = INVALID_LSN;

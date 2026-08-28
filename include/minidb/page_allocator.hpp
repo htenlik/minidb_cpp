@@ -27,10 +27,13 @@ inline constexpr std::size_t LAYOUT_VERSION_OFFSET = MAGIC_OFFSET + MAGIC_SIZE;
 inline constexpr std::size_t HEADER_SIZE_OFFSET = LAYOUT_VERSION_OFFSET + 4;
 inline constexpr std::size_t NEXT_FREE_PAGE_ID_OFFSET = HEADER_SIZE_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = NEXT_FREE_PAGE_ID_OFFSET + 4;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = 32;
 inline constexpr std::size_t RESERVED_SIZE = database_format::PAGE_SIZE - RESERVED_OFFSET;
 
 static_assert(RESERVED_OFFSET == 20);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 
 } // namespace free_page_layout

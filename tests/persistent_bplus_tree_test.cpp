@@ -145,10 +145,10 @@ void testPhysicalLayoutsAndEmptyMetadata() {
     static_assert(minidb::persistent_index_metadata_layout::HEADER_SIZE == 64);
     static_assert(minidb::persistent_index_metadata_layout::ROOT_PAGE_ID_OFFSET == 16);
     static_assert(minidb::persistent_index_metadata_layout::ENTRY_COUNT_OFFSET == 20);
-    static_assert(minidb::persistent_bplus_leaf_layout::HEADER_SIZE == 32);
+    static_assert(minidb::persistent_bplus_leaf_layout::HEADER_SIZE == 36);
     static_assert(minidb::persistent_bplus_leaf_layout::ENTRY_SIZE == 10);
     static_assert(minidb::persistent_bplus_leaf_layout::PHYSICAL_CAPACITY == 406);
-    static_assert(minidb::persistent_bplus_leaf_layout::UNUSED_SIZE == 4);
+    static_assert(minidb::persistent_bplus_leaf_layout::UNUSED_SIZE == 0);
     static_assert(minidb::persistent_bplus_internal_layout::HEADER_SIZE == 32);
     static_assert(minidb::persistent_bplus_internal_layout::PHYSICAL_CAPACITY == 507);
     static_assert(minidb::persistent_bplus_internal_layout::PHYSICAL_FANOUT == 508);

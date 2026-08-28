@@ -27,6 +27,16 @@ std::uint32_t readUint32LittleEndian(
     return value;
 }
 
+std::uint64_t readUint64LittleEndian(
+    std::span<const std::byte> input,
+    std::size_t offset) {
+    std::uint64_t value = 0;
+    for (std::size_t index = 0; index < PAGE_LSN_SIZE; ++index) {
+        value |= std::to_integer<std::uint64_t>(input[offset + index]) << (index * 8U);
+    }
+    return value;
+}
+
 } // namespace
 
 DatabaseHeader makeCurrentDatabaseHeader() noexcept {
@@ -71,10 +81,12 @@ DatabaseHeader deserializeDatabaseHeader(std::span<const std::byte> metadataPage
         readUint32LittleEndian(metadataPage, FREE_LIST_ROOT_PAGE_ID_OFFSET),
     };
 
-    if (header.formatVersion != CURRENT_VERSION) {
+    if (header.formatVersion != LEGACY_VERSION
+        && header.formatVersion != CURRENT_VERSION) {
         throw std::runtime_error(
             "Unsupported database format version " + std::to_string(header.formatVersion)
-            + "; supported version is " + std::to_string(CURRENT_VERSION) + ".");
+            + "; supported versions are " + std::to_string(LEGACY_VERSION)
+            + " and " + std::to_string(CURRENT_VERSION) + ".");
     }
     if (header.pageSize != PAGE_SIZE) {
         throw std::runtime_error(
@@ -85,6 +97,17 @@ DatabaseHeader deserializeDatabaseHeader(std::span<const std::byte> metadataPage
         throw std::runtime_error(
             "Database header size " + std::to_string(header.headerSize)
             + " does not match the supported header size " + std::to_string(HEADER_SIZE) + ".");
+    }
+    const auto encodedPageLsn = readUint64LittleEndian(metadataPage, PAGE_LSN_OFFSET);
+    if ((header.formatVersion == LEGACY_VERSION && encodedPageLsn != 0)
+        || encodedPageLsn == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error("Database metadata page has an invalid PageLSN encoding.");
+    }
+    if (!std::all_of(
+            metadataPage.begin() + PAGE_LSN_OFFSET + PAGE_LSN_SIZE,
+            metadataPage.end(),
+            [](std::byte value) { return value == std::byte{0}; })) {
+        throw std::runtime_error("Database metadata page reserved bytes are not zero.");
     }
 
     return header;

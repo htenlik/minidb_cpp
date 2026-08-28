@@ -17,7 +17,8 @@ using FormatVersion = std::uint32_t;
 
 inline constexpr std::size_t PAGE_SIZE = 4096;
 inline constexpr PageId METADATA_PAGE_ID = 0;
-inline constexpr FormatVersion CURRENT_VERSION = 1;
+inline constexpr FormatVersion LEGACY_VERSION = 1;
+inline constexpr FormatVersion CURRENT_VERSION = 2;
 
 inline constexpr std::size_t MAGIC_OFFSET = 0;
 inline constexpr std::size_t MAGIC_SIZE = 8;
@@ -45,8 +46,13 @@ inline constexpr std::size_t FREE_LIST_ROOT_PAGE_ID_OFFSET =
     CATALOG_ROOT_PAGE_ID_OFFSET + PAGE_ID_FIELD_SIZE;
 inline constexpr std::size_t RESERVED_OFFSET =
     FREE_LIST_ROOT_PAGE_ID_OFFSET + PAGE_ID_FIELD_SIZE;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = 64;
 inline constexpr std::size_t RESERVED_SIZE = HEADER_SIZE - RESERVED_OFFSET;
+
+static_assert(PAGE_LSN_OFFSET == 28);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 
 struct DatabaseHeader {
     FormatVersion formatVersion = CURRENT_VERSION;

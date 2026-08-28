@@ -31,10 +31,13 @@ inline constexpr std::size_t FIRST_PAGE_ID_OFFSET = HEADER_SIZE_OFFSET + 4;
 inline constexpr std::size_t LAST_PAGE_ID_OFFSET = FIRST_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t TUPLE_COUNT_OFFSET = LAST_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = TUPLE_COUNT_OFFSET + 8;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = 64;
 inline constexpr std::size_t RESERVED_SIZE = HEADER_SIZE - RESERVED_OFFSET;
 
 static_assert(RESERVED_OFFSET == 32);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 
 } // namespace tuple_heap_metadata_layout

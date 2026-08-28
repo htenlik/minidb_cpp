@@ -22,9 +22,24 @@ void DatabaseMetadataManager::persist(database_format::DatabaseHeader header) {
     database_format::serializeDatabaseHeader(header, after);
     const auto lsn = recoveryHook_.preparePageForWrite(
         database_format::METADATA_PAGE_ID, after);
+    if (header.formatVersion == database_format::CURRENT_VERSION
+        && diskManager_.databaseHeader().formatVersion == database_format::LEGACY_VERSION) {
+        recoveryFailPoint("migration_after_format_wal_append");
+    }
     if (isValidLsn(lsn)) walProvider_.flushUpTo(lsn);
     diskManager_.writePhysicalPage(database_format::METADATA_PAGE_ID, after);
     recoveryFailPoint("after_database_page_write");
+}
+
+void DatabaseMetadataManager::upgradeToCurrentFormat() {
+    const auto current = diskManager_.databaseHeader().formatVersion;
+    if (current == database_format::CURRENT_VERSION) return;
+    if (current != database_format::LEGACY_VERSION) {
+        throw std::logic_error("Database format cannot be upgraded from this version");
+    }
+    auto header = diskManager_.databaseHeader();
+    header.formatVersion = database_format::CURRENT_VERSION;
+    persist(header);
 }
 
 void DatabaseMetadataManager::updateCatalogRootPageId(PageId pageId) {

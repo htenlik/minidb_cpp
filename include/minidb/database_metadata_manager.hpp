@@ -20,6 +20,7 @@ public:
 
     void updateCatalogRootPageId(PageId pageId);
     void updateFreeListRootPageId(PageId pageId);
+    void upgradeToCurrentFormat();
 
 private:
     DiskManager& diskManager_;

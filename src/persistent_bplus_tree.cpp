@@ -1,6 +1,7 @@
 #include "minidb/persistent_bplus_tree.hpp"
 
 #include "minidb/page_access.hpp"
+#include "minidb/page_lsn.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -211,11 +212,12 @@ PersistentBPlusTree::Metadata PersistentBPlusTree::readMetadata() const {
         throw std::runtime_error("Persistent B+ tree metadata has an invalid header size.");
     }
     if (!std::all_of(
-            page.begin() + RESERVED_OFFSET,
+            page.begin() + PAGE_LSN_OFFSET + PAGE_LSN_SIZE,
             page.end(),
             [](std::byte value) { return value == std::byte{0}; })) {
         throw std::runtime_error("Persistent B+ tree metadata reserved bytes are not zero.");
     }
+    static_cast<void>(readPersistentPageLsn(page));
 
     Metadata metadata{
         readUint32(page, ROOT_PAGE_ID_OFFSET),
@@ -299,19 +301,23 @@ PersistentBPlusTree::LeafNode PersistentBPlusTree::readLeaf(
     using namespace persistent_bplus_leaf_layout;
 
     const auto version = readUint32(page, LAYOUT_VERSION_OFFSET);
-    if (version != CURRENT_VERSION) {
+    if (version != LEGACY_VERSION && version != CURRENT_VERSION) {
         throw std::runtime_error(
             "Unsupported persistent B+ tree leaf version " + std::to_string(version) + ".");
     }
-    if (readUint32(page, HEADER_SIZE_OFFSET) != HEADER_SIZE) {
+    const auto headerSize = version == LEGACY_VERSION ? LEGACY_HEADER_SIZE : HEADER_SIZE;
+    if (readUint32(page, HEADER_SIZE_OFFSET) != headerSize) {
         throw std::runtime_error("Persistent B+ tree leaf has an invalid header size.");
     }
     const auto keyCount = readUint32(page, KEY_COUNT_OFFSET);
     if (keyCount == 0 || keyCount > logicalCapacity || keyCount > PHYSICAL_CAPACITY) {
         throw std::runtime_error("Persistent B+ tree leaf has an invalid key count.");
     }
-    if (readUint32(page, RESERVED_OFFSET) != 0) {
+    if (version == LEGACY_VERSION && readUint32(page, RESERVED_OFFSET) != 0) {
         throw std::runtime_error("Persistent B+ tree leaf reserved field is not zero.");
+    }
+    if (version == CURRENT_VERSION) {
+        static_cast<void>(readPersistentPageLsn(page));
     }
 
     const auto validateLink = [&](PageId link) {
@@ -334,7 +340,7 @@ PersistentBPlusTree::LeafNode PersistentBPlusTree::readLeaf(
     leaf.entries.reserve(keyCount);
 
     for (std::size_t index = 0; index < keyCount; ++index) {
-        const auto offset = entryOffset(index);
+        const auto offset = headerSize + (index * ENTRY_SIZE);
         const IndexEntry entry{
             readUint32(page, offset),
             RecordId{
@@ -352,11 +358,12 @@ PersistentBPlusTree::LeafNode PersistentBPlusTree::readLeaf(
     }
 
     if (!std::all_of(
-            page.begin() + entryOffset(keyCount),
+            page.begin() + headerSize + (keyCount * ENTRY_SIZE),
             page.end(),
             [](std::byte value) { return value == std::byte{0}; })) {
         throw std::runtime_error("Persistent B+ tree leaf unused bytes are not zero.");
     }
+    static_cast<void>(readPersistentPageLsn(page));
     return leaf;
 }
 
@@ -414,11 +421,12 @@ PersistentBPlusTree::InternalNode PersistentBPlusTree::readInternal(
         throw std::runtime_error("Persistent B+ tree internal child/key counts disagree.");
     }
     if (!std::all_of(
-            page.begin() + RESERVED_OFFSET,
+            page.begin() + PAGE_LSN_OFFSET + PAGE_LSN_SIZE,
             page.begin() + HEADER_SIZE,
             [](std::byte value) { return value == std::byte{0}; })) {
         throw std::runtime_error("Persistent B+ tree internal reserved bytes are not zero.");
     }
+    static_cast<void>(readPersistentPageLsn(page));
 
     InternalNode internalNode;
     internalNode.keys.reserve(keyCount);

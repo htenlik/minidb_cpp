@@ -77,6 +77,9 @@ public:
     [[nodiscard]] std::optional<bool> isDirty(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<Lsn> pageLsn(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<DiskManager::Page> residentPageCopy(PageId pageId) const;
+    // Finalizes a transaction's resident page image after WAL append, including
+    // both volatile and persistent PageLSN assignment.
+    void prepareResidentPageForCommit(PageId pageId);
     [[nodiscard]] std::uint64_t totalPinCount() const noexcept;
 
     // Recovery/rollback invalidation never writes dirty contents.

@@ -3,6 +3,7 @@
 #include "minidb/byte_codec.hpp"
 #include "minidb/page_access.hpp"
 #include "minidb/storage_error.hpp"
+#include "minidb/page_lsn.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -80,13 +81,14 @@ TupleStore::Metadata TupleStore::readMetadata() const {
             "Tuple heap metadata has an invalid header size.");
     }
     if (!std::all_of(
-            page.begin() + RESERVED_OFFSET,
+            page.begin() + PAGE_LSN_OFFSET + PAGE_LSN_SIZE,
             page.end(),
             [](std::byte value) { return value == std::byte{0}; })) {
         throw StorageError(
             StorageErrorKind::CorruptPage,
             "Tuple heap metadata reserved bytes are not zero.");
     }
+    static_cast<void>(readPersistentPageLsn(page));
 
     Metadata metadata{
         byte_codec::readUint32(page, FIRST_PAGE_ID_OFFSET),

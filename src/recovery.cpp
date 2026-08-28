@@ -1,9 +1,11 @@
 #include "minidb/recovery.hpp"
 
 #include "minidb/buffer_pool_manager.hpp"
+#include "minidb/byte_codec.hpp"
 #include "minidb/checkpoint_control.hpp"
 #include "minidb/checkpoint_log.hpp"
 #include "minidb/log_manager.hpp"
+#include "minidb/page_lsn.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -191,15 +193,25 @@ RecoveryStats RecoveryManager::recover() {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
         if (record.type == LogRecordType::PageUpdate
-            || record.type == LogRecordType::PageDeltaUpdate) {
+            || record.type == LogRecordType::PageDeltaUpdate
+            || record.type == LogRecordType::PageUpdateV2
+            || record.type == LogRecordType::PageDeltaUpdateV2) {
             PageId pageId = INVALID_PAGE_ID;
             bool beforePageExisted = false;
             if (record.type == LogRecordType::PageUpdate) {
                 const auto update = decodePageUpdateLogPayload(record.payload);
                 pageId = update.pageId;
                 beforePageExisted = update.beforePageExisted;
-            } else {
+            } else if (record.type == LogRecordType::PageDeltaUpdate) {
                 const auto update = decodePageDeltaUpdateLogPayload(record.payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+            } else if (record.type == LogRecordType::PageUpdateV2) {
+                const auto update = decodePageUpdateV2LogPayload(record.payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+            } else {
+                const auto update = decodePageDeltaUpdateV2LogPayload(record.payload);
                 pageId = update.pageId;
                 beforePageExisted = update.beforePageExisted;
             }
@@ -250,22 +262,87 @@ RecoveryStats RecoveryManager::recover() {
     const auto redoStart = std::chrono::steady_clock::now();
     for (const auto* record : redo) {
         const auto beforeCount = diskManager_.pageCount();
+        bool applied = true;
         if (record->type == LogRecordType::PageUpdate) {
             const auto update = decodePageUpdateLogPayload(record->payload);
             diskManager_.writePhysicalPage(update.pageId, update.afterImage);
-        } else {
+            ++stats.legacyRedoRecords;
+        } else if (record->type == LogRecordType::PageDeltaUpdate) {
             const auto update = decodePageDeltaUpdateLogPayload(record->payload);
             DiskManager::Page page{};
             if (update.pageId < diskManager_.pageCount()) {
                 diskManager_.readPhysicalPage(update.pageId, page);
+                ++stats.recoveryPageReads;
             }
             applyPageDeltaAfter(page, update);
             diskManager_.writePhysicalPage(update.pageId, page);
+            ++stats.legacyRedoRecords;
+        } else {
+            PageId pageId = INVALID_PAGE_ID;
+            bool beforePageExisted = false;
+            if (record->type == LogRecordType::PageUpdateV2) {
+                const auto update = decodePageUpdateV2LogPayload(record->payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+            } else {
+                const auto update = decodePageDeltaUpdateV2LogPayload(record->payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+            }
+
+            DiskManager::Page current{};
+            const bool pageExists = pageId < diskManager_.pageCount();
+            const bool needsCurrentPage = record->type == LogRecordType::PageDeltaUpdateV2
+                || (redoPolicy_ == RedoPolicy::PageLsnSelectiveRedo
+                    && pageExists && beforePageExisted);
+            if (pageExists && needsCurrentPage) {
+                diskManager_.readPhysicalPage(pageId, current);
+                ++stats.recoveryPageReads;
+            }
+            if (redoPolicy_ == RedoPolicy::PageLsnSelectiveRedo
+                && pageExists && beforePageExisted) {
+                ++stats.pageLsnChecks;
+                const auto persistentLsn = readPersistentPageLsn(current);
+                if (!isValidLsn(persistentLsn)) {
+                    ++stats.pageLsnUnknown;
+                } else {
+                    if (persistentLsn < wal_file_layout::HEADER_SIZE
+                        || persistentLsn >= scan.validBytes) {
+                        throw WalError(
+                            WalErrorKind::CorruptRecord,
+                            "Persistent PageLSN is beyond the known WAL high-water mark");
+                    }
+                    if (persistentLsn >= record->lsn) {
+                        applied = false;
+                        ++stats.redoSkippedByPageLsn;
+                    }
+                }
+            }
+            if (applied) {
+                if (record->type == LogRecordType::PageUpdateV2) {
+                    const auto update = decodePageUpdateV2LogPayload(record->payload);
+                    current = update.afterImage;
+                } else {
+                    const auto update = decodePageDeltaUpdateV2LogPayload(record->payload);
+                    clearPersistentPageLsn(current);
+                    applyPageDeltaAfter(current, PageDeltaUpdateLogPayload{
+                        update.pageId, update.beforePageExisted, update.ranges});
+                }
+                writePersistentPageLsn(current, record->lsn);
+                diskManager_.writePhysicalPage(pageId, current);
+                if (redoPolicy_ == RedoPolicy::PageLsnSelectiveRedo
+                    && pageExists && beforePageExisted) {
+                    ++stats.redoAppliedAfterPageLsnCheck;
+                }
+            }
         }
         stats.databasePagesExtended += diskManager_.pageCount() - beforeCount;
-        ++stats.databaseWrites;
-        ++stats.pagesRedone;
-        recoveryFailPoint("recovery_after_redo_page");
+        if (applied) {
+            ++stats.databaseWrites;
+            ++stats.recoveryPageWrites;
+            ++stats.pagesRedone;
+            recoveryFailPoint("recovery_after_redo_page");
+        }
     }
     stats.redoNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -286,7 +363,7 @@ RecoveryStats RecoveryManager::recover() {
                     diskManager_.writePhysicalPage(pageId, update.beforeImage);
                     restoredNow = true;
                 }
-            } else {
+            } else if ((*iterator)->type == LogRecordType::PageDeltaUpdate) {
                 const auto update = decodePageDeltaUpdateLogPayload((*iterator)->payload);
                 pageId = update.pageId;
                 beforePageExisted = update.beforePageExisted;
@@ -297,9 +374,39 @@ RecoveryStats RecoveryManager::recover() {
                     diskManager_.writePhysicalPage(pageId, page);
                     restoredNow = true;
                 }
+            } else if ((*iterator)->type == LogRecordType::PageUpdateV2) {
+                const auto update = decodePageUpdateV2LogPayload((*iterator)->payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+                if (beforePageExisted && restored.insert(pageId).second) {
+                    auto before = update.beforeImage;
+                    if (supportsPersistentPageLsn(before)) {
+                        writePersistentPageLsn(before, update.beforePageLsn);
+                    }
+                    diskManager_.writePhysicalPage(pageId, before);
+                    restoredNow = true;
+                }
+            } else {
+                const auto update = decodePageDeltaUpdateV2LogPayload((*iterator)->payload);
+                pageId = update.pageId;
+                beforePageExisted = update.beforePageExisted;
+                if (beforePageExisted && restored.insert(pageId).second) {
+                    DiskManager::Page page{};
+                    diskManager_.readPhysicalPage(pageId, page);
+                    ++stats.recoveryPageReads;
+                    clearPersistentPageLsn(page);
+                    applyPageDeltaBefore(page, PageDeltaUpdateLogPayload{
+                        update.pageId, update.beforePageExisted, update.ranges});
+                    if (supportsPersistentPageLsn(page)) {
+                        writePersistentPageLsn(page, update.beforePageLsn);
+                    }
+                    diskManager_.writePhysicalPage(pageId, page);
+                    restoredNow = true;
+                }
             }
             if (restoredNow) {
                 ++stats.databaseWrites;
+                ++stats.recoveryPageWrites;
                 ++stats.pagesUndone;
                 recoveryFailPoint("recovery_after_undo_page");
             }
@@ -371,9 +478,16 @@ void RecoveryCoordinator::notePageWriteIntent(
     if (pageId == INVALID_PAGE_ID) throw std::invalid_argument("Write intent has invalid PageId");
     if (active_->pages.contains(pageId)) return;
     const bool existed = pageId < active_->startPageCount;
+    Lsn beforePageLsn = INVALID_LSN;
+    if (existed) {
+        beforePageLsn = readPersistentPageLsn(before);
+        if (isValidLsn(beforePageLsn)) ++stats_.v2PagesWithKnownLsn;
+        else ++stats_.v1PagesObserved;
+    }
     active_->pages.emplace(pageId, PageState{
         existed,
         existed ? before : DiskManager::Page{},
+        beforePageLsn,
         std::nullopt,
         {},
         INVALID_LSN,
@@ -411,49 +525,84 @@ Lsn RecoveryCoordinator::appendTransactionRecord(
 
 Lsn RecoveryCoordinator::preparePageForWrite(
     PageId pageId,
-    const DiskManager::Page& after) {
+    DiskManager::Page& after) {
     if (!active_.has_value()) return INVALID_LSN;
     const auto found = active_->pages.find(pageId);
     if (found == active_->pages.end()) return INVALID_LSN;
     auto& state = found->second;
-    const auto& comparison = state.latestAfter.has_value() ? *state.latestAfter : state.before;
-    if (comparison == after) return state.latestLsn;
+    auto normalizedAfter = after;
+    const bool afterSupportsPageLsn = supportsPersistentPageLsn(normalizedAfter);
+    if (afterSupportsPageLsn) clearPersistentPageLsn(normalizedAfter);
+    auto normalizedBefore = state.before;
+    if (supportsPersistentPageLsn(normalizedBefore)) clearPersistentPageLsn(normalizedBefore);
+    const auto& comparison = state.latestAfter.has_value()
+        ? *state.latestAfter : normalizedBefore;
+    if (comparison == normalizedAfter) {
+        if (isValidLsn(state.latestLsn) && afterSupportsPageLsn) {
+            writePersistentPageLsn(after, state.latestLsn);
+        }
+        return state.latestLsn;
+    }
     std::uint64_t logicalBytesChanged = 0;
-    for (std::size_t offset = 0; offset < after.size(); ++offset) {
-        if (comparison[offset] != after[offset]) {
+    for (std::size_t offset = 0; offset < normalizedAfter.size(); ++offset) {
+        if (comparison[offset] != normalizedAfter[offset]) {
             state.touchedOffsets[offset] = true;
             ++logicalBytesChanged;
         }
     }
+    const bool migratingPageZero = pageId == database_format::METADATA_PAGE_ID
+        && byte_codec::readUint32(normalizedAfter, database_format::FORMAT_VERSION_OFFSET)
+            == database_format::CURRENT_VERSION;
+    const bool pageLsnAware = afterSupportsPageLsn
+        && (diskManager_.databaseHeader().formatVersion == database_format::CURRENT_VERSION
+            || migratingPageZero);
     Lsn lsn = INVALID_LSN;
     std::vector<std::byte> payload;
-    LogRecordType recordType = LogRecordType::PageUpdate;
+    LogRecordType recordType = pageLsnAware
+        ? LogRecordType::PageUpdateV2 : LogRecordType::PageUpdate;
     if (updateMode_ == WalUpdateMode::FullPage) {
-        payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
-            pageId, state.beforeExisted, state.before, after,
-        });
+        if (pageLsnAware) {
+            payload = encodePageUpdateV2LogPayload(PageUpdateV2LogPayload{
+                pageId, state.beforeExisted, state.beforePageLsn,
+                normalizedBefore, normalizedAfter,
+            });
+        } else {
+            payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
+                pageId, state.beforeExisted, state.before, after,
+            });
+        }
         stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
         stats_.changedBytes += database_format::PAGE_SIZE;
         ++stats_.fullPageUpdateRecords;
     } else {
         const auto deltaStart = std::chrono::steady_clock::now();
-        auto ranges = computePageDelta(state.before, after, state.touchedOffsets);
+        auto ranges = computePageDelta(
+            pageLsnAware ? normalizedBefore : state.before,
+            pageLsnAware ? normalizedAfter : after,
+            state.touchedOffsets);
         stats_.deltaComputationNs += static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - deltaStart).count());
         PageDeltaUpdateLogPayload deltaPayload{
-            pageId, state.beforeExisted, std::move(ranges),
+            pageId, state.beforeExisted, ranges,
         };
+        PageDeltaUpdateV2LogPayload deltaV2Payload{
+            pageId, state.beforeExisted, state.beforePageLsn, std::move(ranges),
+        };
+        const auto& selectedRanges = pageLsnAware
+            ? deltaV2Payload.ranges : deltaPayload.ranges;
         const auto changedBytes = std::accumulate(
-            deltaPayload.ranges.begin(), deltaPayload.ranges.end(), std::uint64_t{0},
+            selectedRanges.begin(), selectedRanges.end(), std::uint64_t{0},
             [](std::uint64_t sum, const PageByteRange& range) {
                 return sum + range.length;
             });
-        stats_.rangeCount += deltaPayload.ranges.size();
-        stats_.deltaRangeCounts.push_back(deltaPayload.ranges.size());
+        stats_.rangeCount += selectedRanges.size();
+        stats_.deltaRangeCounts.push_back(selectedRanges.size());
         if (updateMode_ == WalUpdateMode::Adaptive) {
             const auto selectionStart = std::chrono::steady_clock::now();
-            const auto decision = selectAdaptivePageUpdateEncoding(deltaPayload);
+            const auto decision = pageLsnAware
+                ? selectAdaptivePageUpdateV2Encoding(deltaV2Payload)
+                : selectAdaptivePageUpdateEncoding(deltaPayload);
             stats_.adaptiveSelectionNs += static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - selectionStart).count());
@@ -468,23 +617,36 @@ Lsn RecoveryCoordinator::preparePageForWrite(
                 decision.deltaRecordBytes - chosenBytes;
             if (decision.isTie()) ++stats_.adaptiveTies;
             recordType = decision.recordType;
-            if (recordType == LogRecordType::PageUpdate) {
+            if (recordType == LogRecordType::PageUpdate
+                || recordType == LogRecordType::PageUpdateV2) {
                 ++stats_.adaptiveFullPageSelections;
-                payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
-                    pageId, state.beforeExisted, state.before, after,
-                });
+                if (pageLsnAware) {
+                    payload = encodePageUpdateV2LogPayload(PageUpdateV2LogPayload{
+                        pageId, state.beforeExisted, state.beforePageLsn,
+                        normalizedBefore, normalizedAfter,
+                    });
+                } else {
+                    payload = encodePageUpdateLogPayload(PageUpdateLogPayload{
+                        pageId, state.beforeExisted, state.before, after,
+                    });
+                }
                 stats_.fullPageImageBytes += 2 * database_format::PAGE_SIZE;
                 stats_.changedBytes += database_format::PAGE_SIZE;
                 ++stats_.fullPageUpdateRecords;
             } else {
                 ++stats_.adaptiveDeltaSelections;
-                payload = encodePageDeltaUpdateLogPayload(deltaPayload);
+                payload = pageLsnAware
+                    ? encodePageDeltaUpdateV2LogPayload(deltaV2Payload)
+                    : encodePageDeltaUpdateLogPayload(deltaPayload);
                 stats_.changedBytes += changedBytes;
                 ++stats_.byteRangeUpdateRecords;
             }
         } else {
-            recordType = LogRecordType::PageDeltaUpdate;
-            payload = encodePageDeltaUpdateLogPayload(deltaPayload);
+            recordType = pageLsnAware
+                ? LogRecordType::PageDeltaUpdateV2 : LogRecordType::PageDeltaUpdate;
+            payload = pageLsnAware
+                ? encodePageDeltaUpdateV2LogPayload(deltaV2Payload)
+                : encodePageDeltaUpdateLogPayload(deltaPayload);
             stats_.changedBytes += changedBytes;
             ++stats_.byteRangeUpdateRecords;
         }
@@ -494,8 +656,12 @@ Lsn RecoveryCoordinator::preparePageForWrite(
     stats_.logicalBytesChanged += logicalBytesChanged;
     stats_.walUpdatePayloadBytes += payloadBytes;
     stats_.updateRecordBytes.push_back(wal_record_layout::HEADER_SIZE + payloadBytes);
-    state.latestAfter = after;
+    state.latestAfter = normalizedAfter;
     state.latestLsn = lsn;
+    if (pageLsnAware) {
+        writePersistentPageLsn(after, lsn);
+        ++stats_.persistentPageLsnAssignments;
+    }
     ++stats_.pageUpdateRecords;
     ++stats_.updateRecordCount;
     recoveryFailPoint("after_page_update_append");
@@ -514,9 +680,7 @@ void RecoveryCoordinator::commitStatement() {
     if (bufferPool_ != nullptr) {
         for (auto& [pageId, state] : active_->pages) {
             static_cast<void>(state);
-            if (const auto page = bufferPool_->residentPageCopy(pageId); page.has_value()) {
-                static_cast<void>(preparePageForWrite(pageId, *page));
-            }
+            bufferPool_->prepareResidentPageForCommit(pageId);
         }
     }
     if (!isValidLsn(active_->beginLsn)) {

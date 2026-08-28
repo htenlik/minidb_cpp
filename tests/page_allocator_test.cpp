@@ -238,7 +238,8 @@ void testFreePageCorruptionIsRejected() {
     requireCorruptFreePageRejected("reserved_bytes", [](auto& storage, auto pageId) {
         auto guard = minidb::requireWritePage(storage.bufferPool, pageId, "corrupt reserved byte");
         auto page = guard.data();
-        page[minidb::free_page_layout::RESERVED_OFFSET] = std::byte{1};
+        page[minidb::free_page_layout::PAGE_LSN_OFFSET
+            + minidb::free_page_layout::PAGE_LSN_SIZE] = std::byte{1};
     });
 
     TemporaryDatabase database("two_page_cycle");

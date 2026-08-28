@@ -29,6 +29,24 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     }
     metadataManager_ = std::make_unique<DatabaseMetadataManager>(
         diskManager_, *recovery_, logManager_);
+    if (diskManager_.databaseHeader().formatVersion == database_format::LEGACY_VERSION) {
+        recoveryFailPoint("migration_before_initial_checkpoint");
+        static_cast<void>(checkpoints_->checkpoint());
+        recoveryFailPoint("migration_after_initial_checkpoint");
+        recoveryFailPoint("migration_before_format_update");
+        recovery_->beginStatement();
+        try {
+            metadataManager_->upgradeToCurrentFormat();
+            recoveryFailPoint("migration_before_commit_sync");
+            recovery_->commitStatement();
+            recoveryFailPoint("migration_after_commit_sync");
+        } catch (...) {
+            if (recovery_->hasActiveStatement()) recovery_->rollbackStatement();
+            throw;
+        }
+        recoveryFailPoint("migration_before_final_checkpoint");
+        static_cast<void>(checkpoints_->checkpoint());
+    }
     allocator_ = std::make_unique<PageAllocator>(
         *bufferPool_, diskManager_, metadataManager_.get());
 

@@ -29,10 +29,13 @@ inline constexpr std::size_t ENTRY_COUNT_OFFSET = ROOT_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t LEAF_MAX_KEYS_OFFSET = ENTRY_COUNT_OFFSET + 8;
 inline constexpr std::size_t INTERNAL_MAX_KEYS_OFFSET = LEAF_MAX_KEYS_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = INTERNAL_MAX_KEYS_OFFSET + 4;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = 64;
 inline constexpr std::size_t RESERVED_SIZE = HEADER_SIZE - RESERVED_OFFSET;
 
 static_assert(RESERVED_OFFSET == 36);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 
 } // namespace persistent_index_metadata_layout
@@ -40,7 +43,8 @@ static_assert(HEADER_SIZE <= database_format::PAGE_SIZE);
 namespace persistent_bplus_leaf_layout {
 
 using LayoutVersion = std::uint32_t;
-inline constexpr LayoutVersion CURRENT_VERSION = 1;
+inline constexpr LayoutVersion LEGACY_VERSION = 1;
+inline constexpr LayoutVersion CURRENT_VERSION = 2;
 
 inline constexpr std::size_t MAGIC_OFFSET = 0;
 inline constexpr std::size_t MAGIC_SIZE = 8;
@@ -55,8 +59,11 @@ inline constexpr std::size_t NEXT_LEAF_PAGE_ID_OFFSET = KEY_COUNT_OFFSET + 4;
 inline constexpr std::size_t PREVIOUS_LEAF_PAGE_ID_OFFSET =
     NEXT_LEAF_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = PREVIOUS_LEAF_PAGE_ID_OFFSET + 4;
-inline constexpr std::size_t RESERVED_SIZE = 4;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
+inline constexpr std::size_t RESERVED_SIZE = PAGE_LSN_SIZE;
 inline constexpr std::size_t HEADER_SIZE = RESERVED_OFFSET + RESERVED_SIZE;
+inline constexpr std::size_t LEGACY_HEADER_SIZE = 32;
 
 inline constexpr std::size_t KEY_SIZE = 4;
 inline constexpr std::size_t RECORD_PAGE_ID_SIZE = 4;
@@ -73,7 +80,7 @@ inline constexpr std::size_t UNUSED_SIZE = database_format::PAGE_SIZE - USED_SIZ
     return ENTRY_DATA_OFFSET + (index * ENTRY_SIZE);
 }
 
-static_assert(HEADER_SIZE == 32);
+static_assert(HEADER_SIZE == 36);
 static_assert(ENTRY_SIZE == 10);
 static_assert(PHYSICAL_CAPACITY == 406);
 static_assert(USED_SIZE <= database_format::PAGE_SIZE);
@@ -98,6 +105,8 @@ inline constexpr std::size_t KEY_COUNT_OFFSET = HEADER_SIZE_OFFSET + 4;
 inline constexpr std::size_t CHILD_COUNT_OFFSET = KEY_COUNT_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = CHILD_COUNT_OFFSET + 4;
 inline constexpr std::size_t RESERVED_SIZE = 8;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = RESERVED_OFFSET + RESERVED_SIZE;
 
 inline constexpr std::size_t PAGE_ID_SIZE = 4;
@@ -120,6 +129,7 @@ inline constexpr std::size_t UNUSED_SIZE = database_format::PAGE_SIZE - USED_SIZ
 }
 
 static_assert(HEADER_SIZE == 32);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 static_assert(PHYSICAL_CAPACITY == 507);
 static_assert(PHYSICAL_FANOUT == 508);
 static_assert(USED_SIZE <= database_format::PAGE_SIZE);

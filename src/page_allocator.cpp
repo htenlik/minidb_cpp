@@ -2,6 +2,7 @@
 
 #include "minidb/page_access.hpp"
 #include "minidb/database_metadata_manager.hpp"
+#include "minidb/page_lsn.hpp"
 
 #include <algorithm>
 #include <span>
@@ -85,13 +86,15 @@ PageId PageAllocator::readNextFreePageId(PageId pageId) const {
         throw StorageError(StorageErrorKind::CorruptPage, "Invalid free-page header size.");
     }
     if (!std::all_of(
-            bytes.begin() + free_page_layout::RESERVED_OFFSET,
+            bytes.begin() + free_page_layout::PAGE_LSN_OFFSET
+                + free_page_layout::PAGE_LSN_SIZE,
             bytes.end(),
             [](std::byte value) { return value == std::byte{0}; })) {
         throw StorageError(
             StorageErrorKind::CorruptPage,
             "Free page contains nonzero reserved bytes.");
     }
+    static_cast<void>(readPersistentPageLsn(bytes));
 
     const auto nextPageId = readUint32LittleEndian(
         bytes, free_page_layout::NEXT_FREE_PAGE_ID_OFFSET);

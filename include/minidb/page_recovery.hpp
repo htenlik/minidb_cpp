@@ -13,7 +13,7 @@ public:
     virtual void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) = 0;
     [[nodiscard]] virtual Lsn preparePageForWrite(
         PageId pageId,
-        const DiskManager::Page& after) = 0;
+        DiskManager::Page& after) = 0;
 };
 
 } // namespace minidb

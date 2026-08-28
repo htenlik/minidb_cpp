@@ -4,6 +4,7 @@
 #include "minidb/page_access.hpp"
 #include "minidb/persistent_bplus_tree.hpp"
 #include "minidb/table.hpp"
+#include "minidb/page_lsn.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -84,11 +85,12 @@ Catalog::Metadata Catalog::readMetadataPage(
     if (byte_codec::readUint32(page, HEADER_SIZE_OFFSET) != HEADER_SIZE
         || byte_codec::readUint32(page, FLAGS_OFFSET) != 0
         || !std::all_of(
-            page.begin() + RESERVED_OFFSET,
+            page.begin() + PAGE_LSN_OFFSET + PAGE_LSN_SIZE,
             page.end(),
             [](std::byte value) { return value == std::byte{0}; })) {
         throw std::runtime_error("Catalog metadata header or reserved bytes are malformed.");
     }
+    static_cast<void>(readPersistentPageLsn(page));
     Metadata metadata{
         byte_codec::readUint32(page, ENTRIES_HEAP_METADATA_PAGE_ID_OFFSET),
         byte_codec::readUint64(page, NEXT_TABLE_ID_OFFSET),

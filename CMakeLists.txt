@@ -17,6 +17,7 @@ add_library(minidb_core
     src/log_manager.cpp
     src/page_allocator.cpp
     src/page_guard.cpp
+    src/page_lsn.cpp
     src/pager.cpp
     src/persistent_bplus_tree.cpp
     src/record_page.cpp
@@ -185,6 +186,18 @@ add_executable(recovery_test tests/recovery_test.cpp)
 target_link_libraries(recovery_test PRIVATE minidb_core)
 add_test(NAME recovery_test COMMAND recovery_test)
 
+add_executable(page_lsn_recovery_test tests/page_lsn_recovery_test.cpp)
+target_link_libraries(page_lsn_recovery_test PRIVATE minidb_network)
+add_test(NAME page_lsn_recovery_test COMMAND page_lsn_recovery_test)
+
+add_executable(page_lsn_migration_crash_test tests/page_lsn_migration_crash_test.cpp)
+target_link_libraries(page_lsn_migration_crash_test PRIVATE minidb_network)
+add_test(NAME page_lsn_migration_crash_test COMMAND page_lsn_migration_crash_test)
+
+add_executable(page_lsn_model_test tests/page_lsn_model_test.cpp)
+target_link_libraries(page_lsn_model_test PRIVATE minidb_core)
+add_test(NAME page_lsn_model_test COMMAND page_lsn_model_test)
+
 add_executable(wal_scanner_test tests/wal_scanner_test.cpp)
 target_link_libraries(wal_scanner_test PRIVATE minidb_core)
 add_test(NAME wal_scanner_test COMMAND wal_scanner_test)
@@ -196,6 +209,10 @@ add_test(NAME database_format_test COMMAND database_format_test)
 add_executable(page_allocator_test tests/page_allocator_test.cpp)
 target_link_libraries(page_allocator_test PRIVATE minidb_core)
 add_test(NAME page_allocator_test COMMAND page_allocator_test)
+
+add_executable(page_lsn_test tests/page_lsn_test.cpp)
+target_link_libraries(page_lsn_test PRIVATE minidb_core)
+add_test(NAME page_lsn_test COMMAND page_lsn_test)
 
 add_executable(record_page_test tests/record_page_test.cpp)
 target_link_libraries(record_page_test PRIVATE minidb_core)

@@ -467,6 +467,72 @@ void testMalformedPayloads() {
         "PAGE_UPDATE accepted nonzero reserved bytes");
 }
 
+void testPageLsnAwarePayloadsAndAdaptiveBoundary() {
+    minidb::PageUpdateV2LogPayload full;
+    full.pageId = 0x01020304U;
+    full.beforePageExisted = true;
+    full.beforePageLsn = 0x0102030405060708ULL;
+    full.beforeImage[0] = std::byte{0xA1};
+    full.afterImage[4095] = std::byte{0xB2};
+    const auto encodedFull = minidb::encodePageUpdateV2LogPayload(full);
+    require(encodedFull.size() == minidb::page_update_v2_log_layout::PAYLOAD_SIZE
+                && encodedFull.size() == 8216,
+            "PAGE_UPDATE_V2 payload size changed");
+    require(minidb::byte_codec::readUint16(
+                encodedFull, minidb::page_update_v2_log_layout::VERSION_OFFSET) == 1
+                && minidb::byte_codec::readUint16(
+                    encodedFull, minidb::page_update_v2_log_layout::HEADER_SIZE_OFFSET) == 24
+                && minidb::byte_codec::readUint64(
+                    encodedFull,
+                    minidb::page_update_v2_log_layout::BEFORE_PAGE_LSN_OFFSET)
+                    == full.beforePageLsn,
+            "PAGE_UPDATE_V2 header or beforePageLsn encoding is incorrect");
+    require(minidb::decodePageUpdateV2LogPayload(encodedFull) == full,
+            "PAGE_UPDATE_V2 payload did not round-trip");
+
+    minidb::PageDeltaUpdateV2LogPayload delta;
+    delta.pageId = 9;
+    delta.beforePageExisted = true;
+    delta.beforePageLsn = 777;
+    delta.ranges.push_back(minidb::PageByteRange{
+        100, 2,
+        {std::byte{0x11}, std::byte{0x22}},
+        {std::byte{0x33}, std::byte{0x44}},
+    });
+    const auto encodedDelta = minidb::encodePageDeltaUpdateV2LogPayload(delta);
+    require(encodedDelta.size() == 40
+                && minidb::byte_codec::readUint64(
+                    encodedDelta,
+                    minidb::page_delta_update_v2_log_layout::BEFORE_PAGE_LSN_OFFSET) == 777,
+            "PAGE_DELTA_UPDATE_V2 exact encoding is incorrect");
+    require(minidb::decodePageDeltaUpdateV2LogPayload(encodedDelta) == delta,
+            "PAGE_DELTA_UPDATE_V2 payload did not round-trip");
+
+    minidb::DiskManager::Page before{};
+    const auto decision = [&](std::size_t length) {
+        auto after = before;
+        std::fill_n(after.begin(), length, std::byte{0x5A});
+        return minidb::selectAdaptivePageUpdateV2Encoding({
+            11, true, 64, minidb::computePageDelta(before, after),
+        });
+    };
+    require(decision(4089).recordType == minidb::LogRecordType::PageDeltaUpdateV2,
+            "V2 Adaptive selector missed the below-tie delta");
+    const auto tie = decision(4090);
+    require(tie.isTie() && tie.recordType == minidb::LogRecordType::PageUpdateV2,
+            "V2 Adaptive exact-size tie did not choose full-page");
+    require(decision(4091).recordType == minidb::LogRecordType::PageUpdateV2,
+            "V2 Adaptive selector missed the above-tie full page");
+
+    minidb::test::requireThrows<minidb::WalError>(
+        [] {
+            static_cast<void>(minidb::encodePageUpdateV2LogPayload({
+                1, false, 99, {}, {},
+            }));
+        },
+        "New PAGE_UPDATE_V2 accepted a beforePageLsn");
+}
+
 void testCommitAndAbortHaveExactEmptyPayloads() {
     for (const auto type : {minidb::LogRecordType::Commit, minidb::LogRecordType::Abort}) {
         minidb::LogRecord record{type, 9, 64, {}, minidb::INVALID_LSN};
@@ -497,6 +563,7 @@ int main() {
         testDirectPhysicalRedoUndo();
         testDeterministicDeltaDecoderFuzz();
         testMalformedPayloads();
+        testPageLsnAwarePayloadsAndAdaptiveBoundary();
         testCommitAndAbortHaveExactEmptyPayloads();
         std::cout << "recovery_log_test passed\n";
         return 0;

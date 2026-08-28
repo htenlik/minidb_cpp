@@ -35,6 +35,8 @@ inline constexpr std::size_t PREVIOUS_PAGE_ID_OFFSET = NEXT_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t HEAP_METADATA_PAGE_ID_OFFSET = PREVIOUS_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t RESERVED_OFFSET = HEAP_METADATA_PAGE_ID_OFFSET + 4;
 inline constexpr std::size_t RESERVED_SIZE = 12;
+inline constexpr std::size_t PAGE_LSN_OFFSET = RESERVED_OFFSET;
+inline constexpr std::size_t PAGE_LSN_SIZE = 8;
 inline constexpr std::size_t HEADER_SIZE = RESERVED_OFFSET + RESERVED_SIZE;
 
 inline constexpr std::size_t SLOT_TUPLE_OFFSET_OFFSET = 0;
@@ -56,6 +58,7 @@ inline constexpr std::size_t MAX_TUPLE_SIZE =
 }
 
 static_assert(HEADER_SIZE == 48);
+static_assert(PAGE_LSN_OFFSET + PAGE_LSN_SIZE <= HEADER_SIZE);
 static_assert(SLOT_SIZE == 8);
 static_assert(MAX_SLOT_COUNT == 506);
 static_assert(MAX_SLOT_COUNT < INVALID_SLOT_ID);

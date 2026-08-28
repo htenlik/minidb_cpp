@@ -2,6 +2,7 @@
 
 #include "minidb/byte_codec.hpp"
 #include "minidb/storage_error.hpp"
+#include "minidb/page_lsn.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -353,13 +354,14 @@ void ConstSlottedPageView::validate() const {
             "Slotted page has an invalid header size.");
     }
     if (!std::all_of(
-            bytes_.begin() + RESERVED_OFFSET,
+            bytes_.begin() + PAGE_LSN_OFFSET + PAGE_LSN_SIZE,
             bytes_.begin() + HEADER_SIZE,
             [](std::byte value) { return value == std::byte{0}; })) {
         throw StorageError(
             StorageErrorKind::CorruptPage,
             "Slotted-page reserved header bytes are not zero.");
     }
+    static_cast<void>(readPersistentPageLsn(bytes_));
 
     requireExistingDataPage(pageCount_, heapMetadataPageId(), pageId_, "Heap metadata page ID");
     validateLink(nextPageId());
