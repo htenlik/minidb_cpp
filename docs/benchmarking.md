@@ -113,7 +113,7 @@ The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sq
 | Mixed profiles | `mixed_read_heavy`, `mixed_write_heavy` (local SQL) |
 | WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush`, `wal_segment_rotation`, `wal_reclamation` |
 | Durable statements | `txn_insert`, `txn_update`, `txn_varchar_update`, `txn_delete`, `txn_bplus_insert`, `txn_mixed` |
-| Recovery | `recovery_full_scan`, `recovery_loser` |
+| Recovery | `recovery_full_scan`, `recovery_loser`, `recovery_page_lsn_compare`, `recovery_checkpoint_compare` |
 
 `wal_append_buffered` appends all records then performs one final synchronous force.
 `wal_append_flush_each` forces every record. `wal_batch_flush` forces every
@@ -170,6 +170,13 @@ scan; it is a projected byte count, not a timed recovery run. `recovery_full_sca
 builds deterministic committed history and measures winner REDO; `recovery_loser` adds
 an uncommitted appended page and measures loser UNDO/truncation. Both validate through
 normal reopen.
+`recovery_page_lsn_compare` creates one PageLSN-aware page and a deterministic committed
+update history, persists 0–100% of that history according to
+`--redo-persisted-percent`, clones identical database/WAL inputs, and recovers one clone
+with selective PageLSN REDO and one with `AlwaysRedo`. FullPage, ByteRange, and Adaptive
+generation modes are supported. The benchmark validates byte-identical final pages; it
+is a controlled recovery-I/O comparison, not a claim that selective REDO must improve
+wall-clock time on every filesystem/cache state.
 There are no CI timing thresholds.
 
 All workloads validate their relevant storage/tree/catalog/model after measurement.
@@ -237,6 +244,14 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 # Sharp-checkpoint cost and full-scan versus checkpoint-tail recovery
 ./build-release/minidb_bench --benchmark checkpoint_latency --rows 1000 --operations 256
 ./build-release/minidb_bench --benchmark recovery_checkpoint_compare --operations 1000
+
+# Selective PageLSN REDO versus AlwaysRedo over identical history
+./build-release/minidb_bench --benchmark recovery_page_lsn_compare --operations 1000 \
+  --wal-update-mode adaptive --redo-persisted-percent 0
+./build-release/minidb_bench --benchmark recovery_page_lsn_compare --operations 1000 \
+  --wal-update-mode adaptive --redo-persisted-percent 50
+./build-release/minidb_bench --benchmark recovery_page_lsn_compare --operations 1000 \
+  --wal-update-mode adaptive --redo-persisted-percent 100
 ```
 
 See [the benchmark command reference](../benchmarks/README.md) for every option.
@@ -248,7 +263,7 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 - `benchmark`, explicit `storage_backend`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
   repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer/segment sizes, WAL
-  update mode, cache mode, and tuple sizes;
+  update mode, persisted-REDO percentage, cache mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
 - `pager`: all nine Pager statistics;
 - `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
@@ -259,8 +274,11 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 - `recovery`: transaction/per-encoding update counters, observed/represented bytes,
   payload and total WAL amplification, record-size and range distributions, delta CPU
   nanoseconds, adaptive choice/tie/candidate/saved-byte and selection-time counters,
+  runtime persistent-PageLSN assignments/v1 observations/known-v2 observations,
   checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
-  REDO/UNDO counts, and phase/total recovery nanoseconds;
+  REDO/UNDO counts, PageLSN checks/unknowns/skips/checked applies, legacy replays,
+  recovery reads/writes, AlwaysRedo comparison counters, and phase/total recovery
+  nanoseconds;
 - `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, checkpoint
   latency, and separately reclaimed segments/bytes/reclamation latency; configuration
   records byte/statement thresholds and enablement;
@@ -281,6 +299,8 @@ page per statement. `txn_wal_fragmentation` flips alternating bytes, producing 2
 canonical one-byte ranges. These are controlled physical logging experiments; they do
 not represent SQL throughput. See [wal-adaptive.md](wal-adaptive.md) for the three-way
 Release snapshot and recovery comparison.
+Persistent PageLSN metric semantics and the relationship to sharp checkpoints are in
+[page-lsn.md](page-lsn.md).
 
 ## Limitations and interpretation
 

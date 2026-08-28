@@ -7,9 +7,10 @@ each emitted update record. Enable this experiment with:
 --wal-update-mode adaptive
 ```
 
-`full-page` remains the default. Adaptive mode adds no WAL record type and no recovery
-branch: the chosen record is an ordinary `PAGE_UPDATE` or `PAGE_DELTA_UPDATE`, and REDO
-and UNDO continue to dispatch solely on that persisted type.
+`full-page` remains the default. Adaptive mode adds no mode-specific record type or
+recovery branch: on PageLSN-aware pages the choice is `PAGE_UPDATE_V2` or
+`PAGE_DELTA_UPDATE_V2`; retained legacy records keep their original types. REDO and
+UNDO dispatch solely on the persisted type.
 
 ## Exact decision rule
 
@@ -17,11 +18,11 @@ The selector first computes the canonical byte ranges described in
 [wal-byte-range.md](wal-byte-range.md), then compares complete encoded WAL record sizes:
 
 ```text
-FullPage = 48-byte WAL header + 8,208-byte PAGE_UPDATE payload
-         = 8,256 bytes
+FullPage v2 = 48-byte WAL header + 8,216-byte PAGE_UPDATE_V2 payload
+            = 8,264 bytes
 
-existing-page Delta = 48 + 24 + sum(4 + 2 * range.length)
-new-page Delta      = 48 + 24 + sum(4 +     range.length)
+existing-page Delta v2 = 48 + 32 + sum(4 + 2 * range.length)
+new-page Delta v2      = 48 + 32 + sum(4 +     range.length)
 ```
 
 The sums include the outer record header, update payload header, every four-byte range
@@ -29,10 +30,11 @@ descriptor, and all encoded before/after data. Size arithmetic is checked agains
 `size_t`, the 32-bit encoded lengths, and the one-MiB record limit. A malformed or
 unencodable candidate is rejected.
 
-If `Delta < FullPage`, the selector writes `PAGE_DELTA_UPDATE`; otherwise it writes
-`PAGE_UPDATE`. An exact tie therefore deterministically selects FullPage. For one
-contiguous changed run on an existing page, 4,089 bytes produce an 8,254-byte delta,
-4,090 bytes tie at 8,256, and 4,091 bytes produce an 8,258-byte delta.
+If `Delta < FullPage`, the selector writes the delta type; otherwise it writes the full
+type. An exact tie therefore deterministically selects FullPage. For one contiguous
+changed run on an existing PageLSN-aware page, 4,089 bytes produce an 8,262-byte delta,
+4,090 bytes tie at 8,264, and 4,091 bytes produce an 8,266-byte delta. The legacy type-
+2/type-8 formula remains unchanged for retained or unsupported-format pages.
 
 The implementation materializes the canonical range representation once, calculates
 both candidate sizes, and serializes only the selected payload. It does not allocate
@@ -51,9 +53,9 @@ Metadata page 0 also goes through the same selector; it has no special WAL encod
 
 The current generation mode never affects recovery of retained history. Full-page-only,
 byte-range-only, and mixed histories can be followed by adaptive transactions and
-reopened under any generation mode. The WAL header/version, record IDs and bytes,
-checkpoint/control formats, segment manifest/header, database pages, and wire protocol
-are unchanged.
+reopened under any generation mode. Database-format-v2 generation uses the PageLSN-aware
+type IDs and layouts documented in [page-lsn.md](page-lsn.md); retained records and the
+checkpoint/control, segment manifest/header, and wire formats are never reinterpreted.
 
 ## Diagnostics
 
@@ -148,7 +150,8 @@ single mixed adaptive transaction before/after COMMIT, and force that mixed chai
 8,300-byte WAL segments. Checkpoint, reclamation, and lost-control rebuild tests also
 run in Adaptive mode.
 
-There is still no persistent pageLSN, fuzzy checkpoint, compensation log record,
-concurrency, locking, MVCC, or crash-atomic checkpoint/update protocol beyond the
-documented statement model. Adaptive mode computes canonical deltas even when it later
-chooses FullPage, trading CPU work for bounded WAL volume.
+Persistent PageLSN now enables selective REDO, but there is still no fuzzy checkpoint,
+dirty-page table, compensation log record, concurrency, locking, MVCC, or crash-atomic
+checkpoint/update protocol beyond the documented statement model. Adaptive mode computes
+canonical deltas even when it later chooses FullPage, trading CPU work for bounded WAL
+volume.

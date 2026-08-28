@@ -1,7 +1,7 @@
 # DiskManager
 
-Milestone 10A separates physical database-file ownership from page caching. The
-database format remains version 1 and every physical page remains 4096 bytes.
+DiskManager separates physical database-file ownership from page caching. The current
+database format is version 2 and every physical page remains 4096 bytes.
 
 ```text
 active engine                         compatibility path
@@ -39,9 +39,9 @@ The first append in a new database is page 1. `writePage()` writes and flushes e
 4096 bytes.
 
 Creation, magic/version/page-size/header-size checks, whole-page file-size validation,
-and root metadata persistence moved unchanged from Pager into DiskManager. The exact
-metadata encoding remains the layout in [storage-format.md](storage-format.md); no page
-type, offset, endianness, or format version changed.
+and root metadata persistence are centralized in DiskManager. The exact metadata
+encoding and version-1 startup migration are documented in
+[storage-format.md](storage-format.md) and [page-lsn.md](page-lsn.md).
 
 The legacy Pager delegates reads, writes, appends, and metadata updates to one owned
 DiskManager while retaining its existing unbounded frame map, raw `Page&` API, dirty

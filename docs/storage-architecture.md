@@ -2,14 +2,13 @@
 
 ## Active and legacy paths
 
-The frozen `v0.1.0` implementation used an unbounded process-local Pager cache:
+The legacy implementation used an unbounded process-local Pager cache:
 
 ```text
 Storage -> legacy Pager -> DiskManager -> database.db
 ```
 
-Milestone 10B keeps that API for historical regression coverage while changing the
-active relational engine to:
+That API remains for historical regression coverage; the active relational engine is:
 
 ```text
 TCP Server
@@ -98,12 +97,10 @@ guards at statement boundaries.
 
 ## Compatibility and recovery boundary
 
-No persistent offset, width, magic, version, tuple encoding, catalog encoding, SQL
-grammar, or wire byte changed in 10B. A database assembled through the legacy Pager
-formats is opened and queried by the active buffer-backed engine in compatibility tests.
-
-Milestones 11A–11C.2 add sidecar logging/recovery/checkpoint paths without altering a persistent
-database-page format:
+Database format version 2 adds explicit PageLSN slots to active persistent page formats
+and a crash-safe version-1 startup migration. Tuple, catalog-definition, SQL, and wire
+encodings are unchanged. Existing non-metadata pages migrate lazily rather than through
+a mass rewrite.
 
 ```text
 RecoveryCoordinator
@@ -116,15 +113,18 @@ RecoveryCoordinator
  database.db.wal.d/                             database.db
 ```
 
-The buffer pool captures write intent and enforces WAL durability before writing a dirty
-frame with a valid volatile pageLSN. The production graph attaches LogManager and the
+The buffer pool captures write intent. The coordinator appends a PageLSN-aware physical
+record, writes the returned global LSN to both the persistent page slot and volatile
+frame state, and the pool enforces WAL durability before writing the dirty frame. The
+production graph attaches LogManager and the
 coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encoding.
 
-The engine remains single-threaded. Guards are not locks or latches. 11B adds physical
-analysis/REDO/UNDO and one implicit recovery unit per mutating statement. 11C.1 adds a
-quiescent full-buffer checkpoint and double-slotted `database.db.ckpt` recovery pointer;
-11C.2 splits the global logical WAL into segment files and reclaims whole files behind
-the retained checkpoint base. Neither changes database page formats. There is still no
-archive/PITR, persistent pageLSN, fuzzy checkpoint, CLR, lock, MVCC, or concurrent
-transaction. See [wal.md](wal.md), [wal-segments.md](wal-segments.md),
-[recovery.md](recovery.md), and [checkpoints.md](checkpoints.md).
+The engine remains single-threaded. Guards are not locks or latches. Physical
+analysis/REDO/UNDO provides one implicit recovery unit per mutating statement. A
+quiescent full-buffer checkpoint and double-slotted `database.db.ckpt` recovery pointer
+bound startup scanning; segmented WAL reclaims whole files behind that boundary.
+Selective REDO additionally skips a committed v2 update when the disk PageLSN is equal
+or newer. There is still no archive/PITR, fuzzy checkpoint, dirty-page table, `recLSN`,
+CLR, lock, MVCC, concurrent transaction, or torn-page protection. See [wal.md](wal.md),
+[wal-segments.md](wal-segments.md), [recovery.md](recovery.md),
+[checkpoints.md](checkpoints.md), and [page-lsn.md](page-lsn.md).

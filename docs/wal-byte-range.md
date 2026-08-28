@@ -16,7 +16,7 @@ also adds a linear page comparison to the write path.
 
 ## Record identity and payload
 
-`PAGE_DELTA_UPDATE` has stable WAL record type ID `8`. The ordinary 48-byte WAL record
+Legacy `PAGE_DELTA_UPDATE` has stable WAL record type ID `8`. The ordinary 48-byte WAL record
 header and CRC32C cover the following version-1 payload. Every integer is little-endian;
 no C++ object representation is persisted.
 
@@ -47,6 +47,12 @@ For an existing page, payload bytes are therefore
 reconstructs that zero image when decoding. A complete WAL record adds the ordinary
 48-byte record header.
 
+PageLSN-aware pages use stable type ID 10, `PAGE_DELTA_UPDATE_V2`. Its header is 32
+bytes: the first 20 bytes have the same meanings, bytes 20–23 remain zero, bytes 24–31
+contain encoded `beforePageLsn`, and the range stream begins at 32. The PageLSN slot is
+excluded from canonical ranges. Type 8 remains readable and is never reinterpreted; its
+REDO always applies. See [page-lsn.md](page-lsn.md).
+
 The decoder bounds the range count before allocation and rejects invalid IDs, unknown
 flags, wrong page/version/header values, nonzero reserved fields, zero-length or
 out-of-page ranges, overflow, overlap, duplicates, noncanonical ordering/adjacency,
@@ -67,15 +73,17 @@ by the transaction, uses the original statement-start bytes as `before`, and use
 current state as `after`. A byte changed in an earlier stolen image and later restored
 to its original value remains in the coverage (its before and after bytes are equal).
 Consequently, the latest delta alone can restore the complete pre-statement page while
-ordered REDO still reproduces intermediate reversions exactly. The mask and full images
-are transient; no database-page format changed.
+ordered REDO still reproduces intermediate reversions exactly. The persistent PageLSN
+slot is normalized out because it describes the WAL update rather than logical page
+contents. The mask and full images are transient.
 
 ## REDO, UNDO, and page existence
 
 Winner REDO reads the current 4096-byte page (or starts from zero for an appended page),
 copies every range's after bytes, and writes the resulting physical page. Loser UNDO
 walks update records backward; for the first/latest record for each existing page it
-copies original before bytes. Newly appended loser pages are removed by truncating to
+copies original before bytes. A v2 UNDO also restores its explicit `beforePageLsn`.
+Newly appended loser pages are removed by truncating to
 the page count recorded in `BEGIN`, as in full-page mode.
 
 Before any dirty STEAL write, the coordinator appends the selected update encoding and
@@ -199,9 +207,10 @@ remain separately available.
 
 ## Durability and research boundary
 
-This experiment does not add persistent pageLSN, fuzzy checkpoints, dirty-page or
-transaction tables, compensation log records, logical/operation logging, concurrency,
-locks, or MVCC. Operations spanning several pages and WAL records are protected by the
+Persistent PageLSN is now layered over both physical encodings. It does not add fuzzy
+checkpoints, dirty-page or transaction tables, compensation log records,
+logical/operation logging, concurrency, locks, or MVCC. Operations spanning several
+pages and WAL records are protected by the
 existing single-statement recovery model, not a general transaction system.
 
 ARIES is related recovery literature, but ARIES includes physiological logging,

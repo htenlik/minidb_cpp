@@ -1,6 +1,6 @@
 # Segmented WAL lifecycle
 
-Milestone 11C.2 stores the active write-ahead log as one monotonically advancing
+MiniDB++ stores the active write-ahead log as one monotonically advancing
 logical byte stream split across files. PostgreSQL's
 [WAL configuration](https://www.postgresql.org/docs/current/wal-configuration.html)
 and [continuous-archiving](https://www.postgresql.org/docs/current/continuous-archiving.html)
@@ -153,6 +153,7 @@ gone. Replication or archival would require another retention constraint.
 
 The protocol guarantees clean flush/reopen persistence and tested process-crash
 boundaries, not arbitrary power-loss atomicity across database, WAL, control, and
-directory operations. There is still no persistent pageLSN, fuzzy checkpoint, CLR,
-physiological/byte-range logging, concurrent transaction, locking, MVCC, background
-writer, group commit, or WAL archive.
+directory operations. Persistent PageLSN values remain global logical LSNs across
+segment reclamation and enable selective REDO of retained records. There is still no
+fuzzy checkpoint, dirty-page table, CLR, physiological/logical logging, concurrent
+transaction, locking, MVCC, background writer, group commit, or WAL archive.

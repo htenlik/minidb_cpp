@@ -1,7 +1,7 @@
 # Persistent page allocation
 
-Milestone 4B.2 introduced a database-wide reusable `PageAllocator`; Milestone 10B routes
-its production access through guarded buffer frames:
+The database-wide reusable `PageAllocator` uses guarded buffer frames in the active
+storage path:
 
 ```text
 storage -> PageAllocator -> BufferPoolManager -> DiskManager -> database file
@@ -14,7 +14,7 @@ types and now serves tuple heaps, persistent indexes, and catalog metadata.
 
 ## Free-list head
 
-Database metadata version 1 already reserves a four-byte `freeListRootPageId` at page-0
+Database metadata reserves a four-byte `freeListRootPageId` at page-0
 offset 24. `INVALID_PAGE_ID` means the list is empty. DiskManager exposes a narrow
 `updateFreeListRootPageId` operation that validates the new reference and explicitly
 serializes and flushes page 0; normal `getPage(0)`, dirty, and flush operations remain
@@ -37,7 +37,8 @@ before writing this header.
 | 8 | 4 | `uint32`, little-endian | Layout version | `1` |
 | 12 | 4 | `uint32`, little-endian | Header size | `32` |
 | 16 | 4 | `PageId`, little-endian | Next free page | Page ID or `INVALID_PAGE_ID` |
-| 20 | 12 | Zero-filled | Reserved header bytes | Must be zero |
+| 20 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
+| 28 | 4 | Zero-filled | Reserved header bytes | Must be zero |
 | 32 | 4064 | Zero-filled | Cleared payload/reserved bytes | Must be zero |
 
 A Free Page cannot simultaneously validate as an index node, RecordPage, or index

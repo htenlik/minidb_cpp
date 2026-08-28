@@ -36,7 +36,8 @@ offset 4096
 | 24 | 4 | `PageId`, little-endian | Next heap page | Page ID or `INVALID_PAGE_ID` |
 | 28 | 4 | `PageId`, little-endian | Previous heap page | Page ID or `INVALID_PAGE_ID` |
 | 32 | 4 | `PageId`, little-endian | Owning heap metadata | Stable `HeapMetaPageId` |
-| 36 | 12 | Zero-filled | Reserved | Must be zero |
+| 36 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
+| 44 | 4 | Zero-filled | Reserved | Must be zero |
 | 48 | Variable | Raw bytes | Tuple payload region | Compact, non-overlapping payloads |
 | `lower` | Variable | Zero-filled | Contiguous free region | Ends at `upper` |
 | `upper` | Variable | Slot entries | Reverse-growing directory | Eight bytes per slot |
@@ -127,7 +128,8 @@ Magic: ASCII `MDBHPMET`. Creation zeroes the complete page.
 | 16 | 4 | `PageId`, little-endian | First page | SlottedPage or `INVALID_PAGE_ID` |
 | 20 | 4 | `PageId`, little-endian | Last page | SlottedPage or `INVALID_PAGE_ID` |
 | 24 | 8 | `uint64`, little-endian | Tuple count | Total live tuples |
-| 32 | 32 | Zero-filled | Reserved header bytes | Must be zero |
+| 32 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
+| 40 | 24 | Zero-filled | Reserved header bytes | Must be zero |
 | 64 | 4032 | Zero-filled | Reserved page bytes | Must be zero |
 
 An empty heap has invalid first/last PageIds and a zero count, so it allocates no empty

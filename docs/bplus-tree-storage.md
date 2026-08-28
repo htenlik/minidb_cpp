@@ -37,7 +37,8 @@ Magic: ASCII `MDBIDXMD`. Creation zeroes the complete page.
 | 20 | 8 | `uint64`, little-endian | Entry count | Number of indexed key/RID pairs |
 | 28 | 4 | `uint32`, little-endian | Logical leaf maximum keys | `3`–`406` |
 | 32 | 4 | `uint32`, little-endian | Logical internal maximum keys | `3`–`507` |
-| 36 | 28 | Zero-filled | Reserved header bytes | Must be zero |
+| 36 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
+| 44 | 20 | Zero-filled | Reserved header bytes | Must be zero |
 | 64 | 4032 | Zero-filled | Reserved page bytes | Must be zero |
 
 An empty index has `rootPageId = INVALID_PAGE_ID` and `entryCount = 0`; it allocates no
@@ -45,23 +46,22 @@ empty root node. A nonempty index must have a legal root PageId and a nonzero co
 Tree size is updated once after a successful unique insertion or erase. Duplicate
 insertion and missing-key erase do not alter the count.
 
-## Leaf Page: version 1
+## Leaf Page: version 2
 
 Magic: ASCII `MDBIDXLF`. Leaves form a persistent bidirectional chain.
 
-| Offset | Width | Encoding | Field | Version 1 meaning |
+| Offset | Width | Encoding | Field | Version 2 meaning |
 | ---: | ---: | --- | --- | --- |
 | 0 | 8 | Raw bytes | Magic/type | `MDBIDXLF` |
-| 8 | 4 | `uint32`, little-endian | Node layout version | `1` |
-| 12 | 4 | `uint32`, little-endian | Header size | `32` |
+| 8 | 4 | `uint32`, little-endian | Node layout version | `2` |
+| 12 | 4 | `uint32`, little-endian | Header size | `36` |
 | 16 | 4 | `uint32`, little-endian | Key count | Live entries in this leaf |
 | 20 | 4 | `PageId`, little-endian | Next leaf | Next leaf or `INVALID_PAGE_ID` |
 | 24 | 4 | `PageId`, little-endian | Previous leaf | Previous leaf or `INVALID_PAGE_ID` |
-| 28 | 4 | Zero-filled | Reserved | Must be zero |
-| 32 | Up to 4060 | Fixed entries | Sorted key/RID entries | 10 bytes each |
-| 4092 | 4 | Zero-filled | Maximum-capacity unused tail | Must be zero |
+| 28 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
+| 36 | Up to 4060 | Fixed entries | Sorted key/RID entries | 10 bytes each |
 
-Leaf entry `i` begins at `32 + (i * 10)`:
+Leaf entry `i` begins at `36 + (i * 10)`:
 
 | Entry offset | Width | Encoding | Field |
 | ---: | ---: | --- | --- |
@@ -77,9 +77,13 @@ higher layer.
 Physical leaf capacity is:
 
 ```text
-floor((4096 - 32) / 10) = 406 entries
-32 + (406 * 10) = 4092 bytes used
+floor((4096 - 36) / 10) = 406 entries
+36 + (406 * 10) = 4096 bytes used
 ```
+
+Legacy leaf layout version 1 has a 32-byte header, entries at offset 32, and a four-byte
+zero tail. It remains readable with unknown PageLSN and is rewritten as version 2 on a
+later mutation. The ten-byte entry width and physical capacity are unchanged.
 
 ## Internal Page: version 1
 
@@ -96,7 +100,7 @@ child0, key0, child1, key1, child2, ...
 | 12 | 4 | `uint32`, little-endian | Header size | `32` |
 | 16 | 4 | `uint32`, little-endian | Key count | Separator count |
 | 20 | 4 | `uint32`, little-endian | Child count | Must equal key count + 1 |
-| 24 | 8 | Zero-filled | Reserved | Must be zero |
+| 24 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
 | 32 | 4 | `PageId`, little-endian | Child 0 | Leftmost child |
 | 36 | 4 | `uint32`, little-endian | Key 0 | Minimum key in child 1 |
 | 40 | 4 | `PageId`, little-endian | Child 1 | Second child |

@@ -1,14 +1,9 @@
 # MiniDB++ storage format
 
-This document describes database format version 1. All persistent multi-byte integers
+This document describes database format version 2 and its version-1 compatibility path.
+All persistent multi-byte integers
 are unsigned and encoded in little-endian byte order. C++ object representations are
 never written directly to disk.
-
-Milestone 10B changes only the in-memory access path (guards, bounded buffer pool, and
-DiskManager). Every magic, version, offset, width, byte order, and encoded value described
-here remains byte-identical.
-Milestone 11A likewise changes no database-page byte: its independent sidecar format is
-documented in [wal.md](wal.md), and pageLSN is volatile buffer-frame metadata only.
 
 ## Physical page layout
 
@@ -29,26 +24,28 @@ has a page count of 1, and its first normal page allocation returns page ID 1.
 `PageId` is an unsigned 32-bit integer. `0xFFFFFFFF` is `INVALID_PAGE_ID` and represents
 a missing or uninitialized page reference; it can never identify an allocated page.
 
-## Metadata page: format version 1
+## Metadata page: format version 2
 
-The version 1 header occupies bytes 0–63 of page 0. The remainder of the metadata page
-is reserved. Newly created databases zero every reserved byte.
+The header occupies bytes 0–63 of page 0. Version 2 assigns bytes 28–35 to the metadata
+page's persistent PageLSN; the remainder is reserved. Newly created databases zero the
+PageLSN and every reserved byte.
 
-| Offset | Size | Encoding | Field | Version 1 value |
+| Offset | Size | Encoding | Field | Version 2 value |
 | ---: | ---: | --- | --- | --- |
 | 0 | 8 | Raw bytes | Magic | ASCII `MINIDB++` |
-| 8 | 4 | `uint32`, little-endian | Database format version | `1` |
+| 8 | 4 | `uint32`, little-endian | Database format version | `2` |
 | 12 | 4 | `uint32`, little-endian | Page size | `4096` |
 | 16 | 4 | `uint32`, little-endian | Header size | `64` |
 | 20 | 4 | `PageId`, little-endian | Catalog metadata root page | Catalog Metadata or `INVALID_PAGE_ID` |
 | 24 | 4 | `PageId`, little-endian | Free-list root page | Free Page head or `INVALID_PAGE_ID` |
-| 28 | 36 | Zero-filled | Reserved header fields | `0` |
+| 28 | 8 | `uint64`, little-endian | Persistent PageLSN | `0` unknown, otherwise global logical LSN |
+| 36 | 28 | Zero-filled | Reserved header fields | `0` |
 | 64 | 4032 | Zero-filled | Reserved metadata-page space | `0` |
 
 The catalog root remains `INVALID_PAGE_ID` until the logical Catalog is explicitly
-bootstrapped; existing version-1 databases need no migration. Its metadata and table-
+bootstrapped. Its metadata and table-
 definition formats are documented in [catalog.md](catalog.md). The free-list root is the
-persisted head of the reusable page allocator introduced in Milestone 4B.2; new
+persisted head of the reusable page allocator; new
 databases initialize it to `INVALID_PAGE_ID`. Its format is documented in
 [page-allocation.md](page-allocation.md).
 
@@ -59,12 +56,16 @@ normal pages can be allocated. Opening a nonempty file rejects it when:
 
 - its byte size is not a multiple of 4096;
 - its magic is not `MINIDB++`;
-- its format version is not the currently supported version 1;
+- its format version is neither supported version 1 nor current version 2;
 - its stored page size is not 4096; or
 - its stored header size is not 64.
 
-There are no format migrations yet. An unsupported version is rejected rather than
-being guessed or silently reinterpreted.
+Version-1 databases are recovered, checkpointed, upgraded by a logged page-0 update,
+committed, and checkpointed again before ordinary startup. Existing non-metadata pages
+are not rewritten in bulk; PageLSN-capable page formats migrate lazily on later writes.
+Crashes during the upgrade restart safely and converge to version 2. Unsupported versions
+are rejected rather than guessed or silently reinterpreted. The exact protocol and the
+one-way compatibility boundary are documented in [page-lsn.md](page-lsn.md).
 
 Magic bytes distinguish MiniDB++ files from arbitrary data. A version makes future
 format changes detectable. Explicit endianness makes integer bytes architecture-
@@ -101,7 +102,7 @@ record. VACUUM and compaction semantics are not defined yet.
 
 ## RecordPage layout: version 1
 
-RecordPage layout version 1 is separate from database file format version 1 and the row
+RecordPage layout version 1 is separate from the database file format and the row
 encoding. Every persistent multi-byte field is little-endian.
 
 | Offset | Size | Encoding | Field | Version 1 value or meaning |
@@ -173,6 +174,13 @@ Persistent B+ tree metadata, leaf, and internal pages use independent versioned 
 formats. They do not reuse the database catalog-root placeholder. Their exact layouts,
 capacities, links, and validation rules are documented in
 [bplus-tree-storage.md](bplus-tree-storage.md).
+
+## Persistent PageLSN slots
+
+Database format version 2 enables persistent PageLSNs in active metadata, allocator,
+heap, index, and catalog pages. Each slot is an explicit eight-byte little-endian field;
+zero means unknown. The authoritative offset table, B+ leaf layout-v2 compatibility,
+WAL relationship, validation, and migration rules are in [page-lsn.md](page-lsn.md).
 
 ## Logical schemas, tuples, catalog, and tables
 

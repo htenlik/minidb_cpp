@@ -18,6 +18,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - CRC32C-protected, segmented write-ahead log with safe segment reclamation
 - Implicit atomic recovery units for mutating SQL statements
 - STEAL / NO-FORCE physical REDO and UNDO with full-page or byte-range WAL
+- Persistent PageLSNs with database-format-v2 selective REDO and v1 migration
 - Sharp checkpoints and checkpoint-bounded startup recovery
 - Subprocess crash-injection, randomized differential, corruption, and sanitizer tests
 - Deterministic benchmark and observability framework
@@ -154,7 +155,8 @@ with transaction chains, LSNs, and
 CRC32C validation. Full-page logging remains the default. The buffer
 pool may write an uncommitted dirty page (STEAL) and need not force committed pages at
 commit (NO-FORCE), so startup recovery redoes committed winners and undoes the final
-uncommitted loser.
+uncommitted loser. Persistent PageLSNs let recovery skip committed updates already
+represented by an equal or newer disk page; legacy WAL records remain always-redo.
 
 The observable commit rule is:
 
@@ -172,7 +174,7 @@ destructors. Directed cases include crashes before and after COMMIT fsync, dirty
 before commit, NO-FORCE winners, repeated crashes during REDO or UNDO, checkpoint
 publication boundaries, legacy-WAL migration, segment rotation, and reclamation.
 See [wal.md](docs/wal.md), [wal-byte-range.md](docs/wal-byte-range.md),
-[wal-adaptive.md](docs/wal-adaptive.md), and
+[wal-adaptive.md](docs/wal-adaptive.md), [page-lsn.md](docs/page-lsn.md), and
 [recovery.md](docs/recovery.md).
 
 ## Checkpoints and segmented WAL
@@ -213,7 +215,7 @@ ctest --test-dir build --output-on-failure
 The suite covers byte-level format validation, deterministic state models, randomized
 differential tests, malformed and fuzz-like inputs, real reopen boundaries, TCP
 integration, and subprocess crash recovery. The current clean Release verification runs
-54 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
+58 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
 used during release verification.
 
 ## Documentation
@@ -224,6 +226,7 @@ used during release verification.
 - [Write-ahead log](docs/wal.md)
 - [Physical byte-range WAL experiment](docs/wal-byte-range.md)
 - [Adaptive physical WAL update encoding](docs/wal-adaptive.md)
+- [Persistent PageLSN and selective REDO](docs/page-lsn.md)
 - [Crash recovery](docs/recovery.md)
 - [Sharp checkpoints](docs/checkpoints.md)
 - [Segmented WAL lifecycle](docs/wal-segments.md)
@@ -247,7 +250,7 @@ used during release verification.
 ## Future work
 
 - Finer-grained physiological/logical WAL and recovery experiments
-- Persistent pageLSNs and more advanced checkpointing
+- Fuzzy-checkpoint and dirty-page-table experiments
 - Multi-transaction concurrency and isolation
 - Additional indexes and query-planning functionality
 

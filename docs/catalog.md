@@ -35,7 +35,8 @@ fields are little-endian.
 | 20 | 4 | Flags/reserved (`0`) |
 | 24 | 8 | Next monotonically assigned TableId |
 | 32 | 8 | Persisted table count |
-| 40 | 24 | Reserved header bytes (`0`) |
+| 40 | 8 | Persistent PageLSN (`uint64` little-endian; `0` means unknown) |
+| 48 | 16 | Reserved header bytes (`0`) |
 | 64 | 4032 | Reserved page bytes (`0`) |
 
 `TableId` is an unsigned 64-bit integer. Zero is `INVALID_TABLE_ID`; assignment starts

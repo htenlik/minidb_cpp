@@ -28,6 +28,7 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--wal-update-mode MODE` | `full-page` | `full-page`, `byte-range`, or `adaptive` page updates |
 | `--checkpoint-wal-bytes N` | 67108864 | Automatic checkpoint growth threshold; zero disables |
 | `--checkpoint-statements N` | 0 | Automatic checkpoint commit threshold; zero disables |
+| `--redo-persisted-percent N` | 100 | Persisted recovery-tail updates in `recovery_page_lsn_compare` (`0..100`) |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |
 | `--seed N` | 12345 | Deterministic workload seed |
 | `--repetitions N` | 1 | Fresh-database repetitions per workload |
@@ -51,10 +52,13 @@ and WAL payload/batch/buffer controls for controlled comparisons.
 Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_varchar_update`,
 `txn_delete`, `txn_bplus_insert`, `txn_mixed`, `recovery_full_scan`, `recovery_loser`,
 `checkpoint_latency`, `recovery_checkpoint_compare`,
+`recovery_page_lsn_compare`,
 `wal_segment_rotation`, and `wal_reclamation`.
 Transaction results include per-encoding record counts, observed byte changes,
 payload/total WAL amplification, record-size/range distributions, diff CPU time, and
 fsyncs. Checkpoint results include dirty writes, required syncs, and latency; the
 comparison reports full-history versus checkpoint-tail records/bytes/time. Configure
 automatic-policy metadata with `--checkpoint-wal-bytes` and `--checkpoint-statements`
-(zero disables). These are deterministic baselines, not timing-gated CI assertions.
+(zero disables). The PageLSN comparison recovers cloned identical inputs under
+selective and AlwaysRedo policies and reports checks, skips, applies, reads, and writes.
+These are deterministic baselines, not timing-gated CI assertions.

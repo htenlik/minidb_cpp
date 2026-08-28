@@ -1,7 +1,7 @@
 # Bounded buffer pool and LRU-K
 
-Milestone 10A introduced the single-threaded fixed-capacity BufferPoolManager and guards.
-Milestone 10B makes them the active backend for PageAllocator, TupleStore,
+The single-threaded fixed-capacity BufferPoolManager and guards are the active backend
+for PageAllocator, TupleStore,
 PersistentBPlusTree, Catalog, Table, SQL, and TCP. The legacy Pager remains an explicitly
 historical, unbounded v0.1.x cache used by fixed RecordStore regressions and low-level
 comparison benchmarks.
@@ -190,9 +190,11 @@ be written until the provider is durable through that LSN. Dirty eviction and
 `flushPage()` force first and preserve the mapped dirty frame if forcing fails;
 `flushAll()` forces the maximum required pageLSN once before its database-page writes.
 The destructor uses the same path but retains its historical error-suppression policy.
-Unlogged `INVALID_LSN` pages retain the old transitional behavior. pageLSNs reset on
-frame reuse/reload and are not persistent, so these rules alone do not provide crash
-recovery. See [wal.md](wal.md).
+Unlogged `INVALID_LSN` frames retain the low-level compatibility behavior. The frame
+field resets on reuse/reload and is not persisted as frame metadata; active page formats
+separately encode a persistent PageLSN in their bytes. The coordinator keeps the two
+representations aligned for logged writes. See [wal.md](wal.md) and
+[page-lsn.md](page-lsn.md).
 
 ## Statistics and validation
 
@@ -242,7 +244,8 @@ their unbounded and bounded memory configurations are not apples-to-apples engin
 
 The BufferPoolManager and migrated engine remain single-threaded. No mutex, latch, wait
 queue, or blocking pin protocol exists. Guards express access mode and lifetime, not
-synchronization. Production storage mutations do not assign pageLSNs until 11B.
+synchronization. Production storage mutations assign PageLSNs through the recovery
+coordinator rather than through storage-format code.
 
 ## Reference
 

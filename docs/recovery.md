@@ -8,7 +8,9 @@ active mutation.
 The default implementation uses physical full-page logging: every changed database page
 is represented by its complete 4096-byte before- and after-image. An explicit opt-in
 mode uses versioned physical byte ranges while retaining the same transaction and
-durability semantics. Both are described in [wal-byte-range.md](wal-byte-range.md).
+durability semantics. PageLSN-aware variants carry the original persistent PageLSN and
+enable selective REDO. They are specified in [page-lsn.md](page-lsn.md); byte ranges are
+described in [wal-byte-range.md](wal-byte-range.md).
 The full-page mode remains a correctness-first baseline that covers every guarded page
 type at one interception point, but produces large WAL records.
 
@@ -47,6 +49,12 @@ before-image; loser cleanup removes it by truncating the file to the BEGIN page 
 Unknown flags, invalid IDs, wrong page size, nonzero reserved fields, and a nonzero new-
 page before-image are rejected.
 
+Type-2 `PAGE_UPDATE` is the immutable legacy encoding. Type-9 `PAGE_UPDATE_V2` adds an
+eight-byte encoded `beforePageLsn`, a versioned 24-byte header, and has an 8216-byte
+payload. Type-8 `PAGE_DELTA_UPDATE` likewise remains immutable; type 10 is its
+PageLSN-aware 32-byte-header counterpart. Exact layouts are in
+[page-lsn.md](page-lsn.md). Old records remain replayable and are never reinterpreted.
+
 The first write intent captures an existing page's before-image once. If a page changes,
 is logged/evicted, is reloaded, and changes again, records may contain `S0 -> S1` and
 `S0 -> S2`. REDO order ends at S2; either record can restore S0 during idempotent UNDO.
@@ -78,10 +86,12 @@ through an explicit operation.
 
 Before dirty persistence, `preparePageForWrite` compares current bytes with the last
 logged after-image. It appends the selected update record only when needed, advances
-`prevLSN`, and returns its LSN. The volatile frame pageLSN then drives the rule that
+`prevLSN`, writes the returned LSN into the persistent page slot, and assigns the same
+value to the volatile frame PageLSN. The persistent slot is excluded from logical image
+comparison and delta generation. The volatile frame value then drives the rule that
 WAL is fsynced before the database page is written. Dirty eviction is therefore STEAL-
-safe. On frame reuse, reload, and restart pageLSN returns to `INVALID_LSN`; no persistent
-page format was changed.
+safe. On frame reuse and reload, the volatile PageLSN is reset or reconstructed from
+the page bytes; it is not itself persisted as a buffer-frame object.
 
 Commit preparation visits every touched resident page and logs its latest state.
 Nonresident pages were necessarily prepared before eviction. Commit then appends
@@ -122,12 +132,15 @@ magic/version/length/checksum corruption is fatal and is never treated as a tail
 Analysis validates one BEGIN, exact same-transaction `prevLSN` chains, terminal-record
 ordering, and the single-active-transaction model.
 
-- A winner has durable COMMIT. Its full after-images or delta after-ranges are applied
-  in ascending LSN order.
+- A winner has durable COMMIT. Its full after-images or delta after-ranges are considered
+  in ascending LSN order. PageLSN-aware records are skipped when the current persistent
+  PageLSN is at least the record LSN; unknown/older pages are updated and assigned that
+  record LSN. Legacy update records always replay.
 - A transaction with durable ABORT is skipped because rollback preceded that ABORT.
 - A loser has BEGIN/PAGE_UPDATE records but no terminal record and must be the final
   active transaction. Existing-page original images or delta before-ranges are applied,
-  then appended pages are truncated using BEGIN's page count.
+  PageLSN-aware records restore their explicit `beforePageLsn`, and appended pages are
+  truncated using BEGIN's page count.
 
 Recovery runs REDO winners, then UNDO the tail loser, fsyncs the database, and finally
 appends/fsyncs the loser's ABORT. Full-page replacement, repeated original before-images,
@@ -144,7 +157,8 @@ real reopen behavior.
 Recovery statistics additionally report checkpoint-control presence/use, validation
 failures, full-scan fallback, recovery start, and skipped/scanned WAL bytes. They report
 scanned records/transactions, winners/aborts/losers,
-REDO/UNDO/truncation/extension, database writes/syncs, repaired tail bytes, and analysis,
+REDO/UNDO/truncation/extension, database writes/syncs, PageLSN checks/unknowns/skips/
+checked applies, legacy replays, recovery page reads/writes, repaired tail bytes, and analysis,
 REDO, UNDO, and total nanoseconds. Runtime transaction statistics report logical begins,
 commits/rollbacks/zero-write units, first-written pages, per-encoding update counts,
 observed logical byte transitions, payload/total WAL bytes, represented bytes, range
@@ -152,15 +166,16 @@ counts, record-size samples, delta-computation time, commit fsyncs, and rollback
 Benchmarks derive amplification from those observed transitions.
 
 There is a quiescent sharp checkpoint, documented in [checkpoints.md](checkpoints.md).
-Obsolete whole WAL segments are now deleted after sharp checkpoints; see
-[wal-segments.md](wal-segments.md). There is no archive/PITR, persistent pageLSN, fuzzy
-dirty-page table, CLR, concurrent transaction, lock, MVCC, isolation, or crash-safe
-group commit. A usable checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
+Obsolete whole WAL segments are deleted after sharp checkpoints; see
+[wal-segments.md](wal-segments.md). Persistent PageLSN reduces redundant REDO writes but
+does not add a fuzzy dirty-page table, `recLSN`, CLR, archive/PITR, concurrent transaction,
+lock, MVCC, isolation, torn-page protection, or crash-safe group commit. A usable
+checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
 before the response reaches a client is inherently ambiguous: the statement committed,
 but the client must reconnect and query state. Wire request IDs are not deduplication
 tokens.
 
-This design is not ARIES. ARIES supports physiological logging, persistent pageLSNs,
-repeating history, compensation records, checkpoints, fine-grained locking, and partial
-rollback. MiniDB++ instead uses a serial physical baseline chosen for transparent
-correctness and experimentation. See the full citation in [wal.md](wal.md).
+This design is not ARIES. It adopts the persistent PageLSN REDO test, while ARIES also
+supports physiological logging, repeating history, compensation records, fuzzy
+checkpoints, fine-grained locking, and partial rollback. MiniDB++ retains a serial
+physical baseline. See the citation in [wal.md](wal.md).

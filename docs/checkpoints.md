@@ -1,10 +1,11 @@
 # Sharp checkpoints and bounded recovery
 
-Milestone 11C.1 adds a quiescent, or **sharp**, checkpoint. It is intentionally
+MiniDB++ uses a quiescent, or **sharp**, checkpoint. It is intentionally
 simpler than ARIES fuzzy checkpointing: MiniDB++ has one serial mutating statement at
 most, so checkpointing waits until no statement or rollback is active, requires zero
 pinned buffer frames, and flushes every dirty frame. There is no transaction-table or
-dirty-page-table snapshot, `recLSN`, persistent pageLSN, or CLR.
+dirty-page-table snapshot, `recLSN`, or CLR. Persistent PageLSN is used independently
+to skip already-present tail REDO updates.
 
 The resulting invariant is:
 
@@ -138,11 +139,13 @@ growth, control selection/fallback, and skipped/scanned WAL bytes. Benchmarks
 `checkpoint_latency` and `recovery_checkpoint_compare` expose the checkpoint-cost versus
 recovery-work tradeoff without timing assertions.
 
-11C.2 rotates after publication and retains the checkpoint base, one extra closed
+Segmented WAL rotates after publication and retains the checkpoint base, one extra closed
 predecessor, and every tail/active segment; older whole segments are deleted. Checkpoint
 critical latency and reclamation latency/bytes are measured separately. It adds no
-archive/PITR, persistent pageLSN, fuzzy checkpoint, dirty-page table, CLR, finer-grained
-WAL, or concurrency. See [wal-segments.md](wal-segments.md).
+archive/PITR, fuzzy checkpoint, dirty-page table, CLR, finer-grained WAL, or concurrency.
+PageLSN complements rather than replaces the scan boundary: checkpoints reduce WAL
+analysis volume, while PageLSN reduces writes within the selected tail. See
+[wal-segments.md](wal-segments.md) and [page-lsn.md](page-lsn.md).
 
 The design is informed by C. Mohan et al., “ARIES: A Transaction Recovery Method
 Supporting Fine-Granularity Locking and Partial Rollbacks Using Write-Ahead Logging,”
