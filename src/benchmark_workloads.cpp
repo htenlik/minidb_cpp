@@ -1,11 +1,13 @@
 #include "minidb/benchmark.hpp"
 
 #include "minidb/catalog.hpp"
+#include "minidb/byte_codec.hpp"
 #include "minidb/database_server.hpp"
 #include "minidb/log_manager.hpp"
 #include "minidb/minidb_client.hpp"
 #include "minidb/page_allocator.hpp"
 #include "minidb/page_access.hpp"
+#include "minidb/page_lsn.hpp"
 #include "minidb/persistent_bplus_tree.hpp"
 #include "minidb/sql_executor.hpp"
 #include "minidb/table.hpp"
@@ -84,13 +86,19 @@ std::uint64_t walPhysicalBytes(const std::string& databasePath) {
         total += std::filesystem::file_size(legacy, error);
         if (error) throw std::runtime_error("could not inspect legacy benchmark WAL");
     }
+    if (error && error != std::errc::no_such_file_or_directory) {
+        throw std::runtime_error("could not inspect legacy benchmark WAL");
+    }
+    error.clear();
     const auto directory = segmentedWalPathForDatabase(databasePath);
     if (std::filesystem::is_directory(directory, error)) {
         for (const auto& entry : std::filesystem::directory_iterator(directory)) {
             if (entry.is_regular_file()) total += entry.file_size();
         }
     }
-    if (error) throw std::runtime_error("could not inspect segmented benchmark WAL");
+    if (error && error != std::errc::no_such_file_or_directory) {
+        throw std::runtime_error("could not inspect segmented benchmark WAL");
+    }
     return total;
 }
 
@@ -1471,6 +1479,127 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     return result;
 }
 
+BenchmarkResult runPageLsnRecoveryComparison(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    PageId pageId = INVALID_PAGE_ID;
+    {
+        DiskManager disk(config.databasePath);
+        pageId = disk.appendPage();
+        DiskManager::Page initial{};
+        std::copy(free_page_layout::MAGIC.begin(), free_page_layout::MAGIC.end(),
+                  initial.begin());
+        byte_codec::writeUint32(
+            initial, free_page_layout::LAYOUT_VERSION_OFFSET,
+            free_page_layout::CURRENT_VERSION);
+        byte_codec::writeUint32(
+            initial, free_page_layout::HEADER_SIZE_OFFSET,
+            free_page_layout::HEADER_SIZE);
+        byte_codec::writeUint32(
+            initial, free_page_layout::NEXT_FREE_PAGE_ID_OFFSET, INVALID_PAGE_ID);
+        disk.writePhysicalPage(pageId, initial);
+        disk.sync();
+
+        LogManager log(
+            walPathForDatabase(config.databasePath),
+            static_cast<std::size_t>(config.walBufferBytes));
+        RecoveryCoordinator coordinator(
+            disk, log, INVALID_TRANSACTION_ID, config.walUpdateMode);
+        BufferPoolManager pool(
+            disk, static_cast<std::size_t>(std::max<std::uint64_t>(2, config.bufferFrames)),
+            static_cast<std::size_t>(config.lruK), &log, &coordinator);
+        coordinator.attachBufferPool(pool);
+        const auto persistedUpdates = (config.operations * config.redoPersistedPercent) / 100U;
+        for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+            coordinator.beginStatement();
+            {
+                auto guard = requireWritePage(pool, pageId, "PageLSN recovery benchmark update");
+                byte_codec::writeUint64(guard.data(), 64, config.seed + operation + 1U);
+            }
+            coordinator.commitStatement();
+            if (persistedUpdates != 0 && operation + 1U == persistedUpdates) {
+                static_cast<void>(pool.flushPage(pageId));
+            }
+        }
+        if (persistedUpdates < config.operations) pool.discardPageForRecovery(pageId);
+        log.flushAll();
+        disk.sync();
+    }
+
+    const auto selectiveDatabase = config.databasePath + ".selective";
+    const auto alwaysDatabase = config.databasePath + ".always";
+    const auto sourceWal = walPathForDatabase(config.databasePath);
+    const auto selectiveWal = walPathForDatabase(selectiveDatabase);
+    const auto alwaysWal = walPathForDatabase(alwaysDatabase);
+    std::filesystem::copy_file(
+        config.databasePath, selectiveDatabase,
+        std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(
+        config.databasePath, alwaysDatabase,
+        std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(
+        sourceWal, selectiveWal, std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(
+        sourceWal, alwaysWal, std::filesystem::copy_options::overwrite_existing);
+
+    RecoveryStats selective;
+    RecoveryStats always;
+    std::vector<std::uint64_t> selectiveLatency;
+    {
+        DiskManager disk(selectiveDatabase);
+        LogManager log(selectiveWal, LogManager::DEFAULT_BUFFER_SIZE,
+                       LogOpenMode::DeferredRecovery);
+        measure(selectiveLatency, [&] {
+            selective = RecoveryManager(
+                disk, log, nullptr, false,
+                RedoPolicy::PageLsnSelectiveRedo).recover();
+        });
+    }
+    std::vector<std::uint64_t> alwaysLatency;
+    {
+        DiskManager disk(alwaysDatabase);
+        LogManager log(alwaysWal, LogManager::DEFAULT_BUFFER_SIZE,
+                       LogOpenMode::DeferredRecovery);
+        measure(alwaysLatency, [&] {
+            always = RecoveryManager(
+                disk, log, nullptr, false, RedoPolicy::AlwaysRedo).recover();
+        });
+    }
+    DiskManager::Page selectivePage{};
+    DiskManager::Page alwaysPage{};
+    {
+        DiskManager disk(selectiveDatabase);
+        disk.readPhysicalPage(pageId, selectivePage);
+    }
+    {
+        DiskManager disk(alwaysDatabase);
+        disk.readPhysicalPage(pageId, alwaysPage);
+    }
+
+    BenchmarkResult result;
+    result.benchmark = "recovery_page_lsn_compare";
+    result.storageBackend = "persistent_page_lsn_selective_redo";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(
+        selectiveLatency, totalLatency(selectiveLatency));
+    result.recovery.recovery = selective;
+    // This existing comparison slot is the AlwaysRedo control for this benchmark.
+    result.recovery.fullScanRecovery = always;
+    result.recovery.walBytes = walPhysicalBytes(config.databasePath);
+    result.environment = currentEnvironment();
+    result.validationPassed = selectivePage == alwaysPage
+        && selective.pageLsnChecks == config.operations
+        && always.pagesRedone == config.operations;
+
+    std::error_code error;
+    std::filesystem::remove(selectiveDatabase, error);
+    std::filesystem::remove(alwaysDatabase, error);
+    std::filesystem::remove(selectiveWal, error);
+    std::filesystem::remove(alwaysWal, error);
+    cleanupDatabase(config);
+    return result;
+}
+
 std::string canonicalName(const std::string& name) {
     if (name == "pager") return "pager_random";
     if (name == "buffer") return "buffer_random";
@@ -1495,6 +1624,9 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     if (name == "checkpoint_latency") return runCheckpointLatency(config);
     if (name == "recovery_checkpoint_compare") {
         return runCheckpointRecoveryComparison(config);
+    }
+    if (name == "recovery_page_lsn_compare") {
+        return runPageLsnRecoveryComparison(config);
     }
     if (name.starts_with("pager_")) return runPager(config, std::move(name));
     if (name.starts_with("buffer_")) return runBuffer(config, name);

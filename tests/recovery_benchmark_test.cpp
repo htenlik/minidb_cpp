@@ -105,6 +105,37 @@ int main() {
                     "Fragmentation workload did not select full-page consistently");
             }
         }
+        for (const auto mode : {minidb::WalUpdateMode::FullPage,
+                                minidb::WalUpdateMode::ByteRange,
+                                minidb::WalUpdateMode::Adaptive}) {
+            for (const auto persistedPercent : {0U, 50U, 100U}) {
+                minidb::bench::BenchmarkConfig config;
+                config.benchmark = "recovery_page_lsn_compare";
+                config.operations = 12;
+                config.bufferFrames = 2;
+                config.walUpdateMode = mode;
+                config.redoPersistedPercent = persistedPercent;
+                config.databasePath = (std::filesystem::temp_directory_path()
+                    / ("minidb_page_lsn_benchmark_"
+                       + std::to_string(static_cast<unsigned>(mode)) + "_"
+                       + std::to_string(persistedPercent) + ".db")).string();
+                const auto result = minidb::bench::runConfiguredBenchmarks(config).front();
+                const auto persisted = config.operations * persistedPercent / 100U;
+                minidb::test::require(
+                    result.validationPassed
+                        && result.recovery.recovery.pageLsnChecks == config.operations
+                        && result.recovery.recovery.redoSkippedByPageLsn == persisted
+                        && result.recovery.recovery.pagesRedone
+                            == config.operations - persisted
+                        && result.recovery.fullScanRecovery.pagesRedone == config.operations,
+                    "Selective PageLSN benchmark comparison was inconsistent");
+                const auto json = minidb::bench::resultsToJson({result});
+                minidb::test::require(
+                    json.find("\"redo_skipped_by_page_lsn\"") != std::string::npos
+                        && json.find("\"always_redo_pages\"") != std::string::npos,
+                    "PageLSN benchmark JSON omitted comparison counters");
+            }
+        }
         std::cout << "recovery_benchmark_test passed\n";
         return 0;
     } catch (const std::exception& error) {

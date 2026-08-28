@@ -68,6 +68,9 @@ void validateConfig(const BenchmarkConfig& config) {
     if (config.walPayloadBytes > wal_record_layout::MAX_PAYLOAD_SIZE) {
         throw std::invalid_argument("WAL payload exceeds the maximum record payload");
     }
+    if (config.redoPersistedPercent > 100) {
+        throw std::invalid_argument("redo persisted percent must be between 0 and 100");
+    }
     if (config.walPayloadBytes + wal_record_layout::HEADER_SIZE
         > config.walSegmentBytes) {
         throw std::invalid_argument("WAL record does not fit configured segment payload");
@@ -197,6 +200,12 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
         } else if (argument == "--checkpoint-statements") {
             result.config.checkpointStatements = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
+        } else if (argument == "--redo-persisted-percent") {
+            const auto value = parseUnsigned(requireValue(arguments, index, argument), argument);
+            if (value > 100) {
+                throw std::invalid_argument("redo persisted percent must be between 0 and 100");
+            }
+            result.config.redoPersistedPercent = static_cast<std::uint32_t>(value);
         } else if (argument == "--seed") {
             result.config.seed = parseUnsigned(requireValue(arguments, index, argument), argument);
         } else if (argument == "--repetitions") {
@@ -246,6 +255,7 @@ std::string usageText() {
         "  --wal-update-mode MODE full-page (default), byte-range, or adaptive updates\n"
         "  --checkpoint-wal-bytes N automatic checkpoint WAL-growth bytes; 0 disables\n"
         "  --checkpoint-statements N automatic checkpoint commit count; 0 disables\n"
+        "  --redo-persisted-percent N persisted recovery-tail updates, 0..100\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
         "  --seed N              deterministic seed (default 12345)\n"
         "  --repetitions N       repeat each workload (default 1)\n"
@@ -273,7 +283,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
         "txn_bplus_insert", "txn_mixed", "txn_wal_delta_friendly",
         "txn_wal_fragmentation", "recovery_full_scan", "recovery_loser",
-        "checkpoint_latency", "recovery_checkpoint_compare",
+        "checkpoint_latency", "recovery_checkpoint_compare", "recovery_page_lsn_compare",
     };
 }
 
@@ -400,6 +410,7 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << walUpdateModeName(config.walUpdateMode) << '"'
                << ",\"checkpoint_wal_bytes\":" << config.checkpointWalBytes
                << ",\"checkpoint_statements\":" << config.checkpointStatements
+               << ",\"redo_persisted_percent\":" << config.redoPersistedPercent
                << ",\"checkpoint_enabled\":"
                << ((config.checkpointWalBytes != 0 || config.checkpointStatements != 0)
                    ? "true" : "false")
@@ -488,6 +499,12 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.transactions.bytesSavedByAdaptive
                << ",\"bytes_saved_versus_byte_range\":"
                << result.recovery.transactions.bytesSavedVersusByteRange
+               << ",\"persistent_page_lsn_assignments\":"
+               << result.recovery.transactions.persistentPageLsnAssignments
+               << ",\"v1_pages_observed\":"
+               << result.recovery.transactions.v1PagesObserved
+               << ",\"v2_pages_with_known_lsn\":"
+               << result.recovery.transactions.v2PagesWithKnownLsn
                << ",\"wal_bytes\":" << result.recovery.walBytes
                << ",\"logical_changed_bytes\":" << result.recovery.logicalChangedBytes
                << ",\"logging_amplification\":" << result.recovery.loggingAmplification
@@ -513,6 +530,20 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"pages_undone\":" << result.recovery.recovery.pagesUndone
                << ",\"database_writes\":"
                << result.recovery.recovery.databaseWrites
+               << ",\"page_lsn_checks\":" << result.recovery.recovery.pageLsnChecks
+               << ",\"page_lsn_unknown\":" << result.recovery.recovery.pageLsnUnknown
+               << ",\"redo_skipped_by_page_lsn\":"
+               << result.recovery.recovery.redoSkippedByPageLsn
+               << ",\"redo_skip_ratio\":"
+               << result.recovery.recovery.redoSkipRatio()
+               << ",\"redo_applied_after_page_lsn_check\":"
+               << result.recovery.recovery.redoAppliedAfterPageLsnCheck
+               << ",\"legacy_redo_records\":"
+               << result.recovery.recovery.legacyRedoRecords
+               << ",\"recovery_page_reads\":"
+               << result.recovery.recovery.recoveryPageReads
+               << ",\"recovery_page_writes\":"
+               << result.recovery.recovery.recoveryPageWrites
                << ",\"analysis_ns\":" << result.recovery.recovery.analysisNs
                << ",\"redo_ns\":" << result.recovery.recovery.redoNs
                << ",\"undo_ns\":" << result.recovery.recovery.undoNs
@@ -526,7 +557,15 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"full_scan_wal_bytes_scanned\":"
                << result.recovery.fullScanRecovery.walBytesScanned
                << ",\"full_scan_total_ns\":"
-               << result.recovery.fullScanRecovery.totalNs << '}';
+               << result.recovery.fullScanRecovery.totalNs
+               << ",\"always_redo_pages\":"
+               << result.recovery.fullScanRecovery.pagesRedone
+               << ",\"always_redo_page_reads\":"
+               << result.recovery.fullScanRecovery.recoveryPageReads
+               << ",\"always_redo_page_writes\":"
+               << result.recovery.fullScanRecovery.recoveryPageWrites
+               << ",\"always_redo_redo_ns\":"
+               << result.recovery.fullScanRecovery.redoNs << '}';
         output << ",\"checkpoint\":{\"checkpoint_count\":"
                << result.checkpoint.checkpointsCompleted
                << ",\"checkpoint_total_ns\":" << result.checkpoint.checkpointDurationNs
@@ -658,6 +697,12 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.recovery.recovery.pagesRedone << '/'
            << result.recovery.recovery.pagesUndone << '/'
            << result.recovery.recovery.totalNs << '\n'
+           << "selective PageLSN checks/skips/applies/reads/writes: "
+           << result.recovery.recovery.pageLsnChecks << '/'
+           << result.recovery.recovery.redoSkippedByPageLsn << '/'
+           << result.recovery.recovery.redoAppliedAfterPageLsnCheck << '/'
+           << result.recovery.recovery.recoveryPageReads << '/'
+           << result.recovery.recovery.recoveryPageWrites << '\n'
            << "recovery checkpoint/skipped/scanned, full-scan records/ns: "
            << (result.recovery.recovery.checkpointUsed ? 1 : 0) << '/'
            << result.recovery.recovery.walBytesSkipped << '/'

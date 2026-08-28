@@ -38,6 +38,7 @@ struct BenchmarkConfig {
     WalUpdateMode walUpdateMode = WalUpdateMode::FullPage;
     std::uint64_t checkpointWalBytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t checkpointStatements = 0;
+    std::uint32_t redoPersistedPercent = 100;
     std::uint64_t seed = 12'345;
     std::uint32_t repetitions = 1;
     std::string databasePath = "minidb_benchmark.db";
