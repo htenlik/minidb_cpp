@@ -209,8 +209,14 @@ RecoveryStats RecoveryManager::recover() {
             }
         }
     }
-    auto scan = logManager_.scanFrom(stats.recoveryStartOffset);
-    stats.walBytesScanned = scan.fileBytes - stats.recoveryStartOffset;
+    const auto analysisBoundary = stats.recoveryStartOffset;
+    auto scanStart = analysisBoundary;
+    if (fuzzyCheckpoint.has_value() && isValidLsn(stats.oldestCheckpointRecLsn)) {
+        scanStart = std::min(scanStart, stats.oldestCheckpointRecLsn);
+    }
+    stats.walBytesSkipped = scanStart - logManager_.oldestRetainedLsn();
+    auto scan = logManager_.scanFrom(scanStart);
+    stats.walBytesScanned = scan.fileBytes - scanStart;
     if (scan.truncatedTail) {
         stats.repairedTail = true;
         stats.tailBytesTruncated = scan.fileBytes - scan.validBytes;
@@ -227,7 +233,22 @@ RecoveryStats RecoveryManager::recover() {
     std::map<CheckpointId, CheckpointBeginLogPayload> checkpointBegins;
     std::map<CheckpointId, Lsn> fuzzyCheckpointBegins;
     TransactionId highestTailTransactionId = 0;
+    std::vector<const LogRecord*> redo;
     for (const auto& record : scan.records) {
+        if (record.lsn < analysisBoundary) {
+            if (isPageUpdateRecord(record.type)) {
+                validateTransactionRecordPayload(record);
+                redo.push_back(&record);
+            } else if (record.type == LogRecordType::CheckpointBegin
+                       || record.type == LogRecordType::CheckpointEnd
+                       || record.type == LogRecordType::FuzzyCheckpointBegin
+                       || record.type == LogRecordType::FuzzyCheckpointEnd) {
+                validateCheckpointRecord(record);
+            } else {
+                validateTransactionRecordPayload(record);
+            }
+            continue;
+        }
         ++stats.recordsAnalyzed;
         if (record.type == LogRecordType::CheckpointBegin
             || record.type == LogRecordType::CheckpointEnd
@@ -324,54 +345,6 @@ RecoveryStats RecoveryManager::recover() {
     }
     stats.nextTransactionId = std::max(baseNext, highestTailTransactionId + 1);
 
-    std::vector<const LogRecord*> redo;
-    WalScanResult fuzzyPrefixScan;
-    if (fuzzyCheckpoint.has_value()
-        && isValidLsn(stats.oldestCheckpointRecLsn)
-        && stats.oldestCheckpointRecLsn < stats.recoveryStartOffset) {
-        fuzzyPrefixScan = logManager_.scanFrom(logManager_.oldestRetainedLsn());
-        std::map<TransactionId, std::vector<const LogRecord*>> prefixUpdates;
-        std::optional<TransactionId> prefixActive;
-        for (const auto& record : fuzzyPrefixScan.records) {
-            if (record.lsn >= stats.recoveryStartOffset) break;
-            if (record.type == LogRecordType::Begin) {
-                validateTransactionRecordPayload(record);
-                if (prefixActive.has_value()) {
-                    throw WalError(WalErrorKind::CorruptRecord,
-                                   "Retained fuzzy-checkpoint prefix has overlapping transactions");
-                }
-                prefixActive = record.transactionId;
-                prefixUpdates[record.transactionId] = {};
-            } else if (isPageUpdateRecord(record.type)) {
-                validateTransactionRecordPayload(record);
-                if (!prefixActive.has_value() || *prefixActive != record.transactionId) {
-                    continue;
-                }
-                const auto identity = pageUpdateIdentity(record);
-                const auto foundDpt = dirtyPageTable.find(identity.pageId);
-                if (foundDpt != dirtyPageTable.end() && record.lsn >= foundDpt->second) {
-                    prefixUpdates[record.transactionId].push_back(&record);
-                }
-            } else if (record.type == LogRecordType::Commit) {
-                validateTransactionRecordPayload(record);
-                if (prefixActive.has_value() && *prefixActive == record.transactionId) {
-                    const auto& updates = prefixUpdates[record.transactionId];
-                    redo.insert(redo.end(), updates.begin(), updates.end());
-                    prefixActive.reset();
-                }
-            } else if (record.type == LogRecordType::Abort) {
-                validateTransactionRecordPayload(record);
-                if (prefixActive.has_value() && *prefixActive == record.transactionId) {
-                    prefixActive.reset();
-                }
-            } else if (record.type == LogRecordType::CheckpointBegin
-                       || record.type == LogRecordType::CheckpointEnd
-                       || record.type == LogRecordType::FuzzyCheckpointBegin
-                       || record.type == LogRecordType::FuzzyCheckpointEnd) {
-                validateCheckpointRecord(record);
-            }
-        }
-    }
     AnalyzedTransaction* loser = nullptr;
     for (auto& [id, transaction] : transactions) {
         static_cast<void>(id);
