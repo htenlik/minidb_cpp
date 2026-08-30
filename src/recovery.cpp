@@ -184,6 +184,7 @@ RecoveryStats RecoveryManager::recover() {
         stats.fullScanFallback = false;
         stats.checkpointId = checkpoint.slot->checkpointId;
         stats.checkpointEndLsn = checkpoint.slot->checkpointEndLsn;
+        stats.checkpointWalHighWater = checkpoint.slot->walFileSizeAtCheckpoint;
         stats.checkpointGeneration = checkpoint.slot->generation;
         stats.recoveryStartOffset = checkpoint.slot->recoveryStartOffset;
         stats.walBytesSkipped = checkpoint.slot->recoveryStartOffset

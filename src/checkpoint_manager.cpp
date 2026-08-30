@@ -24,7 +24,7 @@ CheckpointManager::CheckpointManager(
       lastGeneration_(startupRecovery.checkpointGeneration),
       previousCheckpointEndLsn_(startupRecovery.checkpointEndLsn),
       lastCheckpointWalSize_(startupRecovery.checkpointUsed
-          ? startupRecovery.recoveryStartOffset : wal_file_layout::HEADER_SIZE) {
+          ? startupRecovery.checkpointWalHighWater : wal_file_layout::HEADER_SIZE) {
     const auto highest = startupRecovery.highestCheckpointId;
     if (highest == std::numeric_limits<CheckpointId>::max()) {
         throw std::overflow_error("Checkpoint ID space is exhausted");

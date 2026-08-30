@@ -59,6 +59,7 @@ struct RecoveryStats {
     Lsn redoStartLsn = INVALID_LSN;
     CheckpointId checkpointId = INVALID_CHECKPOINT_ID;
     Lsn checkpointEndLsn = INVALID_LSN;
+    WalOffset checkpointWalHighWater = wal_file_layout::HEADER_SIZE;
     WalOffset recoveryStartOffset = wal_file_layout::HEADER_SIZE;
     std::uint64_t walBytesSkipped = 0;
     std::uint64_t walBytesScanned = 0;
