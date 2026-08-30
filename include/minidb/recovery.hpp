@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/page_recovery.hpp"
+#include "minidb/checkpoint_types.hpp"
 #include "minidb/recovery_log.hpp"
 
 #include <array>
@@ -34,9 +35,14 @@ struct RecoveryStats {
     std::uint64_t databaseWrites = 0;
     std::uint64_t databaseSyncCalls = 0;
     std::uint64_t pageLsnChecks = 0;
+    std::uint64_t redoPageLsnChecks = 0;
     std::uint64_t pageLsnUnknown = 0;
     std::uint64_t redoSkippedByPageLsn = 0;
     std::uint64_t redoAppliedAfterPageLsnCheck = 0;
+    std::uint64_t redoCandidates = 0;
+    std::uint64_t redoSkippedNotInDpt = 0;
+    std::uint64_t redoSkippedBeforeRecLsn = 0;
+    std::uint64_t redoApplied = 0;
     std::uint64_t legacyRedoRecords = 0;
     std::uint64_t recoveryPageReads = 0;
     std::uint64_t recoveryPageWrites = 0;
@@ -47,6 +53,10 @@ struct RecoveryStats {
     std::uint64_t totalNs = 0;
     bool checkpointControlPresent = false;
     bool checkpointUsed = false;
+    CheckpointMode checkpointMode = CheckpointMode::Sharp;
+    std::uint64_t checkpointDirtyPageCount = 0;
+    Lsn oldestCheckpointRecLsn = INVALID_LSN;
+    Lsn redoStartLsn = INVALID_LSN;
     CheckpointId checkpointId = INVALID_CHECKPOINT_ID;
     Lsn checkpointEndLsn = INVALID_LSN;
     WalOffset recoveryStartOffset = wal_file_layout::HEADER_SIZE;
