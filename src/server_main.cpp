@@ -46,11 +46,19 @@ minidb::WalUpdateMode parseWalUpdateMode(std::string_view text) {
         "invalid --wal-update-mode value (expected full-page, byte-range, or adaptive)");
 }
 
+minidb::CheckpointMode parseCheckpointMode(std::string_view text) {
+    if (text == "sharp") return minidb::CheckpointMode::Sharp;
+    if (text == "fuzzy") return minidb::CheckpointMode::Fuzzy;
+    throw std::invalid_argument(
+        "invalid --checkpoint-mode value (expected sharp or fuzzy)");
+}
+
 void usage() {
     std::cerr
         << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
            "[--buffer-frames N] [--lru-k N] [--checkpoint-wal-bytes N] "
            "[--checkpoint-statements N] [--wal-segment-bytes N] "
+           "[--checkpoint-mode sharp|fuzzy] "
            "[--wal-update-mode full-page|byte-range|adaptive]\n";
 }
 
@@ -88,6 +96,8 @@ int main(int argc, char** argv) {
                 config.walSegmentBytes = static_cast<std::uint32_t>(value);
             } else if (argument == "--wal-update-mode" && index + 1 < argc) {
                 config.walUpdateMode = parseWalUpdateMode(argv[++index]);
+            } else if (argument == "--checkpoint-mode" && index + 1 < argc) {
+                config.checkpointMode = parseCheckpointMode(argv[++index]);
             } else {
                 usage();
                 return 2;

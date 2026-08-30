@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/buffer_pool_manager.hpp"
+#include "minidb/checkpoint_types.hpp"
 #include "minidb/disk_manager.hpp"
 #include "minidb/sql_executor.hpp"
 #include "minidb/segmented_wal.hpp"
@@ -25,6 +26,7 @@ struct ServerConfig {
     std::uint64_t checkpointStatements = 0;
     std::uint32_t walSegmentBytes = wal_segment_layout::DEFAULT_PAYLOAD_CAPACITY;
     WalUpdateMode walUpdateMode = WalUpdateMode::FullPage;
+    CheckpointMode checkpointMode = CheckpointMode::Sharp;
 };
 
 class TcpServer {

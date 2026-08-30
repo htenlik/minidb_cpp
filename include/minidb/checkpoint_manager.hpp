@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/checkpoint_control.hpp"
+#include "minidb/checkpoint_types.hpp"
 #include "minidb/recovery.hpp"
 
 #include <cstdint>
@@ -14,6 +15,7 @@ class LogManager;
 struct CheckpointPolicy {
     std::uint64_t walBytes = 64ULL * 1024ULL * 1024ULL;
     std::uint64_t statements = 0;
+    CheckpointMode mode = CheckpointMode::Sharp;
     bool operator==(const CheckpointPolicy&) const = default;
 };
 
@@ -33,6 +35,13 @@ struct CheckpointStats {
     std::uint64_t reclamationFailures = 0;
     std::uint64_t segmentsReclaimed = 0;
     std::uint64_t walBytesReclaimed = 0;
+    std::uint64_t sharpCheckpointsCompleted = 0;
+    std::uint64_t fuzzyCheckpointsCompleted = 0;
+    std::uint64_t dptEntriesCaptured = 0;
+    std::uint64_t activeTransactionsCaptured = 0;
+    std::uint64_t pinnedFramesObserved = 0;
+    Lsn oldestRecLsn = INVALID_LSN;
+    Lsn retentionFloorLsn = INVALID_LSN;
     CheckpointId lastCheckpointId = INVALID_CHECKPOINT_ID;
     Lsn lastCheckpointEndLsn = INVALID_LSN;
     WalOffset lastRecoveryStartOffset = wal_file_layout::HEADER_SIZE;
@@ -51,6 +60,7 @@ public:
         CheckpointPolicy policy = {});
 
     [[nodiscard]] CheckpointId checkpoint();
+    [[nodiscard]] CheckpointId checkpoint(CheckpointMode mode);
     [[nodiscard]] bool onStatementCommitted() noexcept;
 
     [[nodiscard]] const CheckpointPolicy& policy() const noexcept { return policy_; }

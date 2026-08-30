@@ -33,13 +33,17 @@ CheckpointManager::CheckpointManager(
 }
 
 CheckpointId CheckpointManager::checkpoint() {
+    return checkpoint(policy_.mode);
+}
+
+CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
     const auto started = std::chrono::steady_clock::now();
     ++stats_.checkpointsStarted;
     try {
         if (recovery_.hasActiveStatement() || recovery_.rollbackActive()) {
             throw std::logic_error("Checkpoint requires no active transaction or rollback");
         }
-        if (bufferPool_.totalPinCount() != 0) {
+        if (mode == CheckpointMode::Sharp && bufferPool_.totalPinCount() != 0) {
             throw std::logic_error("Checkpoint requires zero pinned buffer frames");
         }
         if (nextCheckpointId_ == INVALID_CHECKPOINT_ID
@@ -53,6 +57,102 @@ CheckpointId CheckpointManager::checkpoint() {
         }
         ++nextCheckpointId_;
         const auto walStart = logManager_.lastValidOffset();
+        if (mode == CheckpointMode::Fuzzy) {
+            const auto beginLsn = logManager_.append(LogRecord{
+                LogRecordType::FuzzyCheckpointBegin,
+                INVALID_TRANSACTION_ID,
+                INVALID_LSN,
+                encodeFuzzyCheckpointBeginLogPayload({
+                    checkpointId, previousCheckpointEndLsn_,
+                }),
+                INVALID_LSN,
+            });
+            recoveryFailPoint("fuzzy_checkpoint_after_begin_append");
+            const auto dirtyPages = bufferPool_.dirtyPageTableSnapshot();
+            recoveryFailPoint("fuzzy_checkpoint_after_dpt_snapshot");
+            const std::vector<CheckpointTransactionEntry> activeTransactions;
+            const auto endPayload = encodeFuzzyCheckpointEndLogPayload({
+                checkpointId,
+                beginLsn,
+                diskManager_.pageCount(),
+                recovery_.nextTransactionId(),
+                dirtyPages,
+                activeTransactions,
+            });
+            const auto endLsn = logManager_.append(LogRecord{
+                LogRecordType::FuzzyCheckpointEnd,
+                INVALID_TRANSACTION_ID,
+                INVALID_LSN,
+                endPayload,
+                INVALID_LSN,
+            });
+            const auto checkpointWalEnd = logManager_.lastValidOffset();
+            recoveryFailPoint("fuzzy_checkpoint_after_end_append");
+            logManager_.flushUpTo(endLsn);
+            recoveryFailPoint("fuzzy_checkpoint_after_end_fsync");
+
+            const auto controlBefore = control_.stats();
+            control_.publish(CheckpointSlot{
+                lastGeneration_ + 1,
+                checkpointId,
+                endLsn,
+                beginLsn,
+                diskManager_.pageCount(),
+                recovery_.nextTransactionId(),
+                checkpointWalEnd,
+            });
+            const auto controlAfter = control_.stats();
+            recoveryFailPoint("fuzzy_checkpoint_after_control_sync");
+
+            Lsn retentionFloor = beginLsn;
+            for (const auto& entry : dirtyPages) {
+                retentionFloor = std::min(retentionFloor, entry.recLsn);
+            }
+            const auto checkpointElapsed = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started).count());
+            const auto reclamationStarted = std::chrono::steady_clock::now();
+            const auto segmentStatsBefore = logManager_.stats();
+            std::uint64_t reclaimedBytes = 0;
+            try {
+                logManager_.rotateSegment();
+                recoveryFailPoint("fuzzy_checkpoint_during_reclamation");
+                reclaimedBytes = logManager_.reclaimSegmentsBefore(retentionFloor, 1);
+            } catch (const std::exception&) {
+                ++stats_.reclamationFailures;
+            }
+            const auto segmentStatsAfter = logManager_.stats();
+            const auto reclamationElapsed = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - reclamationStarted).count());
+
+            ++stats_.checkpointsCompleted;
+            ++stats_.fuzzyCheckpointsCompleted;
+            ++stats_.walForces;
+            stats_.controlFileSyncs += controlAfter.fsyncCalls - controlBefore.fsyncCalls;
+            stats_.segmentsReclaimed += segmentStatsAfter.segmentsDeleted
+                - segmentStatsBefore.segmentsDeleted;
+            stats_.walBytesReclaimed += reclaimedBytes;
+            stats_.reclamationDurationNs += reclamationElapsed;
+            stats_.walBytesSincePreviousCheckpoint = walStart - lastCheckpointWalSize_;
+            stats_.checkpointDurationNs += checkpointElapsed;
+            stats_.checkpointMaxDurationNs = std::max(
+                stats_.checkpointMaxDurationNs, checkpointElapsed);
+            stats_.dptEntriesCaptured += dirtyPages.size();
+            stats_.activeTransactionsCaptured += activeTransactions.size();
+            stats_.pinnedFramesObserved += bufferPool_.stats().pinnedFrames;
+            stats_.oldestRecLsn = dirtyPages.empty() ? INVALID_LSN : retentionFloor;
+            stats_.retentionFloorLsn = retentionFloor;
+            stats_.lastCheckpointId = checkpointId;
+            stats_.lastCheckpointEndLsn = endLsn;
+            stats_.lastRecoveryStartOffset = beginLsn;
+
+            ++lastGeneration_;
+            previousCheckpointEndLsn_ = endLsn;
+            lastCheckpointWalSize_ = checkpointWalEnd;
+            statementsSinceCheckpoint_ = 0;
+            return checkpointId;
+        }
         const auto beginLsn = logManager_.append(LogRecord{
             LogRecordType::CheckpointBegin,
             INVALID_TRANSACTION_ID,
@@ -135,6 +235,7 @@ CheckpointId CheckpointManager::checkpoint() {
                 std::chrono::steady_clock::now() - reclamationStarted).count());
 
         ++stats_.checkpointsCompleted;
+        ++stats_.sharpCheckpointsCompleted;
         stats_.dirtyPagesFlushed += writes;
         stats_.databaseWrites += writes;
         ++stats_.walForces;
@@ -151,6 +252,12 @@ CheckpointId CheckpointManager::checkpoint() {
         stats_.lastCheckpointId = checkpointId;
         stats_.lastCheckpointEndLsn = endLsn;
         stats_.lastRecoveryStartOffset = recoveryStart;
+        stats_.oldestRecLsn = INVALID_LSN;
+        stats_.retentionFloorLsn = beginLsn;
+
+        if (!bufferPool_.dirtyPageTableSnapshot().empty()) {
+            throw std::logic_error("Successful sharp checkpoint left a nonempty DPT");
+        }
 
         ++lastGeneration_;
         previousCheckpointEndLsn_ = endLsn;

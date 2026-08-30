@@ -18,9 +18,10 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     recovery_->attachBufferPool(*bufferPool_);
     checkpoints_ = std::make_unique<CheckpointManager>(
         *recovery_, *bufferPool_, diskManager_, logManager_, checkpointControl_,
-        recoveryStats_, CheckpointPolicy{config.checkpointWalBytes, config.checkpointStatements});
+        recoveryStats_, CheckpointPolicy{
+            config.checkpointWalBytes, config.checkpointStatements, config.checkpointMode});
     if (logManager_.legacyMigrationPending()) {
-        static_cast<void>(checkpoints_->checkpoint());
+        static_cast<void>(checkpoints_->checkpoint(CheckpointMode::Sharp));
         const auto checkpointEnd = logManager_.readRecordAt(
             checkpoints_->stats().lastCheckpointEndLsn);
         const auto migrationBase = decodeCheckpointEndLogPayload(
@@ -31,7 +32,7 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
         diskManager_, *recovery_, logManager_);
     if (diskManager_.databaseHeader().formatVersion == database_format::LEGACY_VERSION) {
         recoveryFailPoint("migration_before_initial_checkpoint");
-        static_cast<void>(checkpoints_->checkpoint());
+        static_cast<void>(checkpoints_->checkpoint(CheckpointMode::Sharp));
         recoveryFailPoint("migration_after_initial_checkpoint");
         recoveryFailPoint("migration_before_format_update");
         recovery_->beginStatement();
@@ -45,7 +46,7 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
             throw;
         }
         recoveryFailPoint("migration_before_final_checkpoint");
-        static_cast<void>(checkpoints_->checkpoint());
+        static_cast<void>(checkpoints_->checkpoint(CheckpointMode::Sharp));
     }
     allocator_ = std::make_unique<PageAllocator>(
         *bufferPool_, diskManager_, metadataManager_.get());
