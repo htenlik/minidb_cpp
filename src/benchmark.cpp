@@ -566,6 +566,13 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"total_ns\":" << result.recovery.recovery.totalNs
                << ",\"checkpoint_used\":"
                << (result.recovery.recovery.checkpointUsed ? "true" : "false")
+               << ",\"checkpoint_mode\":\""
+               << checkpointModeName(result.recovery.recovery.checkpointMode) << '"'
+               << ",\"checkpoint_dirty_page_count\":"
+               << result.recovery.recovery.checkpointDirtyPageCount
+               << ",\"oldest_checkpoint_rec_lsn\":"
+               << result.recovery.recovery.oldestCheckpointRecLsn
+               << ",\"redo_start_lsn\":" << result.recovery.recovery.redoStartLsn
                << ",\"wal_bytes_skipped\":" << result.recovery.recovery.walBytesSkipped
                << ",\"wal_bytes_scanned\":" << result.recovery.recovery.walBytesScanned
                << ",\"full_scan_records_analyzed\":"
