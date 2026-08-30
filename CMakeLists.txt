@@ -134,6 +134,10 @@ add_executable(buffer_pool_wal_test tests/buffer_pool_wal_test.cpp)
 target_link_libraries(buffer_pool_wal_test PRIVATE minidb_core)
 add_test(NAME buffer_pool_wal_test COMMAND buffer_pool_wal_test)
 
+add_executable(dirty_page_table_test tests/dirty_page_table_test.cpp)
+target_link_libraries(dirty_page_table_test PRIVATE minidb_core)
+add_test(NAME dirty_page_table_test COMMAND dirty_page_table_test)
+
 add_executable(buffer_engine_integration_test tests/buffer_engine_integration_test.cpp)
 target_link_libraries(buffer_engine_integration_test PRIVATE minidb_sql_execution)
 add_test(NAME buffer_engine_integration_test COMMAND buffer_engine_integration_test)
@@ -177,6 +181,22 @@ add_test(NAME checkpoint_codec_test COMMAND checkpoint_codec_test)
 add_executable(checkpoint_test tests/checkpoint_test.cpp)
 target_link_libraries(checkpoint_test PRIVATE minidb_network)
 add_test(NAME checkpoint_test COMMAND checkpoint_test)
+
+add_executable(fuzzy_checkpoint_test tests/fuzzy_checkpoint_test.cpp)
+target_link_libraries(fuzzy_checkpoint_test PRIVATE minidb_network)
+add_test(NAME fuzzy_checkpoint_test COMMAND fuzzy_checkpoint_test)
+
+add_executable(fuzzy_checkpoint_codec_test tests/fuzzy_checkpoint_codec_test.cpp)
+target_link_libraries(fuzzy_checkpoint_codec_test PRIVATE minidb_core)
+add_test(NAME fuzzy_checkpoint_codec_test COMMAND fuzzy_checkpoint_codec_test)
+
+add_executable(fuzzy_checkpoint_crash_test tests/fuzzy_checkpoint_crash_test.cpp)
+target_link_libraries(fuzzy_checkpoint_crash_test PRIVATE minidb_network)
+add_test(NAME fuzzy_checkpoint_crash_test COMMAND fuzzy_checkpoint_crash_test)
+
+add_executable(fuzzy_recovery_model_test tests/fuzzy_recovery_model_test.cpp)
+target_link_libraries(fuzzy_recovery_model_test PRIVATE minidb_core)
+add_test(NAME fuzzy_recovery_model_test COMMAND fuzzy_recovery_model_test)
 
 add_executable(checkpoint_crash_test tests/checkpoint_crash_test.cpp)
 target_link_libraries(checkpoint_crash_test PRIVATE minidb_network)
