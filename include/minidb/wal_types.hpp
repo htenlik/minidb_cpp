@@ -35,6 +35,8 @@ enum class LogRecordType : std::uint16_t {
     PageDeltaUpdate = 8,
     PageUpdateV2 = 9,
     PageDeltaUpdateV2 = 10,
+    FuzzyCheckpointBegin = 11,
+    FuzzyCheckpointEnd = 12,
 };
 
 enum class WalUpdateMode : std::uint8_t {
@@ -60,7 +62,7 @@ enum class WalUpdateMode : std::uint8_t {
 [[nodiscard]] constexpr bool isValidLogRecordType(LogRecordType type) noexcept {
     const auto value = static_cast<std::uint16_t>(type);
     return value >= static_cast<std::uint16_t>(LogRecordType::Begin)
-        && value <= static_cast<std::uint16_t>(LogRecordType::PageDeltaUpdateV2);
+        && value <= static_cast<std::uint16_t>(LogRecordType::FuzzyCheckpointEnd);
 }
 
 class WalFlushProvider {
