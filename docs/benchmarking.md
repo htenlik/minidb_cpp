@@ -246,6 +246,12 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 ./build-release/minidb_bench --benchmark checkpoint_latency --operations 256 --checkpoint-mode fuzzy
 ./build-release/minidb_bench --benchmark recovery_checkpoint_compare --operations 1000 --checkpoint-mode fuzzy
 
+# Repeated fuzzy checkpoints: 100 regularly flushes, 0 retains dirty periods
+./build-release/minidb_bench --benchmark checkpoint_retention --rows 16 --operations 64 \
+  --checkpoint-mode fuzzy --redo-persisted-percent 100
+./build-release/minidb_bench --benchmark checkpoint_retention --rows 16 --operations 64 \
+  --checkpoint-mode fuzzy --redo-persisted-percent 0
+
 # Selective PageLSN REDO versus AlwaysRedo over identical history
 ./build-release/minidb_bench --benchmark recovery_page_lsn_compare --operations 1000 \
   --wal-update-mode adaptive --redo-persisted-percent 0

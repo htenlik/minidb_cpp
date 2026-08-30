@@ -43,6 +43,17 @@ int main() {
                         == minidb::CheckpointMode::Fuzzy
                     && results[0].recovery.recovery.checkpointDirtyPageCount != 0,
                 "Fuzzy checkpoint recovery comparison did not use its DPT");
+
+        config.benchmark = "checkpoint_retention";
+        config.rows = 3;
+        config.operations = 2;
+        config.redoPersistedPercent = 0;
+        results = minidb::bench::runConfiguredBenchmarks(config);
+        minidb::test::require(results.size() == 1 && results[0].validationPassed
+                    && results[0].timing.operationCount == 3
+                    && results[0].checkpoint.fuzzyCheckpointsCompleted == 3
+                    && results[0].checkpoint.oldestRecLsn != minidb::INVALID_LSN,
+                "Long-lived dirty-page retention benchmark is invalid");
         std::cout << "checkpoint_benchmark_test passed\n";
         return 0;
     } catch (const std::exception& error) {

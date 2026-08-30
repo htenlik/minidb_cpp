@@ -1420,6 +1420,64 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
     return result;
 }
 
+BenchmarkResult runCheckpointRetention(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    BenchmarkResult result;
+    std::vector<std::uint64_t> latency;
+    {
+        net::DatabaseServer server(
+            config.databasePath,
+            net::ServerConfig{"127.0.0.1", 0, 8,
+                              static_cast<std::size_t>(config.bufferFrames),
+                              static_cast<std::size_t>(config.lruK), 0, 0,
+                              config.walSegmentBytes,
+                              config.walUpdateMode,
+                              config.checkpointMode});
+        std::vector<PageId> pages;
+        pages.reserve(config.operations);
+        server.recoveryCoordinator().beginStatement();
+        for (std::uint64_t index = 0; index < config.operations; ++index) {
+            pages.push_back(server.pageAllocator().allocatePage());
+        }
+        server.recoveryCoordinator().commitStatement();
+        static_cast<void>(server.checkpointManager().checkpoint(CheckpointMode::Sharp));
+        server.checkpointManager().resetStats();
+        server.bufferPool().resetStats();
+
+        for (std::uint64_t cycle = 0; cycle < config.rows; ++cycle) {
+            server.recoveryCoordinator().beginStatement();
+            for (const auto pageId : pages) {
+                auto guard = requireWritePage(
+                    server.bufferPool(), pageId, "prepare checkpoint retention page");
+                guard.data()[128] = static_cast<std::byte>((cycle % 255U) + 1U);
+            }
+            server.recoveryCoordinator().commitStatement();
+            // For this benchmark, the existing persisted-percent knob selects the
+            // controlled flush scenario: 100 = regular flush, 0 = long-lived dirty.
+            if (config.redoPersistedPercent == 100) server.bufferPool().flushAll();
+            measure(latency, [&] {
+                static_cast<void>(server.checkpointManager().checkpoint(config.checkpointMode));
+            });
+        }
+        result = finish("checkpoint_retention", config, latency, {}, {},
+                        storageMetrics(server.diskManager(), server.bufferPool(),
+                                       server.pageAllocator()),
+                        0.0, 0.0, server.bufferPool().stats());
+        result.storageBackend = config.redoPersistedPercent == 100
+            ? "regularly_flushed_checkpoint" : "long_lived_dirty_checkpoint";
+        result.checkpoint = server.checkpointManager().stats();
+        result.wal.manager = server.logManager().stats();
+        result.wal.physicalWalBytesBefore = server.logManager().physicalWalBytes();
+        result.validationPassed = config.checkpointMode == CheckpointMode::Sharp
+            ? server.bufferPool().dirtyPageTableSnapshot().empty()
+            : (config.redoPersistedPercent == 100
+                ? server.bufferPool().dirtyPageTableSnapshot().empty()
+                : !server.bufferPool().dirtyPageTableSnapshot().empty());
+    }
+    cleanupDatabase(config);
+    return result;
+}
+
 BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     removeDatabase(config);
     constexpr std::uint64_t TAIL = 10;
@@ -1638,6 +1696,7 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
         return runRecoveryBenchmark(config, name);
     }
     if (name == "checkpoint_latency") return runCheckpointLatency(config);
+    if (name == "checkpoint_retention") return runCheckpointRetention(config);
     if (name == "recovery_checkpoint_compare") {
         return runCheckpointRecoveryComparison(config);
     }

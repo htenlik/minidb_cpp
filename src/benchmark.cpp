@@ -71,6 +71,11 @@ void validateConfig(const BenchmarkConfig& config) {
     if (config.redoPersistedPercent > 100) {
         throw std::invalid_argument("redo persisted percent must be between 0 and 100");
     }
+    if (config.benchmark == "checkpoint_retention"
+        && config.redoPersistedPercent != 0 && config.redoPersistedPercent != 100) {
+        throw std::invalid_argument(
+            "checkpoint_retention requires redo persisted percent 0 or 100");
+    }
     if (config.walPayloadBytes + wal_record_layout::HEADER_SIZE
         > config.walSegmentBytes) {
         throw std::invalid_argument("WAL record does not fit configured segment payload");
@@ -289,7 +294,8 @@ std::vector<std::string> supportedBenchmarkNames() {
         "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
         "txn_bplus_insert", "txn_mixed", "txn_wal_delta_friendly",
         "txn_wal_fragmentation", "recovery_full_scan", "recovery_loser",
-        "checkpoint_latency", "recovery_checkpoint_compare", "recovery_page_lsn_compare",
+        "checkpoint_latency", "checkpoint_retention", "recovery_checkpoint_compare",
+        "recovery_page_lsn_compare",
     };
 }
 
