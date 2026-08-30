@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/disk_manager.hpp"
+#include "minidb/checkpoint_types.hpp"
 #include "minidb/lru_k_replacer.hpp"
 #include "minidb/page_guard.hpp"
 #include "minidb/page_recovery.hpp"
@@ -23,6 +24,7 @@ struct BufferFrame {
     bool dirty = false;
     bool valid = false;
     Lsn pageLsn = INVALID_LSN;
+    Lsn recLsn = INVALID_LSN;
 };
 
 struct BufferPoolStats {
@@ -76,6 +78,8 @@ public:
     [[nodiscard]] std::optional<std::uint32_t> pinCount(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<bool> isDirty(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<Lsn> pageLsn(PageId pageId) const noexcept;
+    [[nodiscard]] std::optional<Lsn> recLsn(PageId pageId) const noexcept;
+    [[nodiscard]] std::vector<DirtyPageEntry> dirtyPageTableSnapshot() const;
     [[nodiscard]] std::optional<DiskManager::Page> residentPageCopy(PageId pageId) const;
     // Finalizes a transaction's resident page image after WAL append, including
     // both volatile and persistent PageLSN assignment.
