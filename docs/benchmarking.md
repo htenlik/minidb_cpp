@@ -1,8 +1,8 @@
 # Benchmarking and storage observability
 
 The harness covers the legacy Pager, bounded buffer pool, storage/index/SQL paths,
-standalone WAL append/force behavior, durable transaction and recovery paths, sharp
-checkpoints, segment rotation/reclamation, and full-page versus physical byte-range
+standalone WAL append/force behavior, durable transaction and recovery paths, sharp and
+fuzzy checkpoints, segment rotation/reclamation, and full-page versus physical byte-range
 logging. It reports measurements, not performance claims.
 Results are meaningful primarily when comparing the same machine, compiler, build type,
 configuration, and seed.
@@ -241,9 +241,10 @@ sql_pk_lookup     sql_heap_scan sql_mixed       tcp_pk_lookup   wal_append_buffe
 ./build-release/minidb_bench --benchmark txn_wal_fragmentation --operations 1000 \
   --wal-update-mode adaptive
 
-# Sharp-checkpoint cost and full-scan versus checkpoint-tail recovery
-./build-release/minidb_bench --benchmark checkpoint_latency --rows 1000 --operations 256
-./build-release/minidb_bench --benchmark recovery_checkpoint_compare --operations 1000
+# Controlled sharp/fuzzy checkpoint cost; operations is prepared dirty-page count
+./build-release/minidb_bench --benchmark checkpoint_latency --operations 256 --checkpoint-mode sharp
+./build-release/minidb_bench --benchmark checkpoint_latency --operations 256 --checkpoint-mode fuzzy
+./build-release/minidb_bench --benchmark recovery_checkpoint_compare --operations 1000 --checkpoint-mode fuzzy
 
 # Selective PageLSN REDO versus AlwaysRedo over identical history
 ./build-release/minidb_bench --benchmark recovery_page_lsn_compare --operations 1000 \
@@ -263,7 +264,7 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
 - `benchmark`, explicit `storage_backend`, `seed`, and one-based `repetition`;
 - `configuration`: rows, operations, pages, working set, warmup, reopen interval,
   repetitions, buffer frames, LRU-K K, WAL payload/batch/buffer/segment sizes, WAL
-  update mode, persisted-REDO percentage, cache mode, and tuple sizes;
+  update/checkpoint modes, persisted-REDO percentage, cache mode, and tuple sizes;
 - `timing`: operation count, total, throughput, mean, p50/p95/p99, min/max;
 - `pager`: all nine Pager statistics;
 - `buffer`: bounded-buffer requests, hits/misses, derived hit ratio, physical I/O,
@@ -276,10 +277,12 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
   nanoseconds, adaptive choice/tie/candidate/saved-byte and selection-time counters,
   runtime persistent-PageLSN assignments/v1 observations/known-v2 observations,
   checkpoint use/skipped/scanned bytes, full-scan comparison, scanned/
-  REDO/UNDO counts, PageLSN checks/unknowns/skips/checked applies, legacy replays,
+  REDO/UNDO counts, DPT candidate/absence/before-recLSN skips, PageLSN
+  checks/unknowns/skips/checked applies, legacy replays,
   recovery reads/writes, AlwaysRedo comparison counters, and phase/total recovery
   nanoseconds;
-- `checkpoint`: checkpoint count, dirty writes, WAL/database/control syncs, checkpoint
+- `checkpoint`: sharp/fuzzy counts, DPT entries/oldest recLSN/retention floor, dirty
+  writes, WAL/database/control syncs, checkpoint
   latency, and separately reclaimed segments/bytes/reclamation latency; configuration
   records byte/statement thresholds and enablement;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;

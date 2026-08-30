@@ -5,7 +5,7 @@ logical byte stream split across files. PostgreSQL's
 [WAL configuration](https://www.postgresql.org/docs/current/wal-configuration.html)
 and [continuous-archiving](https://www.postgresql.org/docs/current/continuous-archiving.html)
 documentation provide architectural background for segment lifecycle and retention,
-but MiniDB++ uses its own small format, sharp checkpoints, full-page records, and
+but MiniDB++ uses its own small format, sharp/dirty-page-fuzzy checkpoints, full-page records, and
 synchronous single-threaded implementation.
 
 For `database.db`, active WAL lives in:
@@ -94,7 +94,7 @@ small and not rewritten during ordinary appends.
 The production capacity is 16 MiB. Tests/benchmarks may create a smaller persisted
 capacity; reopen must supply the same value. This is not a per-startup format toggle.
 
-## Sharp checkpoint and reclamation
+## Checkpoint reclamation floors
 
 After database sync, durable `CHECKPOINT_END`, and durable control publication, the
 checkpoint critical path is complete. MiniDB++ then synchronously rotates to a fresh
@@ -116,10 +116,15 @@ behind the floor. If that invariant could not be established, reclamation would 
 unsafe and must not proceed.
 
 If `database.db.ckpt` is missing or corrupt after reclamation, recovery scans retained
-segments, finds the newest matching durable checkpoint pair, starts from its logical
+segments, finds the newest matching durable sharp or fuzzy checkpoint pair, starts from its logical
 recovery LSN, and best-effort rebuilds the control file. `CHECKPOINT_END` is safe
 without control publication because database fsync preceded END fsync. Thus the
 control sidecar is not a single point of recoverability.
+
+For fuzzy checkpoints the floor is the minimum of fuzzy BEGIN and every captured DPT
+recLSN (and would include an ATT BEGIN if transaction overlap were supported). One old
+dirty period can retain WAL until the page is flushed and a later snapshot omits it.
+See [fuzzy-checkpoints.md](fuzzy-checkpoints.md).
 
 ## Legacy migration
 
@@ -155,5 +160,5 @@ The protocol guarantees clean flush/reopen persistence and tested process-crash
 boundaries, not arbitrary power-loss atomicity across database, WAL, control, and
 directory operations. Persistent PageLSN values remain global logical LSNs across
 segment reclamation and enable selective REDO of retained records. There is still no
-fuzzy checkpoint, dirty-page table, CLR, physiological/logical logging, concurrent
+transaction-overlapping checkpoint, CLR, physiological/logical logging, concurrent
 transaction, locking, MVCC, background writer, group commit, or WAL archive.
