@@ -73,21 +73,36 @@ bool crossValidate(const CheckpointSlot& slot, const LogManager& log) {
         || slot.recoveryStartOffset > log.lastValidOffset()) return false;
     const auto endRecord = log.readRecordAt(slot.checkpointEndLsn);
     if (endRecord.lsn != slot.checkpointEndLsn
-        || endRecord.type != LogRecordType::CheckpointEnd) return false;
+        || (endRecord.type != LogRecordType::CheckpointEnd
+            && endRecord.type != LogRecordType::FuzzyCheckpointEnd)) return false;
     validateCheckpointRecord(endRecord);
-    const auto end = decodeCheckpointEndLogPayload(endRecord.payload);
     const auto encodedEndSize = wal_record_layout::HEADER_SIZE + endRecord.payload.size();
+    if (endRecord.type == LogRecordType::CheckpointEnd) {
+        const auto end = decodeCheckpointEndLogPayload(endRecord.payload);
+        if (end.checkpointId != slot.checkpointId
+            || end.recoveryStartOffset != slot.recoveryStartOffset
+            || end.databasePageCount != slot.databasePageCount
+            || end.nextTransactionId != slot.nextTransactionId
+            || endRecord.lsn + encodedEndSize != slot.recoveryStartOffset) return false;
+        const auto beginRecord = log.readRecordAt(end.checkpointBeginLsn);
+        if (beginRecord.lsn != end.checkpointBeginLsn
+            || beginRecord.type != LogRecordType::CheckpointBegin) return false;
+        validateCheckpointRecord(beginRecord);
+        return decodeCheckpointBeginLogPayload(beginRecord.payload).checkpointId
+            == slot.checkpointId;
+    }
+    const auto end = decodeFuzzyCheckpointEndLogPayload(endRecord.payload);
     if (end.checkpointId != slot.checkpointId
-        || end.recoveryStartOffset != slot.recoveryStartOffset
+        || end.checkpointBeginLsn != slot.recoveryStartOffset
         || end.databasePageCount != slot.databasePageCount
         || end.nextTransactionId != slot.nextTransactionId
-        || endRecord.lsn + encodedEndSize != slot.recoveryStartOffset) return false;
+        || endRecord.lsn + encodedEndSize != slot.walFileSizeAtCheckpoint) return false;
     const auto beginRecord = log.readRecordAt(end.checkpointBeginLsn);
     if (beginRecord.lsn != end.checkpointBeginLsn
-        || beginRecord.type != LogRecordType::CheckpointBegin) return false;
+        || beginRecord.type != LogRecordType::FuzzyCheckpointBegin) return false;
     validateCheckpointRecord(beginRecord);
-    const auto begin = decodeCheckpointBeginLogPayload(beginRecord.payload);
-    return begin.checkpointId == slot.checkpointId;
+    return decodeFuzzyCheckpointBeginLogPayload(beginRecord.payload).checkpointId
+        == slot.checkpointId;
 }
 
 } // namespace

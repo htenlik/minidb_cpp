@@ -71,6 +71,11 @@ void validateConfig(const BenchmarkConfig& config) {
     if (config.redoPersistedPercent > 100) {
         throw std::invalid_argument("redo persisted percent must be between 0 and 100");
     }
+    if (config.benchmark == "checkpoint_retention"
+        && config.redoPersistedPercent != 0 && config.redoPersistedPercent != 100) {
+        throw std::invalid_argument(
+            "checkpoint_retention requires redo persisted percent 0 or 100");
+    }
     if (config.walPayloadBytes + wal_record_layout::HEADER_SIZE
         > config.walSegmentBytes) {
         throw std::invalid_argument("WAL record does not fit configured segment payload");
@@ -200,6 +205,11 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
         } else if (argument == "--checkpoint-statements") {
             result.config.checkpointStatements = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
+        } else if (argument == "--checkpoint-mode") {
+            const auto mode = requireValue(arguments, index, argument);
+            if (mode == "sharp") result.config.checkpointMode = CheckpointMode::Sharp;
+            else if (mode == "fuzzy") result.config.checkpointMode = CheckpointMode::Fuzzy;
+            else throw std::invalid_argument("checkpoint mode must be 'sharp' or 'fuzzy'");
         } else if (argument == "--redo-persisted-percent") {
             const auto value = parseUnsigned(requireValue(arguments, index, argument), argument);
             if (value > 100) {
@@ -255,6 +265,7 @@ std::string usageText() {
         "  --wal-update-mode MODE full-page (default), byte-range, or adaptive updates\n"
         "  --checkpoint-wal-bytes N automatic checkpoint WAL-growth bytes; 0 disables\n"
         "  --checkpoint-statements N automatic checkpoint commit count; 0 disables\n"
+        "  --checkpoint-mode MODE sharp (default) or fuzzy checkpoint semantics\n"
         "  --redo-persisted-percent N persisted recovery-tail updates, 0..100\n"
         "  --tuple-sizes MODE    small, medium, large, or mixed\n"
         "  --seed N              deterministic seed (default 12345)\n"
@@ -283,7 +294,8 @@ std::vector<std::string> supportedBenchmarkNames() {
         "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
         "txn_bplus_insert", "txn_mixed", "txn_wal_delta_friendly",
         "txn_wal_fragmentation", "recovery_full_scan", "recovery_loser",
-        "checkpoint_latency", "recovery_checkpoint_compare", "recovery_page_lsn_compare",
+        "checkpoint_latency", "checkpoint_retention", "recovery_checkpoint_compare",
+        "recovery_page_lsn_compare",
     };
 }
 
@@ -410,6 +422,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << walUpdateModeName(config.walUpdateMode) << '"'
                << ",\"checkpoint_wal_bytes\":" << config.checkpointWalBytes
                << ",\"checkpoint_statements\":" << config.checkpointStatements
+               << ",\"checkpoint_mode\":\"" << checkpointModeName(config.checkpointMode)
+               << '"'
                << ",\"redo_persisted_percent\":" << config.redoPersistedPercent
                << ",\"checkpoint_enabled\":"
                << ((config.checkpointWalBytes != 0 || config.checkpointStatements != 0)
@@ -534,6 +548,14 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"page_lsn_unknown\":" << result.recovery.recovery.pageLsnUnknown
                << ",\"redo_skipped_by_page_lsn\":"
                << result.recovery.recovery.redoSkippedByPageLsn
+               << ",\"redo_candidates\":" << result.recovery.recovery.redoCandidates
+               << ",\"redo_skipped_not_in_dpt\":"
+               << result.recovery.recovery.redoSkippedNotInDpt
+               << ",\"redo_skipped_before_rec_lsn\":"
+               << result.recovery.recovery.redoSkippedBeforeRecLsn
+               << ",\"redo_page_lsn_checks\":"
+               << result.recovery.recovery.redoPageLsnChecks
+               << ",\"redo_applied\":" << result.recovery.recovery.redoApplied
                << ",\"redo_skip_ratio\":"
                << result.recovery.recovery.redoSkipRatio()
                << ",\"redo_applied_after_page_lsn_check\":"
@@ -550,6 +572,13 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"total_ns\":" << result.recovery.recovery.totalNs
                << ",\"checkpoint_used\":"
                << (result.recovery.recovery.checkpointUsed ? "true" : "false")
+               << ",\"checkpoint_mode\":\""
+               << checkpointModeName(result.recovery.recovery.checkpointMode) << '"'
+               << ",\"checkpoint_dirty_page_count\":"
+               << result.recovery.recovery.checkpointDirtyPageCount
+               << ",\"oldest_checkpoint_rec_lsn\":"
+               << result.recovery.recovery.oldestCheckpointRecLsn
+               << ",\"redo_start_lsn\":" << result.recovery.recovery.redoStartLsn
                << ",\"wal_bytes_skipped\":" << result.recovery.recovery.walBytesSkipped
                << ",\"wal_bytes_scanned\":" << result.recovery.recovery.walBytesScanned
                << ",\"full_scan_records_analyzed\":"
@@ -575,6 +604,14 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"wal_forces\":" << result.checkpoint.walForces
                << ",\"database_syncs\":" << result.checkpoint.databaseSyncs
                << ",\"control_file_syncs\":" << result.checkpoint.controlFileSyncs
+               << ",\"sharp_checkpoints\":"
+               << result.checkpoint.sharpCheckpointsCompleted
+               << ",\"fuzzy_checkpoints\":"
+               << result.checkpoint.fuzzyCheckpointsCompleted
+               << ",\"dpt_entries_captured\":"
+               << result.checkpoint.dptEntriesCaptured
+               << ",\"oldest_rec_lsn\":" << result.checkpoint.oldestRecLsn
+               << ",\"retention_floor_lsn\":" << result.checkpoint.retentionFloorLsn
                << ",\"segments_reclaimed\":" << result.checkpoint.segmentsReclaimed
                << ",\"wal_bytes_reclaimed\":" << result.checkpoint.walBytesReclaimed
                << ",\"reclamation_ns\":" << result.checkpoint.reclamationDurationNs
@@ -613,6 +650,8 @@ std::string formatHuman(const BenchmarkResult& result) {
            << (result.configuration.cacheMode == CacheMode::Hot ? "hot" : "reopen") << '\n'
            << "WAL update mode: "
            << walUpdateModeName(result.configuration.walUpdateMode) << '\n'
+           << "checkpoint mode: "
+           << checkpointModeName(result.configuration.checkpointMode) << '\n'
            << "environment: " << result.environment.versionContext << ", git "
            << result.environment.gitCommit << ", " << result.environment.compiler << ", "
            << result.environment.buildType << ", " << result.environment.platform << '\n'

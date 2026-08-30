@@ -64,10 +64,12 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 
 Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
 `5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, `7 CHECKPOINT_END`,
-`8 PAGE_DELTA_UPDATE`, `9 PAGE_UPDATE_V2`, and `10 PAGE_DELTA_UPDATE_V2`.
+`8 PAGE_DELTA_UPDATE`, `9 PAGE_UPDATE_V2`, `10 PAGE_DELTA_UPDATE_V2`,
+`11 FUZZY_CHECKPOINT_BEGIN`, and `12 FUZZY_CHECKPOINT_END`.
 IDs 2 and 8 remain immutable legacy encodings; IDs 9 and 10 add explicit
 `beforePageLsn` and enable selective REDO. Production uses both physical update encodings and both
-checkpoint records; COMPENSATION remains reserved.
+sharp/fuzzy checkpoint records; COMPENSATION remains reserved. Fuzzy payload layouts are
+in [fuzzy-checkpoints.md](fuzzy-checkpoints.md).
 `TransactionId` is `uint64_t`, with zero reserved
 as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
 16 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
@@ -186,10 +188,10 @@ A batch size of 1, 10, or 100 is a synchronous experiment, not group commit.
 
 MiniDB++ guarantees statement atomicity across tested process crashes: durable-COMMIT
 winners are REDOed and a tail loser is undone. Sharp checkpoints bound normal recovery
-analysis to the post-checkpoint tail, while segmented WAL permits safe whole-segment
-deletion behind that boundary. Logical WAL generation continues to rise,
-while retained physical bytes drop after checkpoints. There is no archive/PITR,
-fuzzy checkpoint, dirty-page table/`recLSN`, CLR, user transaction SQL, concurrency,
+to their tail; fuzzy checkpoints retain history back to the oldest required recLSN.
+Segmented WAL deletes only whole segments behind the corresponding floor. Logical WAL
+generation continues to rise while physical retention depends on dirty-page lifetime.
+There is no archive/PITR, transaction-overlapping checkpoint, CLR, user transaction SQL, concurrency,
 group commit, or torn-page protection.
 
 ## Reference

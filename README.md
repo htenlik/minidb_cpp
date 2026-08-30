@@ -19,7 +19,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - Implicit atomic recovery units for mutating SQL statements
 - STEAL / NO-FORCE physical REDO and UNDO with full-page or byte-range WAL
 - Persistent PageLSNs with database-format-v2 selective REDO and v1 migration
-- Sharp checkpoints and checkpoint-bounded startup recovery
+- Sharp and opt-in fuzzy checkpoints with DPT/recLSN-bounded startup recovery
 - Subprocess crash-injection, randomized differential, corruption, and sanitizer tests
 - Deterministic benchmark and observability framework
 
@@ -179,10 +179,11 @@ See [wal.md](docs/wal.md), [wal-byte-range.md](docs/wal-byte-range.md),
 
 ## Checkpoints and segmented WAL
 
-Sharp, quiescent checkpoints flush the bounded pool and publish a double-slot recovery
-pointer. The WAL is split into fixed-capacity segments; after checkpoint publication,
-obsolete whole segments behind the retained recovery boundary are safely reclaimed.
-See [checkpoints.md](docs/checkpoints.md) and
+Sharp checkpoints flush the bounded pool; opt-in fuzzy checkpoints instead persist a
+Dirty Page Table while dirty pages remain resident. Both publish through the same
+double-slot recovery pointer. Segmented WAL reclaims only history older than the
+selected mode's recovery floor. See [checkpoints.md](docs/checkpoints.md),
+[fuzzy-checkpoints.md](docs/fuzzy-checkpoints.md), and
 [wal-segments.md](docs/wal-segments.md).
 
 ## Benchmarks
@@ -229,6 +230,7 @@ used during release verification.
 - [Persistent PageLSN and selective REDO](docs/page-lsn.md)
 - [Crash recovery](docs/recovery.md)
 - [Sharp checkpoints](docs/checkpoints.md)
+- [Fuzzy checkpoints, DPT, and recLSN](docs/fuzzy-checkpoints.md)
 - [Segmented WAL lifecycle](docs/wal-segments.md)
 - [Benchmarking](docs/benchmarking.md)
 - [Wire protocol](docs/wire-protocol.md)
@@ -241,7 +243,7 @@ used during release verification.
 - There is no user-visible transaction syntax, MVCC, locking, or isolation model.
 - Byte-range/adaptive WAL adds diff CPU cost; adaptive bounds each update to the smaller
   existing physical encoding, while full-page logging remains the default.
-- Sharp checkpoints are synchronous and require a quiescent engine.
+- Checkpoints are synchronous; fuzzy mode is opt-in and transaction overlap is deferred.
 - There is no point-in-time recovery or WAL archive.
 - Query planning, joins, aggregation, and secondary indexes are not implemented.
 - The TCP endpoint has no TLS, authentication, authorization, or multi-client execution;
@@ -250,7 +252,7 @@ used during release verification.
 ## Future work
 
 - Finer-grained physiological/logical WAL and recovery experiments
-- Fuzzy-checkpoint and dirty-page-table experiments
+- Transaction-overlapping checkpoint and recovery experiments
 - Multi-transaction concurrency and isolation
 - Additional indexes and query-planning functionality
 

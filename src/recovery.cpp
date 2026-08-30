@@ -33,6 +33,39 @@ struct AnalyzedTransaction {
     std::vector<const LogRecord*> updates;
 };
 
+struct PageUpdateIdentity {
+    PageId pageId = INVALID_PAGE_ID;
+    bool beforePageExisted = false;
+};
+
+PageUpdateIdentity pageUpdateIdentity(const LogRecord& record) {
+    if (record.type == LogRecordType::PageUpdate) {
+        const auto update = decodePageUpdateLogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    if (record.type == LogRecordType::PageDeltaUpdate) {
+        const auto update = decodePageDeltaUpdateLogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    if (record.type == LogRecordType::PageUpdateV2) {
+        const auto update = decodePageUpdateV2LogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    if (record.type == LogRecordType::PageDeltaUpdateV2) {
+        const auto update = decodePageDeltaUpdateV2LogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    throw WalError(WalErrorKind::CorruptRecord,
+                   "WAL record is not a page-update record");
+}
+
+bool isPageUpdateRecord(LogRecordType type) noexcept {
+    return type == LogRecordType::PageUpdate
+        || type == LogRecordType::PageDeltaUpdate
+        || type == LogRecordType::PageUpdateV2
+        || type == LogRecordType::PageDeltaUpdateV2;
+}
+
 TransactionId nextTransactionIdFrom(const WalScanResult& scan) {
     TransactionId maximum = 0;
     for (const auto& record : scan.records) maximum = std::max(maximum, record.transactionId);
@@ -46,12 +79,41 @@ std::optional<CheckpointSlot> discoverRetainedCheckpoint(const LogManager& logMa
     if (!logManager.isSegmented()) return std::nullopt;
     const auto scan = logManager.scan();
     std::map<CheckpointId, std::pair<Lsn, CheckpointBeginLogPayload>> begins;
+    std::map<CheckpointId, Lsn> fuzzyBegins;
     std::optional<CheckpointSlot> newest;
     for (const auto& record : scan.records) {
         if (record.type == LogRecordType::CheckpointBegin) {
             validateCheckpointRecord(record);
             const auto payload = decodeCheckpointBeginLogPayload(record.payload);
             begins[payload.checkpointId] = {record.lsn, payload};
+            continue;
+        }
+        if (record.type == LogRecordType::FuzzyCheckpointBegin) {
+            validateCheckpointRecord(record);
+            const auto payload = decodeFuzzyCheckpointBeginLogPayload(record.payload);
+            fuzzyBegins[payload.checkpointId] = record.lsn;
+            continue;
+        }
+        if (record.type == LogRecordType::FuzzyCheckpointEnd) {
+            validateCheckpointRecord(record);
+            const auto payload = decodeFuzzyCheckpointEndLogPayload(record.payload);
+            const auto begin = fuzzyBegins.find(payload.checkpointId);
+            if (begin == fuzzyBegins.end() || begin->second != payload.checkpointBeginLsn) {
+                continue;
+            }
+            const auto recordEnd = record.lsn + wal_record_layout::HEADER_SIZE
+                + record.payload.size();
+            if (!newest.has_value() || payload.checkpointId > newest->checkpointId) {
+                newest = CheckpointSlot{
+                    1,
+                    payload.checkpointId,
+                    record.lsn,
+                    payload.checkpointBeginLsn,
+                    payload.databasePageCount,
+                    payload.nextTransactionId,
+                    recordEnd,
+                };
+            }
             continue;
         }
         if (record.type != LogRecordType::CheckpointEnd) continue;
@@ -115,19 +177,47 @@ RecoveryStats RecoveryManager::recover() {
         stats.checkpointControlPresent = std::filesystem::exists(checkpointControl_->path());
     }
     const auto analysisStart = std::chrono::steady_clock::now();
+    std::map<PageId, Lsn> dirtyPageTable;
+    std::optional<FuzzyCheckpointEndLogPayload> fuzzyCheckpoint;
     if (checkpoint.slot.has_value()) {
         stats.checkpointUsed = true;
         stats.fullScanFallback = false;
         stats.checkpointId = checkpoint.slot->checkpointId;
         stats.checkpointEndLsn = checkpoint.slot->checkpointEndLsn;
+        stats.checkpointWalHighWater = checkpoint.slot->walFileSizeAtCheckpoint;
         stats.checkpointGeneration = checkpoint.slot->generation;
         stats.recoveryStartOffset = checkpoint.slot->recoveryStartOffset;
         stats.walBytesSkipped = checkpoint.slot->recoveryStartOffset
             - wal_file_layout::HEADER_SIZE;
         stats.highestCheckpointId = checkpoint.slot->checkpointId;
+        const auto endRecord = logManager_.readRecordAt(checkpoint.slot->checkpointEndLsn);
+        if (endRecord.type == LogRecordType::FuzzyCheckpointEnd) {
+            validateCheckpointRecord(endRecord);
+            fuzzyCheckpoint = decodeFuzzyCheckpointEndLogPayload(endRecord.payload);
+            if (!fuzzyCheckpoint->activeTransactions.empty()) {
+                throw WalError(
+                    WalErrorKind::CorruptRecord,
+                    "Active-transaction fuzzy checkpoints are not supported");
+            }
+            stats.checkpointMode = CheckpointMode::Fuzzy;
+            stats.checkpointDirtyPageCount = fuzzyCheckpoint->dirtyPages.size();
+            for (const auto& entry : fuzzyCheckpoint->dirtyPages) {
+                dirtyPageTable.emplace(entry.pageId, entry.recLsn);
+                if (!isValidLsn(stats.oldestCheckpointRecLsn)
+                    || entry.recLsn < stats.oldestCheckpointRecLsn) {
+                    stats.oldestCheckpointRecLsn = entry.recLsn;
+                }
+            }
+        }
     }
-    auto scan = logManager_.scanFrom(stats.recoveryStartOffset);
-    stats.walBytesScanned = scan.fileBytes - stats.recoveryStartOffset;
+    const auto analysisBoundary = stats.recoveryStartOffset;
+    auto scanStart = analysisBoundary;
+    if (fuzzyCheckpoint.has_value() && isValidLsn(stats.oldestCheckpointRecLsn)) {
+        scanStart = std::min(scanStart, stats.oldestCheckpointRecLsn);
+    }
+    stats.walBytesSkipped = scanStart - logManager_.oldestRetainedLsn();
+    auto scan = logManager_.scanFrom(scanStart);
+    stats.walBytesScanned = scan.fileBytes - scanStart;
     if (scan.truncatedTail) {
         stats.repairedTail = true;
         stats.tailBytesTruncated = scan.fileBytes - scan.validBytes;
@@ -142,11 +232,29 @@ RecoveryStats RecoveryManager::recover() {
     std::map<TransactionId, AnalyzedTransaction> transactions;
     std::optional<TransactionId> activeTransaction;
     std::map<CheckpointId, CheckpointBeginLogPayload> checkpointBegins;
+    std::map<CheckpointId, Lsn> fuzzyCheckpointBegins;
     TransactionId highestTailTransactionId = 0;
+    std::vector<const LogRecord*> redo;
     for (const auto& record : scan.records) {
+        if (record.lsn < analysisBoundary) {
+            if (isPageUpdateRecord(record.type)) {
+                validateTransactionRecordPayload(record);
+                redo.push_back(&record);
+            } else if (record.type == LogRecordType::CheckpointBegin
+                       || record.type == LogRecordType::CheckpointEnd
+                       || record.type == LogRecordType::FuzzyCheckpointBegin
+                       || record.type == LogRecordType::FuzzyCheckpointEnd) {
+                validateCheckpointRecord(record);
+            } else {
+                validateTransactionRecordPayload(record);
+            }
+            continue;
+        }
         ++stats.recordsAnalyzed;
         if (record.type == LogRecordType::CheckpointBegin
-            || record.type == LogRecordType::CheckpointEnd) {
+            || record.type == LogRecordType::CheckpointEnd
+            || record.type == LogRecordType::FuzzyCheckpointBegin
+            || record.type == LogRecordType::FuzzyCheckpointEnd) {
             validateCheckpointRecord(record);
             if (activeTransaction.has_value()) {
                 throw WalError(WalErrorKind::CorruptRecord,
@@ -157,7 +265,7 @@ RecoveryStats RecoveryManager::recover() {
                 checkpointBegins[payload.checkpointId] = payload;
                 stats.highestCheckpointId = std::max(stats.highestCheckpointId,
                                                       payload.checkpointId);
-            } else {
+            } else if (record.type == LogRecordType::CheckpointEnd) {
                 const auto payload = decodeCheckpointEndLogPayload(record.payload);
                 const auto foundBegin = checkpointBegins.find(payload.checkpointId);
                 if (foundBegin == checkpointBegins.end()
@@ -166,6 +274,21 @@ RecoveryStats RecoveryManager::recover() {
                         != record.lsn + wal_record_layout::HEADER_SIZE + record.payload.size()) {
                     throw WalError(WalErrorKind::CorruptRecord,
                                    "CHECKPOINT_END does not match a preceding BEGIN");
+                }
+                stats.highestCheckpointId = std::max(stats.highestCheckpointId,
+                                                      payload.checkpointId);
+            } else if (record.type == LogRecordType::FuzzyCheckpointBegin) {
+                const auto payload = decodeFuzzyCheckpointBeginLogPayload(record.payload);
+                fuzzyCheckpointBegins[payload.checkpointId] = record.lsn;
+                stats.highestCheckpointId = std::max(stats.highestCheckpointId,
+                                                      payload.checkpointId);
+            } else {
+                const auto payload = decodeFuzzyCheckpointEndLogPayload(record.payload);
+                const auto foundBegin = fuzzyCheckpointBegins.find(payload.checkpointId);
+                if (foundBegin == fuzzyCheckpointBegins.end()
+                    || payload.checkpointBeginLsn != foundBegin->second) {
+                    throw WalError(WalErrorKind::CorruptRecord,
+                                   "FUZZY_CHECKPOINT_END does not match a preceding BEGIN");
                 }
                 stats.highestCheckpointId = std::max(stats.highestCheckpointId,
                                                       payload.checkpointId);
@@ -192,34 +315,18 @@ RecoveryStats RecoveryManager::recover() {
             || record.prevLsn != found->second.lastLsn) {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
-        if (record.type == LogRecordType::PageUpdate
-            || record.type == LogRecordType::PageDeltaUpdate
-            || record.type == LogRecordType::PageUpdateV2
-            || record.type == LogRecordType::PageDeltaUpdateV2) {
-            PageId pageId = INVALID_PAGE_ID;
-            bool beforePageExisted = false;
-            if (record.type == LogRecordType::PageUpdate) {
-                const auto update = decodePageUpdateLogPayload(record.payload);
-                pageId = update.pageId;
-                beforePageExisted = update.beforePageExisted;
-            } else if (record.type == LogRecordType::PageDeltaUpdate) {
-                const auto update = decodePageDeltaUpdateLogPayload(record.payload);
-                pageId = update.pageId;
-                beforePageExisted = update.beforePageExisted;
-            } else if (record.type == LogRecordType::PageUpdateV2) {
-                const auto update = decodePageUpdateV2LogPayload(record.payload);
-                pageId = update.pageId;
-                beforePageExisted = update.beforePageExisted;
-            } else {
-                const auto update = decodePageDeltaUpdateV2LogPayload(record.payload);
-                pageId = update.pageId;
-                beforePageExisted = update.beforePageExisted;
-            }
+        if (isPageUpdateRecord(record.type)) {
+            const auto identity = pageUpdateIdentity(record);
+            const auto pageId = identity.pageId;
+            const auto beforePageExisted = identity.beforePageExisted;
             if (beforePageExisted != (pageId < found->second.begin.startPageCount)) {
                 throw WalError(WalErrorKind::CorruptRecord,
                                "Page-update existence flag contradicts transaction BEGIN");
             }
             found->second.updates.push_back(&record);
+            if (fuzzyCheckpoint.has_value() && !dirtyPageTable.contains(pageId)) {
+                dirtyPageTable.emplace(pageId, record.lsn);
+            }
         } else if (record.type == LogRecordType::Commit) {
             found->second.status = TransactionStatus::Committed;
             ++stats.committedTransactions;
@@ -239,7 +346,6 @@ RecoveryStats RecoveryManager::recover() {
     }
     stats.nextTransactionId = std::max(baseNext, highestTailTransactionId + 1);
 
-    std::vector<const LogRecord*> redo;
     AnalyzedTransaction* loser = nullptr;
     for (auto& [id, transaction] : transactions) {
         static_cast<void>(id);
@@ -256,11 +362,30 @@ RecoveryStats RecoveryManager::recover() {
     std::sort(redo.begin(), redo.end(), [](const LogRecord* left, const LogRecord* right) {
         return left->lsn < right->lsn;
     });
+    stats.redoCandidates = redo.size();
+    if (fuzzyCheckpoint.has_value() && !dirtyPageTable.empty()) {
+        stats.redoStartLsn = std::min_element(
+            dirtyPageTable.begin(), dirtyPageTable.end(),
+            [](const auto& left, const auto& right) { return left.second < right.second; })
+            ->second;
+    }
     stats.analysisNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - analysisStart).count());
     const auto redoStart = std::chrono::steady_clock::now();
     for (const auto* record : redo) {
+        if (fuzzyCheckpoint.has_value()) {
+            const auto identity = pageUpdateIdentity(*record);
+            const auto foundDpt = dirtyPageTable.find(identity.pageId);
+            if (foundDpt == dirtyPageTable.end()) {
+                ++stats.redoSkippedNotInDpt;
+                continue;
+            }
+            if (record->lsn < foundDpt->second) {
+                ++stats.redoSkippedBeforeRecLsn;
+                continue;
+            }
+        }
         const auto beforeCount = diskManager_.pageCount();
         bool applied = true;
         if (record->type == LogRecordType::PageUpdate) {
@@ -302,6 +427,7 @@ RecoveryStats RecoveryManager::recover() {
             if (redoPolicy_ == RedoPolicy::PageLsnSelectiveRedo
                 && pageExists && beforePageExisted) {
                 ++stats.pageLsnChecks;
+                ++stats.redoPageLsnChecks;
                 const auto persistentLsn = readPersistentPageLsn(current);
                 if (!isValidLsn(persistentLsn)) {
                     ++stats.pageLsnUnknown;
@@ -338,6 +464,7 @@ RecoveryStats RecoveryManager::recover() {
         }
         stats.databasePagesExtended += diskManager_.pageCount() - beforeCount;
         if (applied) {
+            ++stats.redoApplied;
             ++stats.databaseWrites;
             ++stats.recoveryPageWrites;
             ++stats.pagesRedone;

@@ -55,13 +55,19 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
     diskManager_.writePage(frame.pageId, frame.data);
     recoveryFailPoint("after_database_page_write");
     frame.dirty = false;
+    frame.recLsn = INVALID_LSN;
     ++stats_.physicalPageWrites;
 }
 
 void BufferPoolManager::prepareFrameForWrite(BufferFrame& frame) {
     if (recoveryHook_ == nullptr) return;
     const auto lsn = recoveryHook_->preparePageForWrite(frame.pageId, frame.data);
-    if (isValidLsn(lsn)) frame.pageLsn = lsn;
+    if (isValidLsn(lsn)) {
+        frame.pageLsn = lsn;
+        if (!isValidLsn(frame.recLsn)) frame.recLsn = lsn;
+    } else if (!isValidLsn(frame.recLsn)) {
+        frame.dirty = false;
+    }
 }
 
 void BufferPoolManager::ensureWalDurable(Lsn pageLsn) {
@@ -113,6 +119,7 @@ void BufferPoolManager::installPage(
     frame.dirty = dirty;
     frame.valid = true;
     frame.pageLsn = INVALID_LSN;
+    frame.recLsn = INVALID_LSN;
     const auto [position, inserted] = pageTable_.emplace(pageId, frameId);
     static_cast<void>(position);
     if (!inserted) throw std::logic_error("Page already exists in buffer page table");
@@ -208,6 +215,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
         diskManager_.writePage(pageId, frame.data);
         recoveryFailPoint("after_database_page_write");
         frame.dirty = false;
+        frame.recLsn = INVALID_LSN;
         ++stats_.physicalPageWrites;
     }
     return true;
@@ -231,6 +239,7 @@ void BufferPoolManager::flushAll() {
         diskManager_.writePage(frame.pageId, frame.data);
         recoveryFailPoint("after_database_page_write");
         frame.dirty = false;
+        frame.recLsn = INVALID_LSN;
         ++stats_.physicalPageWrites;
     }
     diskManager_.flush();
@@ -360,6 +369,27 @@ std::optional<Lsn> BufferPoolManager::pageLsn(PageId pageId) const noexcept {
     return frameId.has_value() ? std::optional<Lsn>(frames_[*frameId].pageLsn) : std::nullopt;
 }
 
+std::optional<Lsn> BufferPoolManager::recLsn(PageId pageId) const noexcept {
+    const auto frameId = frameIdForPage(pageId);
+    return frameId.has_value() ? std::optional<Lsn>(frames_[*frameId].recLsn) : std::nullopt;
+}
+
+std::vector<DirtyPageEntry> BufferPoolManager::dirtyPageTableSnapshot() const {
+    std::vector<DirtyPageEntry> result;
+    result.reserve(pageTable_.size());
+    for (const auto& frame : frames_) {
+        if (!frame.valid || !frame.dirty) continue;
+        if (!isValidLsn(frame.recLsn) || !isValidLsn(frame.pageLsn)) {
+            throw std::logic_error("Dirty page recovery metadata is not fully prepared");
+        }
+        result.push_back({frame.pageId, frame.recLsn, frame.pageLsn});
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        return left.pageId < right.pageId;
+    });
+    return result;
+}
+
 Lsn BufferPoolManager::guardPageLsn(FrameId frameId, PageId pageId) const {
     return requireGuardFrame(frameId, pageId).pageLsn;
 }
@@ -376,6 +406,7 @@ void BufferPoolManager::setPageLsn(FrameId frameId, PageId pageId, Lsn pageLsn) 
         throw std::invalid_argument("pageLSN cannot move backward");
     }
     frame.pageLsn = pageLsn;
+    if (frame.dirty && !isValidLsn(frame.recLsn)) frame.recLsn = pageLsn;
 }
 
 void BufferPoolManager::validate() const {
@@ -395,7 +426,7 @@ void BufferPoolManager::validate() const {
         const auto& frame = frames_[frameId];
         if (!frame.valid) {
             if (frame.pageId != INVALID_PAGE_ID || frame.pinCount != 0 || frame.dirty
-                || isValidLsn(frame.pageLsn)
+                || isValidLsn(frame.pageLsn) || isValidLsn(frame.recLsn)
                 || !freeSet.contains(frameId) || replacer_.isTracked(frameId)) {
                 throw std::logic_error("Invalid/free buffer frame has live state");
             }
@@ -419,6 +450,11 @@ void BufferPoolManager::validate() const {
         if (isValidLsn(frame.pageLsn)
             && (walProvider_ == nullptr || !walProvider_->containsLsn(frame.pageLsn))) {
             throw std::logic_error("Buffer frame pageLSN is unknown to its WAL provider");
+        }
+        if ((!frame.dirty && isValidLsn(frame.recLsn))
+            || (isValidLsn(frame.recLsn) && !isValidLsn(frame.pageLsn))
+            || (isValidLsn(frame.recLsn) && frame.recLsn > frame.pageLsn)) {
+            throw std::logic_error("Buffer frame recLSN is inconsistent with dirty state");
         }
     }
     for (const auto& [pageId, frameId] : pageTable_) {

@@ -18,8 +18,17 @@ int main() {
                     && results[0].timing.operationCount == 1,
                 "Checkpoint latency benchmark smoke result is invalid");
 
+        config.checkpointMode = minidb::CheckpointMode::Fuzzy;
+        results = minidb::bench::runConfiguredBenchmarks(config);
+        minidb::test::require(results.size() == 1 && results[0].validationPassed
+                    && results[0].checkpoint.fuzzyCheckpointsCompleted == 1
+                    && results[0].checkpoint.databaseSyncs == 0
+                    && results[0].checkpoint.dptEntriesCaptured != 0,
+                "Fuzzy checkpoint latency benchmark smoke result is invalid");
+
         config.benchmark = "recovery_checkpoint_compare";
         config.operations = 12;
+        config.checkpointMode = minidb::CheckpointMode::Sharp;
         results = minidb::bench::runConfiguredBenchmarks(config);
         minidb::test::require(results.size() == 1 && results[0].validationPassed
                     && results[0].recovery.recovery.checkpointUsed
@@ -27,6 +36,24 @@ int main() {
                     && results[0].recovery.recovery.recordsAnalyzed
                         < results[0].recovery.fullScanRecovery.recordsAnalyzed,
                 "Checkpoint recovery comparison did not measure bounded scanning");
+        config.checkpointMode = minidb::CheckpointMode::Fuzzy;
+        results = minidb::bench::runConfiguredBenchmarks(config);
+        minidb::test::require(results.size() == 1 && results[0].validationPassed
+                    && results[0].recovery.recovery.checkpointMode
+                        == minidb::CheckpointMode::Fuzzy
+                    && results[0].recovery.recovery.checkpointDirtyPageCount != 0,
+                "Fuzzy checkpoint recovery comparison did not use its DPT");
+
+        config.benchmark = "checkpoint_retention";
+        config.rows = 3;
+        config.operations = 2;
+        config.redoPersistedPercent = 0;
+        results = minidb::bench::runConfiguredBenchmarks(config);
+        minidb::test::require(results.size() == 1 && results[0].validationPassed
+                    && results[0].timing.operationCount == 3
+                    && results[0].checkpoint.fuzzyCheckpointsCompleted == 3
+                    && results[0].checkpoint.oldestRecLsn != minidb::INVALID_LSN,
+                "Long-lived dirty-page retention benchmark is invalid");
         std::cout << "checkpoint_benchmark_test passed\n";
         return 0;
     } catch (const std::exception& error) {

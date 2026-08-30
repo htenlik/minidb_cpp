@@ -1,11 +1,10 @@
-# Sharp checkpoints and bounded recovery
+# Sharp and fuzzy checkpoints
 
-MiniDB++ uses a quiescent, or **sharp**, checkpoint. It is intentionally
-simpler than ARIES fuzzy checkpointing: MiniDB++ has one serial mutating statement at
-most, so checkpointing waits until no statement or rollback is active, requires zero
-pinned buffer frames, and flushes every dirty frame. There is no transaction-table or
-dirty-page-table snapshot, `recLSN`, or CLR. Persistent PageLSN is used independently
-to skip already-present tail REDO updates.
+MiniDB++ preserves its quiescent **sharp** checkpoint and adds an opt-in, dirty-page
+**fuzzy** checkpoint. Sharp remains the default and its record bytes are unchanged: it
+requires zero pinned frames, flushes every dirty frame, and synchronizes the database.
+Fuzzy mode also runs between statements, but permits pinned frames and persists a
+DPT/recLSN snapshot without writing database pages. Persistent PageLSN complements both.
 
 The resulting invariant is:
 
@@ -16,7 +15,7 @@ The resulting invariant is:
 
 ## Durability protocol
 
-`CheckpointManager::checkpoint()` performs these ordered steps:
+`CheckpointManager::checkpoint(CheckpointMode::Sharp)` performs these ordered steps:
 
 1. require no active statement/rollback and `BufferPoolManager::totalPinCount() == 0`;
 2. allocate a monotonic nonzero `CheckpointId` and append `CHECKPOINT_BEGIN`;
@@ -105,12 +104,15 @@ without destroying the other slot. A 64-byte write is not assumed atomic. At ope
 slot is decoded independently and candidates are tried by descending generation.
 
 A CRC-valid slot is still untrusted. Its END LSN must identify a valid system
-`CHECKPOINT_END`; ID, recovery offset, page count, and next transaction ID must match;
-the recovery offset must equal the record end; and the referenced BEGIN must match. A
+sharp or fuzzy checkpoint END; ID, recovery offset, page count, next transaction ID,
+record end, and referenced matching BEGIN must agree with that mode. A
 torn or mismatched newest slot falls back to the older cross-valid slot. If control is
 absent/unusable after reclamation, recovery scans retained WAL for the newest complete
 durable checkpoint pair and rebuilds the sidecar best-effort; byte 64 may no longer
 exist. The sidecar is an optimization, not a source of database contents.
+
+The fuzzy record layouts, durability order, restart DPT, and retention rule are specified
+in [fuzzy-checkpoints.md](fuzzy-checkpoints.md). The control layout/version is unchanged.
 
 ## Checkpoint-aware startup
 
@@ -128,10 +130,11 @@ checkpoint-ID continuity but do not become authoritative without control publica
 
 ## Policy, metrics, and boundary
 
-The internal API is `CheckpointManager::checkpoint()`. There is no `CHECKPOINT` SQL
+The internal API is `CheckpointManager::checkpoint(mode)`. There is no `CHECKPOINT` SQL
 statement. Automatic policy is evaluated only after successful mutating commit.
 `--checkpoint-wal-bytes N` uses post-checkpoint WAL growth (default 64 MiB), while
-`--checkpoint-statements N` is an optional commit counter; zero disables either. There
+`--checkpoint-statements N` is an optional commit counter; zero disables either.
+`--checkpoint-mode sharp|fuzzy` selects the mode and defaults to `sharp`. There
 is no mandatory shutdown checkpoint.
 
 Metrics report attempts/completions/failures, dirty writes, forces/syncs, latency, WAL
@@ -139,14 +142,14 @@ growth, control selection/fallback, and skipped/scanned WAL bytes. Benchmarks
 `checkpoint_latency` and `recovery_checkpoint_compare` expose the checkpoint-cost versus
 recovery-work tradeoff without timing assertions.
 
-Segmented WAL rotates after publication and retains the checkpoint base, one extra closed
+Segmented WAL rotates after publication and retains the mode-specific history floor, one extra closed
 predecessor, and every tail/active segment; older whole segments are deleted. Checkpoint
 critical latency and reclamation latency/bytes are measured separately. It adds no
-archive/PITR, fuzzy checkpoint, dirty-page table, CLR, finer-grained WAL, or concurrency.
+archive/PITR, transaction-overlapping checkpoint, CLR, finer-grained WAL, or concurrency.
 PageLSN complements rather than replaces the scan boundary: checkpoints reduce WAL
 analysis volume, while PageLSN reduces writes within the selected tail. See
 [wal-segments.md](wal-segments.md) and [page-lsn.md](page-lsn.md).
 
 The design is informed by C. Mohan et al., “ARIES: A Transaction Recovery Method
 Supporting Fine-Granularity Locking and Partial Rollbacks Using Write-Ahead Logging,”
-but is explicitly not an ARIES fuzzy checkpoint.
+but MiniDB++ is explicitly not ARIES-compliant.

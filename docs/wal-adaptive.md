@@ -150,8 +150,8 @@ single mixed adaptive transaction before/after COMMIT, and force that mixed chai
 8,300-byte WAL segments. Checkpoint, reclamation, and lost-control rebuild tests also
 run in Adaptive mode.
 
-Persistent PageLSN now enables selective REDO, but there is still no fuzzy checkpoint,
-dirty-page table, compensation log record, concurrency, locking, MVCC, or crash-atomic
+Persistent PageLSN and the optional fuzzy-checkpoint DPT enable two-stage selective
+REDO, but there is still no compensation log record, concurrency, locking, MVCC, or crash-atomic
 checkpoint/update protocol beyond the documented statement model. Adaptive mode computes
 canonical deltas even when it later chooses FullPage, trading CPU work for bounded WAL
 volume.

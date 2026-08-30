@@ -34,6 +34,11 @@ Page guards own pins into those frames. Persistent storage objects own only refe
 to their longer-lived managers plus PageIds such as `HeapMetaPageId` or
 `IndexMetaPageId`.
 
+Recovery metadata remains close to each frame: PageId, volatile PageLSN, dirty state,
+and the earliest recLSN of the current dirty period. Checkpoints obtain a canonical DPT
+snapshot through a focused buffer-pool API; SQL, Table, and storage formats do not own a
+duplicate DPT.
+
 The hard lifetime rule is:
 
 > Frame bytes may be accessed only while the guard that pins that page is alive.
@@ -120,11 +125,11 @@ production graph attaches LogManager and the
 coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encoding.
 
 The engine remains single-threaded. Guards are not locks or latches. Physical
-analysis/REDO/UNDO provides one implicit recovery unit per mutating statement. A
-quiescent full-buffer checkpoint and double-slotted `database.db.ckpt` recovery pointer
-bound startup scanning; segmented WAL reclaims whole files behind that boundary.
+analysis/REDO/UNDO provides one implicit recovery unit per mutating statement. Sharp
+full-buffer and opt-in fuzzy DPT checkpoints share the double-slotted `database.db.ckpt`
+recovery pointer; segmented WAL reclaims whole files behind the mode-specific floor.
 Selective REDO additionally skips a committed v2 update when the disk PageLSN is equal
-or newer. There is still no archive/PITR, fuzzy checkpoint, dirty-page table, `recLSN`,
+or newer. There is still no archive/PITR, transaction-overlapping checkpoint,
 CLR, lock, MVCC, concurrent transaction, or torn-page protection. See [wal.md](wal.md),
-[wal-segments.md](wal-segments.md), [recovery.md](recovery.md),
+[wal-segments.md](wal-segments.md), [fuzzy-checkpoints.md](fuzzy-checkpoints.md), [recovery.md](recovery.md),
 [checkpoints.md](checkpoints.md), and [page-lsn.md](page-lsn.md).

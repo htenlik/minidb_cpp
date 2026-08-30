@@ -114,7 +114,7 @@ expensive ordering avoids compensation log records while statement errors are un
 
 ## Startup recovery
 
-Startup first selects a durable sharp checkpoint when possible, so production is ordered
+Startup first selects the newest durable sharp or fuzzy checkpoint when possible, so production is ordered
 as follows:
 
 ```text
@@ -123,8 +123,10 @@ DiskManager -> deferred LogManager -> checkpoint control -> tail repair -> analy
             -> recovered-loser ABORT fsync -> BufferPool -> PageAllocator -> Catalog
 ```
 
-With a cross-valid control slot, analysis begins at its logical `recoveryStartOffset`;
-no earlier transaction record is scanned or replayed. If control is unusable after
+With a cross-valid sharp slot, analysis begins after END. With a fuzzy slot it begins at
+fuzzy BEGIN, seeds the restart DPT from END, and derives physical REDO start from the
+minimum recLSN. The control field is then an analysis boundary, not a claim that earlier
+pages are durable; see [fuzzy-checkpoints.md](fuzzy-checkpoints.md). If control is unusable after
 reclamation, retained WAL supplies the newest safe checkpoint base. Without a checkpoint
 it begins at the oldest retained logical position (byte 64 for unreclaimed WAL). An
 incomplete final record is truncated to the last valid record boundary. Interior
@@ -154,21 +156,24 @@ append/force, database writes, COMMIT, rollback, and recovery phases. Production
 the variable unset. Subprocess tests therefore bypass buffer/log destructors and exercise
 real reopen behavior.
 
-Recovery statistics additionally report checkpoint-control presence/use, validation
+Recovery statistics additionally report checkpoint mode, DPT size, oldest recLSN and
+REDO start, checkpoint-control presence/use, validation
 failures, full-scan fallback, recovery start, and skipped/scanned WAL bytes. They report
 scanned records/transactions, winners/aborts/losers,
 REDO/UNDO/truncation/extension, database writes/syncs, PageLSN checks/unknowns/skips/
-checked applies, legacy replays, recovery page reads/writes, repaired tail bytes, and analysis,
+checked applies, DPT absence/before-recLSN skips, distinct PageLSN checks and applied
+REDOs, legacy replays, recovery page reads/writes, repaired tail bytes, and analysis,
 REDO, UNDO, and total nanoseconds. Runtime transaction statistics report logical begins,
 commits/rollbacks/zero-write units, first-written pages, per-encoding update counts,
 observed logical byte transitions, payload/total WAL bytes, represented bytes, range
 counts, record-size samples, delta-computation time, commit fsyncs, and rollback writes.
 Benchmarks derive amplification from those observed transitions.
 
-There is a quiescent sharp checkpoint, documented in [checkpoints.md](checkpoints.md).
-Obsolete whole WAL segments are deleted after sharp checkpoints; see
+Sharp and dirty-page-fuzzy checkpoints are documented in [checkpoints.md](checkpoints.md)
+and [fuzzy-checkpoints.md](fuzzy-checkpoints.md). Obsolete whole WAL segments are deleted
+only behind the selected mode's retention floor; see
 [wal-segments.md](wal-segments.md). Persistent PageLSN reduces redundant REDO writes but
-does not add a fuzzy dirty-page table, `recLSN`, CLR, archive/PITR, concurrent transaction,
+does not add CLR, archive/PITR, concurrent transaction,
 lock, MVCC, isolation, torn-page protection, or crash-safe group commit. A usable
 checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
 before the response reaches a client is inherently ambiguous: the statement committed,

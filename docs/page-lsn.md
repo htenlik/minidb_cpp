@@ -6,8 +6,9 @@ disk already contains that update or a later one.
 
 This is a focused optimization of MiniDB++'s serial, physical REDO/UNDO protocol. It is
 informed by the ARIES pageLSN rule, but it does not make MiniDB++ ARIES-compliant:
-MiniDB++ still has sharp rather than fuzzy checkpoints, no dirty-page table or `recLSN`,
-no compensation log records, and at most one active statement transaction. See the
+MiniDB++ now combines PageLSN with sharp or opt-in dirty-page-fuzzy checkpoints and
+`recLSN`, but still has no compensation log records and at most one active statement
+transaction. See [fuzzy-checkpoints.md](fuzzy-checkpoints.md) and the
 [ARIES publication record](https://research.ibm.com/publications/aries-a-transaction-recovery-method-supporting-fine-granularity-locking-and-partial-rollbacks-using-write-ahead-logging).
 
 ## LSN representation
@@ -148,10 +149,10 @@ legal because global LSNs do not rebase.
 
 ## Checkpoints, limitations, and observability
 
-Sharp checkpoints and PageLSN are complementary. A checkpoint moves the recovery scan
-start forward and enables whole-segment reclamation; PageLSN suppresses redundant page
-writes among records that still must be scanned. This implementation remains a sharp
-checkpoint design and adds no dirty-page table, fuzzy checkpoint, or `recLSN`.
+Checkpoint DPT and PageLSN are complementary filters. During fuzzy recovery, DPT
+membership and recLSN eliminate records before a page read; PageLSN then suppresses
+writes for surviving records already represented on disk. Sharp checkpoints instead
+empty the DPT and move the recovery boundary past their END.
 
 PageLSN does not provide torn-page detection. CRC32C protects WAL records, not database
 pages, and an eight-byte database write is not assumed atomic. There is no WAL archive
