@@ -1434,6 +1434,11 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
                               config.checkpointMode});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
+        // Establish identical persisted pages first, then dirty existing pages so
+        // fuzzy recovery exercises DPT filtering followed by persistent PageLSN.
+        static_cast<void>(server.checkpointManager().checkpoint(CheckpointMode::Sharp));
+        static_cast<void>(server.sqlEngine().execute(
+            "UPDATE users SET active = FALSE"));
         static_cast<void>(server.checkpointManager().checkpoint(config.checkpointMode));
         for (std::uint64_t index = 0; index < TAIL; ++index) {
             const auto key = config.operations + index;
