@@ -243,6 +243,40 @@ void testAllWalUpdateModes() {
                     + std::string(minidb::walUpdateModeName(mode)));
     }
 }
+
+void testLongLivedDirtyPageRetentionFloor() {
+    minidb::test::TemporaryDatabase database("fuzzy_long_dirty_retention");
+    minidb::net::DatabaseServer server(database.path().string(), fuzzyConfig(0, 16 * 1024));
+    createItems(server);
+    static_cast<void>(server.checkpointManager().checkpoint(minidb::CheckpointMode::Sharp));
+    static_cast<void>(server.sqlEngine().execute("INSERT INTO items VALUES (1, 'anchor')"));
+    const auto initialDpt = server.bufferPool().dirtyPageTableSnapshot();
+    require(!initialDpt.empty(), "Long-lived dirty-page setup has an empty DPT");
+    const auto oldestRec = std::min_element(
+        initialDpt.begin(), initialDpt.end(),
+        [](const auto& left, const auto& right) { return left.recLsn < right.recLsn; })
+        ->recLsn;
+
+    for (std::uint32_t key = 2; key < 10; ++key) {
+        static_cast<void>(server.sqlEngine().execute(
+            "INSERT INTO items VALUES (" + std::to_string(key) + ", 'tail')"));
+        static_cast<void>(server.checkpointManager().checkpoint(minidb::CheckpointMode::Fuzzy));
+        require(server.checkpointManager().stats().retentionFloorLsn == oldestRec,
+                "Long-lived dirty page did not pin the fuzzy retention floor");
+    }
+    require(server.logManager().oldestRetainedLsn() <= oldestRec,
+            "Required recLSN history was reclaimed while its page remained dirty");
+
+    const auto dirty = server.bufferPool().dirtyPageTableSnapshot();
+    for (const auto& entry : dirty) {
+        require(server.bufferPool().flushPage(entry.pageId),
+                "Could not flush long-lived dirty page");
+    }
+    static_cast<void>(server.checkpointManager().checkpoint(minidb::CheckpointMode::Fuzzy));
+    require(server.checkpointManager().stats().retentionFloorLsn > oldestRec
+                && server.logManager().oldestRetainedLsn() > oldestRec,
+            "Flushing the long-lived page did not advance recovery/reclamation history");
+}
 } // namespace
 
 int main() {
@@ -254,6 +288,7 @@ int main() {
         testDptEvolutionAndManyCheckpoints();
         testReverseMixedModes();
         testAllWalUpdateModes();
+        testLongLivedDirtyPageRetentionFloor();
         std::cout << "fuzzy_checkpoint_test passed\n";
         return 0;
     } catch (const std::exception& error) {
