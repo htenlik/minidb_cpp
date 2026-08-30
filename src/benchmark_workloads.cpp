@@ -1398,7 +1398,7 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
                 const auto pageId = server.pageAllocator().allocatePage();
                 auto guard = requireWritePage(
                     server.bufferPool(), pageId, "prepare checkpoint latency dirty page");
-                guard.data()[128] = static_cast<std::byte>((page + 1) & 0xffU);
+                guard.data()[128] = static_cast<std::byte>((page % 255U) + 1U);
             }
             server.recoveryCoordinator().commitStatement();
         }
