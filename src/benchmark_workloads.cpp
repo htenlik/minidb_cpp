@@ -1387,25 +1387,32 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK), 0, 0,
                               config.walSegmentBytes,
-                              config.walUpdateMode});
-        static_cast<void>(server.checkpointManager().checkpoint());
+                              config.walUpdateMode,
+                              config.checkpointMode});
+        static_cast<void>(server.checkpointManager().checkpoint(CheckpointMode::Sharp));
         server.checkpointManager().resetStats();
         server.bufferPool().resetStats();
         if (config.operations != 0) {
             server.recoveryCoordinator().beginStatement();
             for (std::uint64_t page = 0; page < config.operations; ++page) {
-                static_cast<void>(server.pageAllocator().allocatePage());
+                const auto pageId = server.pageAllocator().allocatePage();
+                auto guard = requireWritePage(
+                    server.bufferPool(), pageId, "prepare checkpoint latency dirty page");
+                guard.data()[128] = static_cast<std::byte>((page + 1) & 0xffU);
             }
             server.recoveryCoordinator().commitStatement();
         }
-        measure(latency, [&] { static_cast<void>(server.checkpointManager().checkpoint()); });
+        measure(latency, [&] {
+            static_cast<void>(server.checkpointManager().checkpoint(config.checkpointMode));
+        });
         server.catalog().validate();
         server.pageAllocator().validate();
         result = finish("checkpoint_latency", config, latency, {}, {},
                         storageMetrics(server.diskManager(), server.bufferPool(),
                                        server.pageAllocator()),
                         0.0, 0.0, server.bufferPool().stats());
-        result.storageBackend = "sharp_checkpoint";
+        result.storageBackend = config.checkpointMode == CheckpointMode::Sharp
+            ? "sharp_checkpoint" : "fuzzy_checkpoint";
         result.checkpoint = server.checkpointManager().stats();
         result.wal.manager = server.logManager().stats();
     }
@@ -1423,10 +1430,11 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
                               static_cast<std::size_t>(config.bufferFrames),
                               static_cast<std::size_t>(config.lruK), 0, 0,
                               config.walSegmentBytes,
-                              config.walUpdateMode});
+                              config.walUpdateMode,
+                              config.checkpointMode});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
-        static_cast<void>(server.checkpointManager().checkpoint());
+        static_cast<void>(server.checkpointManager().checkpoint(config.checkpointMode));
         for (std::uint64_t index = 0; index < TAIL; ++index) {
             const auto key = config.operations + index;
             static_cast<void>(server.sqlEngine().execute(
@@ -1465,7 +1473,8 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     }
     BenchmarkResult result;
     result.benchmark = "recovery_checkpoint_compare";
-    result.storageBackend = "sharp_checkpoint_recovery";
+    result.storageBackend = config.checkpointMode == CheckpointMode::Sharp
+        ? "sharp_checkpoint_recovery" : "fuzzy_checkpoint_recovery";
     result.seed = config.seed;
     result.configuration = config;
     result.timing = summarizeTimings(boundedLatency, totalLatency(boundedLatency));
@@ -1474,7 +1483,9 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
     result.recovery.walBytes = walPhysicalBytes(config.databasePath);
     result.environment = currentEnvironment();
     result.validationPassed = bounded.checkpointUsed
-        && bounded.recordsAnalyzed < full.recordsAnalyzed;
+        && bounded.checkpointMode == config.checkpointMode
+        && (config.checkpointMode == CheckpointMode::Fuzzy
+            || bounded.recordsAnalyzed < full.recordsAnalyzed);
     cleanupDatabase(config);
     return result;
 }
