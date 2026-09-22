@@ -210,6 +210,14 @@ add_executable(recovery_test tests/recovery_test.cpp)
 target_link_libraries(recovery_test PRIVATE minidb_core)
 add_test(NAME recovery_test COMMAND recovery_test)
 
+add_executable(restartable_undo_test tests/restartable_undo_test.cpp)
+target_link_libraries(restartable_undo_test PRIVATE minidb_core)
+add_test(NAME restartable_undo_test COMMAND restartable_undo_test)
+
+add_executable(restartable_undo_model_test tests/restartable_undo_model_test.cpp)
+target_link_libraries(restartable_undo_model_test PRIVATE minidb_core)
+add_test(NAME restartable_undo_model_test COMMAND restartable_undo_model_test)
+
 add_executable(page_lsn_recovery_test tests/page_lsn_recovery_test.cpp)
 target_link_libraries(page_lsn_recovery_test PRIVATE minidb_network)
 add_test(NAME page_lsn_recovery_test COMMAND page_lsn_recovery_test)
