@@ -174,6 +174,10 @@ add_executable(recovery_log_test tests/recovery_log_test.cpp)
 target_link_libraries(recovery_log_test PRIVATE minidb_core)
 add_test(NAME recovery_log_test COMMAND recovery_log_test)
 
+add_executable(clr_codec_test tests/clr_codec_test.cpp)
+target_link_libraries(clr_codec_test PRIVATE minidb_core)
+add_test(NAME clr_codec_test COMMAND clr_codec_test)
+
 add_executable(checkpoint_codec_test tests/checkpoint_codec_test.cpp)
 target_link_libraries(checkpoint_codec_test PRIVATE minidb_core)
 add_test(NAME checkpoint_codec_test COMMAND checkpoint_codec_test)

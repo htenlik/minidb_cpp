@@ -587,6 +587,71 @@ PageDeltaUpdateV2LogPayload decodePageDeltaUpdateV2LogPayload(
     return payload;
 }
 
+std::vector<std::byte> encodeCompensationLogPayload(
+    const CompensationLogPayload& payload) {
+    using namespace compensation_log_layout;
+    if (payload.pageId == INVALID_PAGE_ID || !payload.pageExisted
+        || !isValidLsn(payload.compensatedUpdateLsn)
+        || payload.compensatedUpdateLsn < wal_file_layout::HEADER_SIZE
+        || (isValidLsn(payload.undoNextLsn)
+            && payload.undoNextLsn < wal_file_layout::HEADER_SIZE)
+        || (isValidLsn(payload.undoNextLsn)
+            && payload.undoNextLsn >= payload.compensatedUpdateLsn)) {
+        throw WalError(WalErrorKind::InvalidArgument, "CLR payload references are invalid");
+    }
+    std::vector<std::byte> bytes(PAYLOAD_SIZE);
+    byte_codec::writeUint32(bytes, PAGE_ID_OFFSET, payload.pageId);
+    std::uint32_t flags = PAGE_EXISTED;
+    if (payload.pageSupportsLsn) flags |= PAGE_SUPPORTS_LSN;
+    byte_codec::writeUint32(bytes, FLAGS_OFFSET, flags);
+    byte_codec::writeUint32(
+        bytes, PAGE_SIZE_OFFSET, static_cast<std::uint32_t>(database_format::PAGE_SIZE));
+    byte_codec::writeUint16(bytes, VERSION_OFFSET, CURRENT_VERSION);
+    byte_codec::writeUint16(
+        bytes, HEADER_SIZE_OFFSET, static_cast<std::uint16_t>(HEADER_SIZE));
+    byte_codec::writeUint64(bytes, UNDO_NEXT_LSN_OFFSET, payload.undoNextLsn);
+    byte_codec::writeUint64(
+        bytes, COMPENSATED_UPDATE_LSN_OFFSET, payload.compensatedUpdateLsn);
+    std::copy(payload.compensatedImage.begin(), payload.compensatedImage.end(),
+              bytes.begin() + PAGE_IMAGE_OFFSET);
+    return bytes;
+}
+
+CompensationLogPayload decodeCompensationLogPayload(
+    std::span<const std::byte> bytes) {
+    using namespace compensation_log_layout;
+    if (bytes.size() != PAYLOAD_SIZE) {
+        throw WalError(WalErrorKind::CorruptRecord, "CLR payload has the wrong size");
+    }
+    const auto flags = byte_codec::readUint32(bytes, FLAGS_OFFSET);
+    if ((flags & ~VALID_FLAGS) != 0 || (flags & PAGE_EXISTED) == 0
+        || byte_codec::readUint32(bytes, PAGE_SIZE_OFFSET) != database_format::PAGE_SIZE
+        || byte_codec::readUint16(bytes, VERSION_OFFSET) != CURRENT_VERSION
+        || byte_codec::readUint16(bytes, HEADER_SIZE_OFFSET) != HEADER_SIZE
+        || byte_codec::readUint64(bytes, RESERVED_OFFSET) != 0) {
+        throw WalError(WalErrorKind::CorruptRecord, "CLR payload header is malformed");
+    }
+    CompensationLogPayload payload;
+    payload.pageId = byte_codec::readUint32(bytes, PAGE_ID_OFFSET);
+    payload.pageExisted = true;
+    payload.pageSupportsLsn = (flags & PAGE_SUPPORTS_LSN) != 0;
+    payload.undoNextLsn = byte_codec::readUint64(bytes, UNDO_NEXT_LSN_OFFSET);
+    payload.compensatedUpdateLsn = byte_codec::readUint64(
+        bytes, COMPENSATED_UPDATE_LSN_OFFSET);
+    if (payload.pageId == INVALID_PAGE_ID
+        || !isValidLsn(payload.compensatedUpdateLsn)
+        || payload.compensatedUpdateLsn < wal_file_layout::HEADER_SIZE
+        || (isValidLsn(payload.undoNextLsn)
+            && payload.undoNextLsn < wal_file_layout::HEADER_SIZE)
+        || (isValidLsn(payload.undoNextLsn)
+            && payload.undoNextLsn >= payload.compensatedUpdateLsn)) {
+        throw WalError(WalErrorKind::CorruptRecord, "CLR payload references are invalid");
+    }
+    std::copy_n(bytes.begin() + PAGE_IMAGE_OFFSET, payload.compensatedImage.size(),
+                payload.compensatedImage.begin());
+    return payload;
+}
+
 void validateTransactionRecordPayload(const LogRecord& record) {
     if (record.transactionId == INVALID_TRANSACTION_ID) {
         throw WalError(WalErrorKind::CorruptRecord, "Transaction record uses transaction ID zero");
@@ -625,13 +690,24 @@ void validateTransactionRecordPayload(const LogRecord& record) {
         }
         static_cast<void>(decodePageDeltaUpdateV2LogPayload(record.payload));
         return;
+    case LogRecordType::Compensation: {
+        if (!isValidLsn(record.prevLsn)) {
+            throw WalError(WalErrorKind::CorruptRecord, "CLR record lacks prevLSN");
+        }
+        const auto payload = decodeCompensationLogPayload(record.payload);
+        if (!isValidLsn(record.lsn)
+            || payload.compensatedUpdateLsn >= record.lsn
+            || (isValidLsn(payload.undoNextLsn) && payload.undoNextLsn >= record.lsn)) {
+            throw WalError(WalErrorKind::CorruptRecord, "CLR has a self/future WAL reference");
+        }
+        return;
+    }
     case LogRecordType::Commit:
     case LogRecordType::Abort:
         if (!record.payload.empty() || !isValidLsn(record.prevLsn)) {
             throw WalError(WalErrorKind::CorruptRecord, "Transaction terminator is malformed");
         }
         return;
-    case LogRecordType::Compensation:
     case LogRecordType::CheckpointBegin:
     case LogRecordType::CheckpointEnd:
     case LogRecordType::FuzzyCheckpointBegin:
