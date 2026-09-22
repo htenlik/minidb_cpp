@@ -562,6 +562,30 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.recovery.redoAppliedAfterPageLsnCheck
                << ",\"legacy_redo_records\":"
                << result.recovery.recovery.legacyRedoRecords
+               << ",\"redo_user_update_applied\":"
+               << result.recovery.recovery.redoUserUpdateApplied
+               << ",\"redo_user_update_skipped_page_lsn\":"
+               << result.recovery.recovery.redoUserUpdateSkippedByPageLsn
+               << ",\"redo_clr_applied\":"
+               << result.recovery.recovery.redoClrApplied
+               << ",\"redo_clr_skipped_page_lsn\":"
+               << result.recovery.recovery.redoClrSkippedByPageLsn
+               << ",\"undo_user_records_visited\":"
+               << result.recovery.recovery.undoUserRecordsVisited
+               << ",\"undo_user_records_compensated\":"
+               << result.recovery.recovery.undoUserRecordsCompensated
+               << ",\"undo_clrs_encountered\":"
+               << result.recovery.recovery.undoClrsEncountered
+               << ",\"clrs_appended\":"
+               << result.recovery.recovery.clrsAppended
+               << ",\"undo_records_skipped_by_clr\":"
+               << result.recovery.recovery.undoRecordsSkippedByClr
+               << ",\"undo_restart_count\":"
+               << result.recovery.recovery.undoRestartCount
+               << ",\"undo_page_writes\":"
+               << result.recovery.recovery.undoPageWrites
+               << ",\"undo_wal_bytes\":"
+               << result.recovery.recovery.undoWalBytes
                << ",\"recovery_page_reads\":"
                << result.recovery.recovery.recoveryPageReads
                << ",\"recovery_page_writes\":"

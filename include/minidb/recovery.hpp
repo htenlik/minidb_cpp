@@ -43,7 +43,20 @@ struct RecoveryStats {
     std::uint64_t redoSkippedNotInDpt = 0;
     std::uint64_t redoSkippedBeforeRecLsn = 0;
     std::uint64_t redoApplied = 0;
+    std::uint64_t redoUserUpdateApplied = 0;
+    std::uint64_t redoUserUpdateSkippedByPageLsn = 0;
+    std::uint64_t redoClrApplied = 0;
+    std::uint64_t redoClrSkippedByPageLsn = 0;
     std::uint64_t legacyRedoRecords = 0;
+    std::uint64_t analyzedClrCount = 0;
+    std::uint64_t undoUserRecordsVisited = 0;
+    std::uint64_t undoUserRecordsCompensated = 0;
+    std::uint64_t undoClrsEncountered = 0;
+    std::uint64_t clrsAppended = 0;
+    std::uint64_t undoRecordsSkippedByClr = 0;
+    std::uint64_t undoRestartCount = 0;
+    std::uint64_t undoPageWrites = 0;
+    std::uint64_t undoWalBytes = 0;
     std::uint64_t recoveryPageReads = 0;
     std::uint64_t recoveryPageWrites = 0;
     std::uint64_t tailBytesTruncated = 0;
@@ -68,6 +81,9 @@ struct RecoveryStats {
     std::uint64_t checkpointGeneration = 0;
     CheckpointId highestCheckpointId = INVALID_CHECKPOINT_ID;
     TransactionId nextTransactionId = 1;
+    Lsn loserLastLsn = INVALID_LSN;
+    Lsn loserLastUndoNextLsn = INVALID_LSN;
+    bool durableAbortObserved = false;
     bool repairedTail = false;
 
     [[nodiscard]] double redoSkipRatio() const noexcept {

@@ -256,7 +256,8 @@ void testRepeatedDeltaWritesPreserveOriginalUndoAndFinalRedo(
         minidb::DiskManager disk(loserFixture.database.path().string());
         minidb::LogManager log(loserFixture.wal);
         const auto stats = minidb::RecoveryManager(disk, log).recover();
-        require(stats.pagesUndone == 1
+        require(stats.pagesUndone == 2
+                    && stats.clrsAppended == 2
                     && diskByte(disk, loserPage, 10) == std::byte{0}
                     && diskByte(disk, loserPage, 20) == std::byte{0},
                 "Repeated-delta loser did not restore the full original page state");
