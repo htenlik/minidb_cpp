@@ -160,5 +160,11 @@ The protocol guarantees clean flush/reopen persistence and tested process-crash
 boundaries, not arbitrary power-loss atomicity across database, WAL, control, and
 directory operations. Persistent PageLSN values remain global logical LSNs across
 segment reclamation and enable selective REDO of retained records. There is still no
-transaction-overlapping checkpoint, CLR, physiological/logical logging, concurrent
+transaction-overlapping checkpoint, physiological/logical logging, concurrent
 transaction, locking, MVCC, background writer, group commit, or WAL archive.
+
+Recovery-written CLRs keep the loser's ordinary transaction chain alive through their
+`prevLSN` and `undoNextLSN` references. Checkpoint/reclamation cannot run while the
+single active statement or startup recovery is in progress, so it cannot delete BEGIN,
+remaining update targets, or CLR progress prematurely. After durable ABORT, the next
+sharp or fuzzy checkpoint uses its normal floor and may reclaim the obsolete chain.

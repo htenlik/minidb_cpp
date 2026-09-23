@@ -141,13 +141,16 @@ ordering, and the single-active-transaction model.
 - A transaction with durable ABORT is skipped because rollback preceded that ABORT.
 - A loser has BEGIN/PAGE_UPDATE records but no terminal record and must be the final
   active transaction. Existing-page original images or delta before-ranges are applied,
-  PageLSN-aware records restore their explicit `beforePageLsn`, and appended pages are
-  truncated using BEGIN's page count.
+  each original existing-page update is physically compensated by a forced type-5 CLR.
+  The compensated page receives the CLR LSN, while appended pages are truncated using
+  BEGIN's page count.
 
-Recovery runs REDO winners, then UNDO the tail loser, fsyncs the database, and finally
-appends/fsyncs the loser's ABORT. Full-page replacement, repeated original before-images,
-and delayed ABORT make crashes during REDO, UNDO, or completion safe to retry. Recovery
-does no tuple, tree, catalog, or SQL interpretation.
+Recovery runs REDO winners and durable CLRs, then follows the tail loser's WAL chain.
+An original update appends/forces a physical CLR before its compensated page is written;
+a CLR is REDO-able but never undone and redirects traversal through `undoNextLSN`.
+After all work and idempotent appended-page truncation, recovery appends/fsyncs ABORT.
+See [clr-restartable-undo.md](clr-restartable-undo.md). Recovery does no tuple, tree,
+catalog, or SQL interpretation.
 
 ## Failpoints, metrics, and limitations
 
@@ -169,18 +172,24 @@ observed logical byte transitions, payload/total WAL bytes, represented bytes, r
 counts, record-size samples, delta-computation time, commit fsyncs, and rollback writes.
 Benchmarks derive amplification from those observed transitions.
 
+CLR-specific counters separate user-update REDO apply/PageLSN skip from CLR apply/skip,
+and report analyzed CLRs, original UNDO records visited/compensated, CLRs encountered or
+appended, CLR-directed skips, restart detection, compensation writes, and encoded CLR
+WAL bytes. `loserLastLsn`, the most recent `undoNextLSN`, and durable-ABORT observation
+support diagnostics without introducing a general transaction table.
+
 Sharp and dirty-page-fuzzy checkpoints are documented in [checkpoints.md](checkpoints.md)
 and [fuzzy-checkpoints.md](fuzzy-checkpoints.md). Obsolete whole WAL segments are deleted
 only behind the selected mode's retention floor; see
 [wal-segments.md](wal-segments.md). Persistent PageLSN reduces redundant REDO writes but
-does not add CLR, archive/PITR, concurrent transaction,
+does not add archive/PITR, concurrent transaction,
 lock, MVCC, isolation, torn-page protection, or crash-safe group commit. A usable
 checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
 before the response reaches a client is inherently ambiguous: the statement committed,
 but the client must reconnect and query state. Wire request IDs are not deduplication
 tokens.
 
-This design is not ARIES. It adopts the persistent PageLSN REDO test, while ARIES also
-supports physiological logging, repeating history, compensation records, fuzzy
-checkpoints, fine-grained locking, and partial rollback. MiniDB++ retains a serial
-physical baseline. See the citation in [wal.md](wal.md).
+This design is not ARIES. It adopts PageLSN REDO tests, recLSN, fuzzy checkpoints, and
+restartable physical CLRs, but not physiological logging, transaction-table generality,
+fine-grained locking, or partial user rollback. MiniDB++ retains a serial physical
+baseline. See the citation in [wal.md](wal.md).

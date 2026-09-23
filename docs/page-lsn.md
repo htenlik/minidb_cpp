@@ -6,9 +6,9 @@ disk already contains that update or a later one.
 
 This is a focused optimization of MiniDB++'s serial, physical REDO/UNDO protocol. It is
 informed by the ARIES pageLSN rule, but it does not make MiniDB++ ARIES-compliant:
-MiniDB++ now combines PageLSN with sharp or opt-in dirty-page-fuzzy checkpoints and
-`recLSN`, but still has no compensation log records and at most one active statement
-transaction. See [fuzzy-checkpoints.md](fuzzy-checkpoints.md) and the
+MiniDB++ now combines PageLSN with sharp or opt-in dirty-page-fuzzy checkpoints,
+`recLSN`, and physical compensation log records, but still has at most one active
+statement transaction. See [fuzzy-checkpoints.md](fuzzy-checkpoints.md) and the
 [ARIES publication record](https://research.ibm.com/publications/aries-a-transaction-recovery-method-supporting-fine-granularity-locking-and-partial-rollbacks-using-write-ahead-logging).
 
 ## LSN representation
@@ -139,9 +139,10 @@ Legacy type-2/type-8 records always replay because they provide no safe comparis
 `AlwaysRedo` is retained as a diagnostic policy and must produce the same final bytes as
 the default `PageLsnSelectiveRedo` policy.
 
-Loser UNDO does not use the skip rule. It restores the original physical bytes and the
-explicit `beforePageLsn`; an unknown before value is restored as encoded zero. Thus a
-STEAL page from a loser cannot retain a misleading newer PageLSN after rollback.
+Loser UNDO does not use the user-update skip rule. It derives the original logical bytes,
+logs them in a CLR, and installs the CLR LSN rather than the historical `beforePageLsn`.
+On restart, CLR REDO uses the same `persistent PageLSN >= CLR LSN` skip rule. Thus the
+page describes the newest recovery WAL operation actually reflected by its bytes.
 
 Recovery validates known persistent LSNs against the logical WAL domain. Values below
 the WAL header or at/above the known end are rejected. A value in reclaimed history is

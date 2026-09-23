@@ -9,8 +9,8 @@ This is a deliberately serial subset of ideas used by ARIES-style recovery. The
 [original ARIES paper record](https://research.ibm.com/publications/aries-a-transaction-recovery-method-supporting-fine-granularity-locking-and-partial-rollbacks-using-write-ahead-logging)
 describes a broader protocol with transaction and dirty-page tables, PageLSNs, fuzzy
 checkpoints, CLRs, locking, and partial rollback. MiniDB++ is not ARIES-compliant: it has
-one implicit statement transaction at a time, no CLRs, and currently publishes fuzzy
-checkpoints only between statements.
+one implicit statement transaction at a time, physical restartable-UNDO CLRs, and
+publishes fuzzy checkpoints only between statements.
 
 ## Dirty Page Table ownership and lifetime
 
@@ -102,7 +102,8 @@ are not WAL-logged. Physical REDO starts at the minimum restart recLSN. An updat
 is rejected without a page read when its page is absent or `R < recLSN`; a surviving
 PageLSN-aware update is skipped when persistent `PageLSN >= R`. Legacy updates use the
 safe PageId/recLSN filter but never PageLSN skipping. Existing winner/loser analysis and
-serial loser UNDO remain unchanged.
+serial loser UNDO follows CLR `undoNextLSN` progress. A CLR is page-affecting and can
+conservatively seed a missing DPT entry at its own LSN.
 
 The retention floor is `min(fuzzy BEGIN, minimum DPT recLSN, minimum ATT BEGIN if
 supported)`, plus one retained predecessor segment. A page with an old recLSN therefore
@@ -111,4 +112,4 @@ period, allowing the floor to advance. Sharp checkpoints remain useful for an em
 simpler recovery, and aggressive reclamation.
 
 Neither mode makes multi-file operations crash-atomic. There is no background writer,
-CLR, concurrent transaction, locking, MVCC, WAL archive, or torn-page recovery.
+concurrent transaction, locking, MVCC, WAL archive, or torn-page recovery.

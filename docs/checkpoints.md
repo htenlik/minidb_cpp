@@ -145,7 +145,7 @@ recovery-work tradeoff without timing assertions.
 Segmented WAL rotates after publication and retains the mode-specific history floor, one extra closed
 predecessor, and every tail/active segment; older whole segments are deleted. Checkpoint
 critical latency and reclamation latency/bytes are measured separately. It adds no
-archive/PITR, transaction-overlapping checkpoint, CLR, finer-grained WAL, or concurrency.
+archive/PITR, transaction-overlapping checkpoint, physiological WAL, or concurrency.
 PageLSN complements rather than replaces the scan boundary: checkpoints reduce WAL
 analysis volume, while PageLSN reduces writes within the selected tail. See
 [wal-segments.md](wal-segments.md) and [page-lsn.md](page-lsn.md).
