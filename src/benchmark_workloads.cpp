@@ -1380,7 +1380,6 @@ BenchmarkResult runRecoveryBenchmark(
 
 BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
     removeDatabase(config);
-    std::uint64_t originalWalBytes = 0;
     std::uint64_t originalLogicalWalBytes = 0;
     {
         DiskManager disk(config.databasePath);
@@ -1401,7 +1400,6 @@ BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
         }
         disk.sync();
         log.flushAll();
-        originalWalBytes = log.physicalWalBytes();
         originalLogicalWalBytes = log.lastValidOffset() - wal_file_layout::HEADER_SIZE;
     }
 
@@ -1460,6 +1458,31 @@ BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
             if (record.type == LogRecordType::Compensation) ++clrCount;
         }
     }
+    const auto beforeCheckpointWalBytes = walPhysicalBytes(config.databasePath);
+    CheckpointStats checkpointStats;
+    LogManagerStats postCheckpointLogStats;
+    {
+        DiskManager disk(config.databasePath);
+        LogManager log(
+            walPathForDatabase(config.databasePath),
+            static_cast<std::size_t>(config.walBufferBytes),
+            LogOpenMode::EagerValidated,
+            WalStorageMode::Auto,
+            config.walSegmentBytes);
+        CheckpointControl control(checkpointPathForDatabase(config.databasePath));
+        RecoveryCoordinator coordinator(
+            disk, log, recovery.nextTransactionId, config.walUpdateMode);
+        BufferPoolManager pool(
+            disk, static_cast<std::size_t>(config.bufferFrames),
+            static_cast<std::size_t>(config.lruK), &log, &coordinator);
+        coordinator.attachBufferPool(pool);
+        CheckpointManager checkpoints(
+            coordinator, pool, disk, log, control, recovery,
+            CheckpointPolicy{0, 0, config.checkpointMode});
+        static_cast<void>(checkpoints.checkpoint(config.checkpointMode));
+        checkpointStats = checkpoints.stats();
+        postCheckpointLogStats = log.stats();
+    }
     BenchmarkResult result;
     result.benchmark = "recovery_clr_resume";
     result.storageBackend = "physical_clr_restartable_undo";
@@ -1473,8 +1496,10 @@ BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
         * (wal_record_layout::HEADER_SIZE + compensation_log_layout::PAYLOAD_SIZE);
     result.recovery.modeledRestartFromOriginalRecords = config.operations;
     result.recovery.recoveryRestarts = precompleted;
-    result.wal.physicalWalBytesBefore = originalWalBytes;
+    result.wal.physicalWalBytesBefore = beforeCheckpointWalBytes;
     result.wal.walRecords = totalRecordCount;
+    result.wal.manager = postCheckpointLogStats;
+    result.checkpoint = checkpointStats;
     result.environment = currentEnvironment();
     result.validationPassed = clrCount == config.operations
         && recovery.undoUserRecordsVisited == config.operations - precompleted
