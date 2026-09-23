@@ -52,7 +52,7 @@ and WAL payload/batch/buffer controls for controlled comparisons.
 Recovery-enabled workloads are `txn_insert`, `txn_update`, `txn_varchar_update`,
 `txn_delete`, `txn_bplus_insert`, `txn_mixed`, `recovery_full_scan`, `recovery_loser`,
 `checkpoint_latency`, `recovery_checkpoint_compare`,
-`recovery_page_lsn_compare`,
+`recovery_page_lsn_compare`, `recovery_clr_resume`,
 `wal_segment_rotation`, and `wal_reclamation`.
 Transaction results include per-encoding record counts, observed byte changes,
 payload/total WAL amplification, record-size/range distributions, diff CPU time, and
@@ -61,4 +61,9 @@ comparison reports full-history versus checkpoint-tail records/bytes/time. Confi
 automatic-policy metadata with `--checkpoint-wal-bytes` and `--checkpoint-statements`
 (zero disables). The PageLSN comparison recovers cloned identical inputs under
 selective and AlwaysRedo policies and reports checks, skips, applies, reads, and writes.
+`recovery_clr_resume` interprets `--operations` as loser update count and
+`--redo-persisted-percent` as completed UNDO progress before the final restart. Use
+0/25/50/75 with 10, 100, or 1000 updates to compare the modeled restart-from-original
+visit count against CLR resume and expose full-page CLR WAL volume. Its timing includes
+deliberately interrupted recovery passes and is not a universal speed claim.
 These are deterministic baselines, not timing-gated CI assertions.

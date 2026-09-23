@@ -3,6 +3,7 @@
 #include "minidb/catalog.hpp"
 #include "minidb/byte_codec.hpp"
 #include "minidb/database_server.hpp"
+#include "minidb/database_metadata_manager.hpp"
 #include "minidb/log_manager.hpp"
 #include "minidb/minidb_client.hpp"
 #include "minidb/page_allocator.hpp"
@@ -17,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <limits>
@@ -1376,6 +1378,111 @@ BenchmarkResult runRecoveryBenchmark(
     return result;
 }
 
+BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
+    removeDatabase(config);
+    std::uint64_t originalWalBytes = 0;
+    std::uint64_t originalLogicalWalBytes = 0;
+    {
+        DiskManager disk(config.databasePath);
+        const auto rootA = disk.appendPage();
+        const auto rootB = disk.appendPage();
+        LogManager log(
+            walPathForDatabase(config.databasePath),
+            static_cast<std::size_t>(config.walBufferBytes),
+            LogOpenMode::EagerValidated,
+            WalStorageMode::Auto,
+            config.walSegmentBytes);
+        RecoveryCoordinator coordinator(
+            disk, log, INVALID_TRANSACTION_ID, config.walUpdateMode);
+        DatabaseMetadataManager metadata(disk, coordinator, log);
+        coordinator.beginStatement();
+        for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+            metadata.updateCatalogRootPageId((operation & 1U) == 0 ? rootA : rootB);
+        }
+        disk.sync();
+        log.flushAll();
+        originalWalBytes = log.physicalWalBytes();
+        originalLogicalWalBytes = log.lastValidOffset() - wal_file_layout::HEADER_SIZE;
+    }
+
+    const auto precompleted = (config.operations * config.redoPersistedPercent) / 100U;
+    std::vector<std::uint64_t> latencies;
+    for (std::uint64_t completed = 0; completed < precompleted; ++completed) {
+        bool interrupted = false;
+        measure(latencies, [&] {
+            ::setenv("MINIDB_THROWPOINT", "recovery_after_compensation_page_write", 1);
+            try {
+                DiskManager disk(config.databasePath);
+                LogManager log(
+                    walPathForDatabase(config.databasePath),
+                    static_cast<std::size_t>(config.walBufferBytes),
+                    LogOpenMode::DeferredRecovery,
+                    WalStorageMode::Auto,
+                    config.walSegmentBytes);
+                static_cast<void>(RecoveryManager(disk, log).recover());
+            } catch (const std::runtime_error&) {
+                interrupted = true;
+            }
+            ::unsetenv("MINIDB_THROWPOINT");
+        });
+        if (!interrupted) {
+            ::unsetenv("MINIDB_THROWPOINT");
+            throw std::logic_error("CLR benchmark did not interrupt recovery");
+        }
+    }
+
+    RecoveryStats recovery;
+    measure(latencies, [&] {
+        DiskManager disk(config.databasePath);
+        LogManager log(
+            walPathForDatabase(config.databasePath),
+            static_cast<std::size_t>(config.walBufferBytes),
+            LogOpenMode::DeferredRecovery,
+            WalStorageMode::Auto,
+            config.walSegmentBytes);
+        recovery = RecoveryManager(disk, log).recover();
+        if (disk.databaseHeader().catalogRootPageId != INVALID_PAGE_ID) {
+            throw std::runtime_error("CLR benchmark did not restore page 0");
+        }
+    });
+
+    std::uint64_t clrCount = 0;
+    std::uint64_t totalRecordCount = 0;
+    {
+        LogManager log(
+            walPathForDatabase(config.databasePath),
+            static_cast<std::size_t>(config.walBufferBytes),
+            LogOpenMode::EagerValidated,
+            WalStorageMode::Auto,
+            config.walSegmentBytes);
+        for (const auto& record : log.scan().records) {
+            ++totalRecordCount;
+            if (record.type == LogRecordType::Compensation) ++clrCount;
+        }
+    }
+    BenchmarkResult result;
+    result.benchmark = "recovery_clr_resume";
+    result.storageBackend = "physical_clr_restartable_undo";
+    result.seed = config.seed;
+    result.configuration = config;
+    result.timing = summarizeTimings(latencies, totalLatency(latencies));
+    result.recovery.recovery = recovery;
+    result.recovery.walBytes = walPhysicalBytes(config.databasePath);
+    result.recovery.originalLoserWalBytes = originalLogicalWalBytes;
+    result.recovery.clrWalBytes = clrCount
+        * (wal_record_layout::HEADER_SIZE + compensation_log_layout::PAYLOAD_SIZE);
+    result.recovery.modeledRestartFromOriginalRecords = config.operations;
+    result.recovery.recoveryRestarts = precompleted;
+    result.wal.physicalWalBytesBefore = originalWalBytes;
+    result.wal.walRecords = totalRecordCount;
+    result.environment = currentEnvironment();
+    result.validationPassed = clrCount == config.operations
+        && recovery.undoUserRecordsVisited == config.operations - precompleted
+        && recovery.undoUserRecordsCompensated == config.operations - precompleted;
+    cleanupDatabase(config);
+    return result;
+}
+
 BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
     removeDatabase(config);
     BenchmarkResult result;
@@ -1695,6 +1802,7 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     if (name == "recovery_full_scan" || name == "recovery_loser") {
         return runRecoveryBenchmark(config, name);
     }
+    if (name == "recovery_clr_resume") return runRestartableUndoBenchmark(config);
     if (name == "checkpoint_latency") return runCheckpointLatency(config);
     if (name == "checkpoint_retention") return runCheckpointRetention(config);
     if (name == "recovery_checkpoint_compare") {
