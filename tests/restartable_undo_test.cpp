@@ -114,6 +114,7 @@ void testCrashAfterDurableClrResumesRemainingUndo() {
         minidb::LogOpenMode::DeferredRecovery);
     const auto stats = minidb::RecoveryManager(disk, log).recover();
     require(stats.undoRestartCount == 1
+                && stats.redoClrSkippedByPageLsn == 1
                 && stats.undoClrsEncountered == 1
                 && stats.undoRecordsSkippedByClr == 1
                 && stats.undoUserRecordsVisited == 2
@@ -237,6 +238,53 @@ void testClrUndoAcrossSegmentBoundaries() {
     requireRolledBackPageZero(disk);
 }
 
+void testClrCrossRecordCorruptionIsRejected() {
+    minidb::test::TemporaryDatabase database("clr_cross_record_corrupt");
+    const auto path = database.path().string();
+    minidb::DiskManager::Page pageZero{};
+    minidb::Lsn beginLsn = minidb::INVALID_LSN;
+    minidb::Lsn updateLsn = minidb::INVALID_LSN;
+    {
+        minidb::DiskManager disk(path);
+        const auto unrelatedPage = disk.appendPage();
+        disk.readPhysicalPage(0, pageZero);
+        minidb::LogManager log(minidb::walPathForDatabase(path));
+        beginLsn = log.append(minidb::LogRecord{
+            minidb::LogRecordType::Begin,
+            1,
+            minidb::INVALID_LSN,
+            minidb::encodeBeginLogPayload({disk.pageCount()}),
+            minidb::INVALID_LSN,
+        });
+        updateLsn = log.append(minidb::LogRecord{
+            minidb::LogRecordType::PageUpdate,
+            1,
+            beginLsn,
+            minidb::encodePageUpdateLogPayload({0, true, pageZero, pageZero}),
+            minidb::INVALID_LSN,
+        });
+        const auto clr = minidb::encodeCompensationLogPayload({
+            unrelatedPage, true, false, beginLsn, updateLsn, {},
+        });
+        const auto clrLsn = log.append(minidb::LogRecord{
+            minidb::LogRecordType::Compensation,
+            1,
+            updateLsn,
+            clr,
+            minidb::INVALID_LSN,
+        });
+        log.flushUpTo(clrLsn);
+    }
+    minidb::DiskManager disk(path);
+    minidb::LogManager log(
+        minidb::walPathForDatabase(path),
+        minidb::LogManager::DEFAULT_BUFFER_SIZE,
+        minidb::LogOpenMode::DeferredRecovery);
+    minidb::test::requireThrows<minidb::WalError>(
+        [&] { static_cast<void>(minidb::RecoveryManager(disk, log).recover()); },
+        "Recovery accepted a CLR that referenced an update for another page");
+}
+
 } // namespace
 
 int main() {
@@ -246,6 +294,7 @@ int main() {
         testCrashBoundaryMatrix();
         testAppendedPageTruncationIsRestartable();
         testClrUndoAcrossSegmentBoundaries();
+        testClrCrossRecordCorruptionIsRejected();
         std::cout << "restartable_undo_test passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -102,8 +102,21 @@ void testDeterministicFuzzCandidates() {
     std::mt19937_64 random(SEED);
     std::uniform_int_distribution<std::size_t> sizeDistribution(0, 5000);
     for (std::size_t candidate = 0; candidate < CANDIDATES; ++candidate) {
-        std::vector<std::byte> bytes(sizeDistribution(random));
-        for (auto& value : bytes) value = static_cast<std::byte>(random() & 0xFFU);
+        std::vector<std::byte> bytes;
+        if (candidate % 10 == 0) {
+            minidb::CompensationLogPayload payload;
+            payload.pageId = static_cast<minidb::PageId>((random() % 1000) + 1);
+            payload.pageSupportsLsn = (random() & 1U) != 0;
+            payload.undoNextLsn = 64 + (random() % 10'000);
+            payload.compensatedUpdateLsn = payload.undoNextLsn + 1 + (random() % 10'000);
+            for (auto& value : payload.compensatedImage) {
+                value = static_cast<std::byte>(random() & 0xFFU);
+            }
+            bytes = minidb::encodeCompensationLogPayload(payload);
+        } else {
+            bytes.resize(sizeDistribution(random));
+            for (auto& value : bytes) value = static_cast<std::byte>(random() & 0xFFU);
+        }
         try {
             const auto decoded = minidb::decodeCompensationLogPayload(bytes);
             const auto canonical = minidb::encodeCompensationLogPayload(decoded);
