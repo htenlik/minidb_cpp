@@ -68,7 +68,8 @@ Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
 `11 FUZZY_CHECKPOINT_BEGIN`, and `12 FUZZY_CHECKPOINT_END`.
 IDs 2 and 8 remain immutable legacy encodings; IDs 9 and 10 add explicit
 `beforePageLsn` and enable selective REDO. Production uses both physical update encodings and both
-sharp/fuzzy checkpoint records; COMPENSATION remains reserved. Fuzzy payload layouts are
+sharp/fuzzy checkpoint records; type 5 is the physical restartable-UNDO CLR described in
+[clr-restartable-undo.md](clr-restartable-undo.md). Fuzzy payload layouts are
 in [fuzzy-checkpoints.md](fuzzy-checkpoints.md).
 `TransactionId` is `uint64_t`, with zero reserved
 as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
@@ -163,7 +164,8 @@ pre-persistence preparation generate records centrally.
 
 Startup defaults to selective REDO for PageLSN-aware records: apply when the stored
 value is unknown or older than the update record, and skip when it is equal or newer.
-Legacy update records always replay. Loser UNDO restores the explicit original PageLSN.
+Legacy update records always replay. Loser UNDO records the compensated logical image
+in a CLR and installs the CLR's LSN as the newest persistent PageLSN.
 The `AlwaysRedo` policy is a test/benchmark control. See [page-lsn.md](page-lsn.md).
 
 ```text
@@ -191,7 +193,7 @@ winners are REDOed and a tail loser is undone. Sharp checkpoints bound normal re
 to their tail; fuzzy checkpoints retain history back to the oldest required recLSN.
 Segmented WAL deletes only whole segments behind the corresponding floor. Logical WAL
 generation continues to rise while physical retention depends on dirty-page lifetime.
-There is no archive/PITR, transaction-overlapping checkpoint, CLR, user transaction SQL, concurrency,
+There is no archive/PITR, transaction-overlapping checkpoint, user transaction SQL, concurrency,
 group commit, or torn-page protection.
 
 ## Reference

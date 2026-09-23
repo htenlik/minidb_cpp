@@ -40,6 +40,23 @@ int main() {
                                     * minidb::Pager::PAGE_SIZE),
                 "benchmark family smoke result was incomplete");
         }
+        minidb::bench::BenchmarkConfig recovery;
+        recovery.benchmark = "recovery_clr_resume";
+        recovery.operations = 6;
+        recovery.redoPersistedPercent = 50;
+        recovery.walSegmentBytes = 16 * 1024;
+        recovery.databasePath = (std::filesystem::temp_directory_path()
+            / "minidb_benchmark_smoke_clr.db").string();
+        const auto clr = minidb::bench::runConfiguredBenchmarks(recovery);
+        minidb::test::require(
+            clr.size() == 1 && clr[0].validationPassed
+                && clr[0].storageBackend == "physical_clr_restartable_undo"
+                && clr[0].recovery.clrWalBytes
+                    == recovery.operations
+                        * (minidb::wal_record_layout::HEADER_SIZE
+                           + minidb::compensation_log_layout::PAYLOAD_SIZE)
+                && clr[0].recovery.recovery.undoUserRecordsCompensated == 3,
+            "CLR restartable-UNDO benchmark smoke result was incomplete");
         std::cout << "benchmark family smoke tests passed\n";
         return 0;
     } catch (const std::exception& error) {

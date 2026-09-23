@@ -151,7 +151,8 @@ single mixed adaptive transaction before/after COMMIT, and force that mixed chai
 run in Adaptive mode.
 
 Persistent PageLSN and the optional fuzzy-checkpoint DPT enable two-stage selective
-REDO, but there is still no compensation log record, concurrency, locking, MVCC, or crash-atomic
+REDO; restartable UNDO uses the independent canonical full-page CLR format. There is
+still no concurrency, locking, MVCC, or crash-atomic
 checkpoint/update protocol beyond the documented statement model. Adaptive mode computes
 canonical deltas even when it later chooses FullPage, trading CPU work for bounded WAL
 volume.

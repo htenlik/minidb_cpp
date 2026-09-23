@@ -113,7 +113,7 @@ The executable supports family aliases (`pager`, `buffer`, `bplus`, `tuple`, `sq
 | Mixed profiles | `mixed_read_heavy`, `mixed_write_heavy` (local SQL) |
 | WAL substrate | `wal_append_buffered`, `wal_append_flush_each`, `wal_batch_flush`, `wal_segment_rotation`, `wal_reclamation` |
 | Durable statements | `txn_insert`, `txn_update`, `txn_varchar_update`, `txn_delete`, `txn_bplus_insert`, `txn_mixed` |
-| Recovery | `recovery_full_scan`, `recovery_loser`, `recovery_page_lsn_compare`, `recovery_checkpoint_compare` |
+| Recovery | `recovery_full_scan`, `recovery_loser`, `recovery_page_lsn_compare`, `recovery_checkpoint_compare`, `recovery_clr_resume` |
 
 `wal_append_buffered` appends all records then performs one final synchronous force.
 `wal_append_flush_each` forces every record. `wal_batch_flush` forces every
@@ -178,6 +178,17 @@ generation modes are supported. The benchmark validates byte-identical final pag
 is a controlled recovery-I/O comparison, not a claim that selective REDO must improve
 wall-clock time on every filesystem/cache state.
 There are no CI timing thresholds.
+
+`recovery_clr_resume` creates one loser with `--operations N` repeated physical page
+updates. `--redo-persisted-percent` selects the fraction of UNDO work precompleted by
+deliberately interrupted recovery runs (normally 0, 25, 50, or 75). The final restart
+reports original-versus-remaining records, CLR count and bytes, cumulative interrupted/
+final recovery timing, CLR PageLSN skips, and original/retained physical WAL bytes.
+Counts such as 10, 100, and 1000 expose the simplicity and WAL/fsync cost of the
+full-page CLR. The restart-from-original comparison is modeled as `N` revisited records;
+the implementation should visit `N - completed` original records on the final restart.
+No universal latency improvement is asserted because repeated fsync and cache state can
+dominate small runs.
 
 All workloads validate their relevant storage/tree/catalog/model after measurement.
 

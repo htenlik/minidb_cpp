@@ -81,8 +81,9 @@ contents. The mask and full images are transient.
 
 Winner REDO reads the current 4096-byte page (or starts from zero for an appended page),
 copies every range's after bytes, and writes the resulting physical page. Loser UNDO
-walks update records backward; for the first/latest record for each existing page it
-copies original before bytes. A v2 UNDO also restores its explicit `beforePageLsn`.
+walks update records backward and derives the original bytes for each update. Recovery
+records that logical before state in a canonical full-page CLR and installs the CLR LSN;
+it does not restore the historical `beforePageLsn` as final page metadata.
 Newly appended loser pages are removed by truncating to
 the page count recorded in `BEGIN`, as in full-page mode.
 

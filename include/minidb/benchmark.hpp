@@ -110,6 +110,10 @@ struct RecoveryBenchmarkMetrics {
     RecoveryStats fullScanRecovery{};
     std::uint64_t walBytes = 0;
     std::uint64_t logicalChangedBytes = 0;
+    std::uint64_t originalLoserWalBytes = 0;
+    std::uint64_t clrWalBytes = 0;
+    std::uint64_t modeledRestartFromOriginalRecords = 0;
+    std::uint64_t recoveryRestarts = 0;
     double loggingAmplification = 0.0;
     double payloadAmplification = 0.0;
     double totalWalAmplification = 0.0;

@@ -80,6 +80,13 @@ void validateConfig(const BenchmarkConfig& config) {
         > config.walSegmentBytes) {
         throw std::invalid_argument("WAL record does not fit configured segment payload");
     }
+    if (config.benchmark == "recovery_clr_resume"
+        && config.walSegmentBytes < std::max(
+            FULL_PAGE_UPDATE_V2_RECORD_SIZE,
+            wal_record_layout::HEADER_SIZE + compensation_log_layout::PAYLOAD_SIZE)) {
+        throw std::invalid_argument(
+            "recovery_clr_resume requires a segment large enough for page records");
+    }
     if (!config.suite.empty() && config.suite != "quick" && config.suite != "baseline") {
         throw std::invalid_argument("suite must be 'quick' or 'baseline'");
     }
@@ -294,6 +301,7 @@ std::vector<std::string> supportedBenchmarkNames() {
         "txn_insert", "txn_update", "txn_varchar_update", "txn_delete",
         "txn_bplus_insert", "txn_mixed", "txn_wal_delta_friendly",
         "txn_wal_fragmentation", "recovery_full_scan", "recovery_loser",
+        "recovery_clr_resume",
         "checkpoint_latency", "checkpoint_retention", "recovery_checkpoint_compare",
         "recovery_page_lsn_compare",
     };
@@ -521,6 +529,12 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.transactions.v2PagesWithKnownLsn
                << ",\"wal_bytes\":" << result.recovery.walBytes
                << ",\"logical_changed_bytes\":" << result.recovery.logicalChangedBytes
+               << ",\"original_loser_wal_bytes\":"
+               << result.recovery.originalLoserWalBytes
+               << ",\"clr_wal_bytes\":" << result.recovery.clrWalBytes
+               << ",\"modeled_restart_from_original_records\":"
+               << result.recovery.modeledRestartFromOriginalRecords
+               << ",\"recovery_restarts\":" << result.recovery.recoveryRestarts
                << ",\"logging_amplification\":" << result.recovery.loggingAmplification
                << ",\"payload_amplification\":" << result.recovery.payloadAmplification
                << ",\"total_wal_amplification\":"
@@ -562,6 +576,30 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.recovery.redoAppliedAfterPageLsnCheck
                << ",\"legacy_redo_records\":"
                << result.recovery.recovery.legacyRedoRecords
+               << ",\"redo_user_update_applied\":"
+               << result.recovery.recovery.redoUserUpdateApplied
+               << ",\"redo_user_update_skipped_page_lsn\":"
+               << result.recovery.recovery.redoUserUpdateSkippedByPageLsn
+               << ",\"redo_clr_applied\":"
+               << result.recovery.recovery.redoClrApplied
+               << ",\"redo_clr_skipped_page_lsn\":"
+               << result.recovery.recovery.redoClrSkippedByPageLsn
+               << ",\"undo_user_records_visited\":"
+               << result.recovery.recovery.undoUserRecordsVisited
+               << ",\"undo_user_records_compensated\":"
+               << result.recovery.recovery.undoUserRecordsCompensated
+               << ",\"undo_clrs_encountered\":"
+               << result.recovery.recovery.undoClrsEncountered
+               << ",\"clrs_appended\":"
+               << result.recovery.recovery.clrsAppended
+               << ",\"undo_records_skipped_by_clr\":"
+               << result.recovery.recovery.undoRecordsSkippedByClr
+               << ",\"undo_restart_count\":"
+               << result.recovery.recovery.undoRestartCount
+               << ",\"undo_page_writes\":"
+               << result.recovery.recovery.undoPageWrites
+               << ",\"undo_wal_bytes\":"
+               << result.recovery.recovery.undoWalBytes
                << ",\"recovery_page_reads\":"
                << result.recovery.recovery.recoveryPageReads
                << ",\"recovery_page_writes\":"
@@ -759,6 +797,11 @@ std::string formatHuman(const BenchmarkResult& result) {
            << result.recovery.logicalChangedBytes << '/'
            << result.recovery.totalWalAmplification << '/'
            << result.recovery.payloadAmplification << '\n'
+           << "CLR original/clr WAL bytes, modeled revisit/restarts: "
+           << result.recovery.originalLoserWalBytes << '/'
+           << result.recovery.clrWalBytes << '/'
+           << result.recovery.modeledRestartFromOriginalRecords << '/'
+           << result.recovery.recoveryRestarts << '\n'
            << "storage before pages/bytes/free/resident: "
            << result.storageBefore.databasePages << '/' << result.storageBefore.databaseBytes
            << '/' << result.storageBefore.freePages << '/'

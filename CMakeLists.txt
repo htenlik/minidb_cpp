@@ -174,6 +174,10 @@ add_executable(recovery_log_test tests/recovery_log_test.cpp)
 target_link_libraries(recovery_log_test PRIVATE minidb_core)
 add_test(NAME recovery_log_test COMMAND recovery_log_test)
 
+add_executable(clr_codec_test tests/clr_codec_test.cpp)
+target_link_libraries(clr_codec_test PRIVATE minidb_core)
+add_test(NAME clr_codec_test COMMAND clr_codec_test)
+
 add_executable(checkpoint_codec_test tests/checkpoint_codec_test.cpp)
 target_link_libraries(checkpoint_codec_test PRIVATE minidb_core)
 add_test(NAME checkpoint_codec_test COMMAND checkpoint_codec_test)
@@ -205,6 +209,14 @@ add_test(NAME checkpoint_crash_test COMMAND checkpoint_crash_test)
 add_executable(recovery_test tests/recovery_test.cpp)
 target_link_libraries(recovery_test PRIVATE minidb_core)
 add_test(NAME recovery_test COMMAND recovery_test)
+
+add_executable(restartable_undo_test tests/restartable_undo_test.cpp)
+target_link_libraries(restartable_undo_test PRIVATE minidb_core)
+add_test(NAME restartable_undo_test COMMAND restartable_undo_test)
+
+add_executable(restartable_undo_model_test tests/restartable_undo_model_test.cpp)
+target_link_libraries(restartable_undo_model_test PRIVATE minidb_core)
+add_test(NAME restartable_undo_model_test COMMAND restartable_undo_model_test)
 
 add_executable(page_lsn_recovery_test tests/page_lsn_recovery_test.cpp)
 target_link_libraries(page_lsn_recovery_test PRIVATE minidb_network)

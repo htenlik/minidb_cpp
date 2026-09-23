@@ -130,6 +130,7 @@ full-buffer and opt-in fuzzy DPT checkpoints share the double-slotted `database.
 recovery pointer; segmented WAL reclaims whole files behind the mode-specific floor.
 Selective REDO additionally skips a committed v2 update when the disk PageLSN is equal
 or newer. There is still no archive/PITR, transaction-overlapping checkpoint,
-CLR, lock, MVCC, concurrent transaction, or torn-page protection. See [wal.md](wal.md),
+lock, MVCC, concurrent transaction, or torn-page protection. Restartable physical CLR
+handling remains inside recovery; page-owning layers do not interpret it. See [wal.md](wal.md),
 [wal-segments.md](wal-segments.md), [fuzzy-checkpoints.md](fuzzy-checkpoints.md), [recovery.md](recovery.md),
 [checkpoints.md](checkpoints.md), and [page-lsn.md](page-lsn.md).

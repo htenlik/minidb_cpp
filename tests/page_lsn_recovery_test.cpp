@@ -251,10 +251,16 @@ void testWinnerRedoSkipThenLoserUndoRestoresBeforePageLsn() {
         const auto recovered = minidb::RecoveryManager(disk, log, &control).recover();
         require(recovered.redoSkippedByPageLsn == 1 && recovered.pagesUndone == 1,
                 "Winner/loser recovery did not skip winner then undo loser");
+        minidb::Lsn clrLsn = minidb::INVALID_LSN;
+        for (const auto& record : log.scan().records) {
+            if (record.type == minidb::LogRecordType::Compensation) clrLsn = record.lsn;
+        }
         minidb::DiskManager::Page page{};
         disk.readPhysicalPage(rid.pageId, page);
-        require(minidb::readPersistentPageLsn(page) == winnerLsn,
-                "Loser UNDO did not restore the winner-visible beforePageLsn");
+        require(minidb::isValidLsn(clrLsn)
+                    && minidb::readPersistentPageLsn(page) == clrLsn
+                    && clrLsn > winnerLsn,
+                "Loser UNDO did not install the CLR as the newest persistent PageLSN");
         minidb::BufferPoolManager pool(disk, 8);
         minidb::PageAllocator allocator(pool, disk);
         auto store = minidb::TupleStore::open(pool, disk, allocator, heapMetadataPageId);

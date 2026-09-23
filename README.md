@@ -17,7 +17,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - Versioned binary TCP protocol with command-line server and client
 - CRC32C-protected, segmented write-ahead log with safe segment reclamation
 - Implicit atomic recovery units for mutating SQL statements
-- STEAL / NO-FORCE physical REDO and UNDO with full-page or byte-range WAL
+- STEAL / NO-FORCE physical REDO and restartable CLR-based UNDO
 - Persistent PageLSNs with database-format-v2 selective REDO and v1 migration
 - Sharp and opt-in fuzzy checkpoints with DPT/recLSN-bounded startup recovery
 - Subprocess crash-injection, randomized differential, corruption, and sanitizer tests
@@ -157,6 +157,8 @@ pool may write an uncommitted dirty page (STEAL) and need not force committed pa
 commit (NO-FORCE), so startup recovery redoes committed winners and undoes the final
 uncommitted loser. Persistent PageLSNs let recovery skip committed updates already
 represented by an equal or newer disk page; legacy WAL records remain always-redo.
+Physical compensation log records make completed loser-UNDO work durable across a crash
+during recovery; CLRs are REDO-able and never themselves undone.
 
 The observable commit rule is:
 
@@ -229,6 +231,7 @@ used during release verification.
 - [Adaptive physical WAL update encoding](docs/wal-adaptive.md)
 - [Persistent PageLSN and selective REDO](docs/page-lsn.md)
 - [Crash recovery](docs/recovery.md)
+- [Compensation records and restartable UNDO](docs/clr-restartable-undo.md)
 - [Sharp checkpoints](docs/checkpoints.md)
 - [Fuzzy checkpoints, DPT, and recLSN](docs/fuzzy-checkpoints.md)
 - [Segmented WAL lifecycle](docs/wal-segments.md)

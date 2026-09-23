@@ -99,6 +99,31 @@ inline constexpr std::size_t MAX_RANGE_COUNT =
 
 } // namespace page_delta_update_v2_log_layout
 
+namespace compensation_log_layout {
+
+// CLRs use one canonical full-page physical compensation image regardless of
+// the encoding used by the original update record. The image carries logical
+// page contents; recovery installs the CLR's own LSN into the page PageLSN.
+inline constexpr std::uint16_t CURRENT_VERSION = 1;
+inline constexpr std::uint32_t PAGE_EXISTED = 1U;
+inline constexpr std::uint32_t PAGE_SUPPORTS_LSN = 2U;
+inline constexpr std::uint32_t VALID_FLAGS = PAGE_EXISTED | PAGE_SUPPORTS_LSN;
+inline constexpr std::size_t PAGE_ID_OFFSET = 0;
+inline constexpr std::size_t FLAGS_OFFSET = 4;
+inline constexpr std::size_t PAGE_SIZE_OFFSET = 8;
+inline constexpr std::size_t VERSION_OFFSET = 12;
+inline constexpr std::size_t HEADER_SIZE_OFFSET = 14;
+inline constexpr std::size_t UNDO_NEXT_LSN_OFFSET = 16;
+inline constexpr std::size_t COMPENSATED_UPDATE_LSN_OFFSET = 24;
+inline constexpr std::size_t RESERVED_OFFSET = 32;
+inline constexpr std::size_t HEADER_SIZE = 40;
+inline constexpr std::size_t PAGE_IMAGE_OFFSET = HEADER_SIZE;
+inline constexpr std::size_t PAYLOAD_SIZE = PAGE_IMAGE_OFFSET + database_format::PAGE_SIZE;
+
+static_assert(PAYLOAD_SIZE == 4136);
+
+} // namespace compensation_log_layout
+
 struct BeginLogPayload {
     std::uint64_t startPageCount = 0;
     bool operator==(const BeginLogPayload&) const = default;
@@ -142,6 +167,16 @@ struct PageDeltaUpdateV2LogPayload {
     Lsn beforePageLsn = INVALID_LSN;
     std::vector<PageByteRange> ranges;
     bool operator==(const PageDeltaUpdateV2LogPayload&) const = default;
+};
+
+struct CompensationLogPayload {
+    PageId pageId = INVALID_PAGE_ID;
+    bool pageExisted = true;
+    bool pageSupportsLsn = false;
+    Lsn undoNextLsn = INVALID_LSN;
+    Lsn compensatedUpdateLsn = INVALID_LSN;
+    DiskManager::Page compensatedImage{};
+    bool operator==(const CompensationLogPayload&) const = default;
 };
 
 inline constexpr std::size_t FULL_PAGE_UPDATE_RECORD_SIZE =
@@ -191,6 +226,10 @@ struct AdaptivePageUpdateDecision {
 [[nodiscard]] std::vector<std::byte> encodePageDeltaUpdateV2LogPayload(
     const PageDeltaUpdateV2LogPayload& payload);
 [[nodiscard]] PageDeltaUpdateV2LogPayload decodePageDeltaUpdateV2LogPayload(
+    std::span<const std::byte> bytes);
+[[nodiscard]] std::vector<std::byte> encodeCompensationLogPayload(
+    const CompensationLogPayload& payload);
+[[nodiscard]] CompensationLogPayload decodeCompensationLogPayload(
     std::span<const std::byte> bytes);
 [[nodiscard]] std::size_t pageDeltaUpdateV2PayloadEncodedSize(
     const PageDeltaUpdateV2LogPayload& payload);
