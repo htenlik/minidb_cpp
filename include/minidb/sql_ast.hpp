@@ -160,12 +160,19 @@ struct DeleteStatement {
     SourceSpan tableNameSpan{};
 };
 
+struct BeginStatement {};
+struct CommitStatement {};
+struct RollbackStatement {};
+
 using StatementNode = std::variant<
     CreateTableStatement,
     InsertStatement,
     SelectStatement,
     UpdateStatement,
-    DeleteStatement>;
+    DeleteStatement,
+    BeginStatement,
+    CommitStatement,
+    RollbackStatement>;
 
 struct Statement {
     SourceSpan span{};

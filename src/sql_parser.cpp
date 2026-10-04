@@ -106,8 +106,16 @@ Statement Parser::parseStatement() {
         node = parseUpdate();
     } else if (match(TokenKind::Delete)) {
         node = parseDelete();
+    } else if (match(TokenKind::Begin)) {
+        static_cast<void>(match(TokenKind::Transaction));
+        node = BeginStatement{};
+    } else if (match(TokenKind::Commit)) {
+        node = CommitStatement{};
+    } else if (match(TokenKind::Rollback)) {
+        node = RollbackStatement{};
     } else {
-        failAt(peek(), "expected CREATE, INSERT, SELECT, UPDATE, or DELETE statement");
+        failAt(peek(),
+            "expected CREATE, INSERT, SELECT, UPDATE, DELETE, BEGIN, COMMIT, or ROLLBACK statement");
     }
 
     auto end = previous().span.end;

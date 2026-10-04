@@ -36,6 +36,10 @@ constexpr std::array KEYWORDS{
     Keyword{"FALSE", TokenKind::False},
     Keyword{"AND", TokenKind::And},
     Keyword{"OR", TokenKind::Or},
+    Keyword{"BEGIN", TokenKind::Begin},
+    Keyword{"TRANSACTION", TokenKind::Transaction},
+    Keyword{"COMMIT", TokenKind::Commit},
+    Keyword{"ROLLBACK", TokenKind::Rollback},
 };
 
 bool isIdentifierStart(char value) noexcept {
@@ -104,6 +108,10 @@ std::string_view tokenKindName(TokenKind kind) noexcept {
     case TokenKind::False: return "FALSE";
     case TokenKind::And: return "AND";
     case TokenKind::Or: return "OR";
+    case TokenKind::Begin: return "BEGIN";
+    case TokenKind::Transaction: return "TRANSACTION";
+    case TokenKind::Commit: return "COMMIT";
+    case TokenKind::Rollback: return "ROLLBACK";
     case TokenKind::LeftParen: return "(";
     case TokenKind::RightParen: return ")";
     case TokenKind::Comma: return ",";
