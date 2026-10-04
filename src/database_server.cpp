@@ -2,6 +2,20 @@
 
 namespace minidb::net {
 
+DatabaseServer::~DatabaseServer() {
+    try {
+        close();
+    } catch (...) {
+        // No further requests are accepted; durable WAL remains available for
+        // startup recovery if best-effort shutdown could not finish rollback.
+    }
+}
+
+void DatabaseServer::close() {
+    server_->close();
+    engine_->shutdown();
+}
+
 DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
     : diskManager_(databasePath),
       logManager_(walPathForDatabase(databasePath), LogManager::DEFAULT_BUFFER_SIZE,

@@ -814,8 +814,10 @@ QueryResult SqlExecutor::execute(const Statement& statement) {
                     return executeSelect(catalog_, node);
                 } else if constexpr (std::is_same_v<Node, UpdateStatement>) {
                     return executeUpdate(catalog_, node);
-                } else {
+                } else if constexpr (std::is_same_v<Node, DeleteStatement>) {
                     return executeDelete(catalog_, node);
+                } else {
+                    throw std::logic_error("Transaction control requires SqlEngine");
                 }
             },
             statement.node);
@@ -829,26 +831,44 @@ QueryResult SqlExecutor::execute(const Statement& statement) {
     }
 }
 
-QueryResult SqlEngine::execute(std::string_view source) {
+QueryResult SqlEngine::execute(std::string_view source, SessionId session) {
     auto statement = Parser::parse(source);
-    return execute(statement);
+    return execute(statement, session);
 }
 
-QueryResult SqlEngine::execute(const Statement& statement) {
-    const bool mutating = !std::holds_alternative<SelectStatement>(statement.node);
-    if (!mutating || recovery_ == nullptr) return executor_.execute(statement);
-
-    recovery_->beginStatement();
+QueryResult SqlEngine::execute(const Statement& statement, SessionId session) {
     try {
-        auto result = executor_.execute(statement);
-        recovery_->commitStatement();
-        if (checkpoints_ != nullptr) {
-            static_cast<void>(checkpoints_->onStatementCommitted());
+        transactions_.requireSession(session);
+        if (std::holds_alternative<BeginStatement>(statement.node)) {
+            transactions_.begin(session);
+            return CommandResult{CommandKind::Begin, 0, std::nullopt, {}};
         }
-        return result;
-    } catch (...) {
-        if (recovery_->hasActiveStatement()) recovery_->rollbackStatement();
+        if (std::holds_alternative<CommitStatement>(statement.node)) {
+            transactions_.commit(session);
+            return CommandResult{CommandKind::Commit, 0, std::nullopt, {}};
+        }
+        if (std::holds_alternative<RollbackStatement>(statement.node)) {
+            transactions_.rollback(session);
+            return CommandResult{CommandKind::Rollback, 0, std::nullopt, {}};
+        }
+        if (std::holds_alternative<SelectStatement>(statement.node)) {
+            auto result = executor_.execute(statement);
+            transactions_.completeRead(session);
+            return result;
+        }
+        transactions_.beginMutation(session);
+        try {
+            auto result = executor_.execute(statement);
+            transactions_.completeMutation(session);
+            return result;
+        } catch (...) {
+            transactions_.failMutation(session);
+            throw;
+        }
+    } catch (const SqlExecutionError&) {
         throw;
+    } catch (const std::exception& error) {
+        throw SqlExecutionError(SqlExecutionErrorKind::Execution, error.what(), statement.span);
     }
 }
 

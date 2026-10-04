@@ -31,6 +31,9 @@ std::string_view commandName(sql::CommandKind kind) {
     case sql::CommandKind::Insert: return "INSERT";
     case sql::CommandKind::Update: return "UPDATE";
     case sql::CommandKind::Delete: return "DELETE";
+    case sql::CommandKind::Begin: return "BEGIN";
+    case sql::CommandKind::Commit: return "COMMIT";
+    case sql::CommandKind::Rollback: return "ROLLBACK";
     }
     return "COMMAND";
 }
@@ -56,7 +59,10 @@ std::string formatQueryResult(const sql::QueryResult& result, bool includeStats)
     std::ostringstream output;
     if (const auto* command = std::get_if<sql::CommandResult>(&result)) {
         output << commandName(command->command) << '\n';
-        if (command->command == sql::CommandKind::CreateTable) {
+        if (command->command == sql::CommandKind::CreateTable
+            || command->command == sql::CommandKind::Begin
+            || command->command == sql::CommandKind::Commit
+            || command->command == sql::CommandKind::Rollback) {
             output << "OK\n";
         } else {
             output << command->affectedRows << " row"

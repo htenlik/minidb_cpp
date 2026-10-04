@@ -5,6 +5,8 @@
 
 #include <cerrno>
 #include <cstring>
+#include <exception>
+#include <limits>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <optional>
@@ -108,6 +110,9 @@ TcpServer::TcpServer(
 }
 
 void TcpServer::start() {
+    if (failed_) {
+        throw std::runtime_error("TCP server requires restart after transaction cleanup failure");
+    }
     if (listener_) {
         throw std::logic_error("TCP server is already listening");
     }
@@ -142,6 +147,32 @@ void TcpServer::serve(std::size_t connectionLimit) {
 }
 
 void TcpServer::serveConnection(int descriptor) {
+    if (failed_) {
+        throw std::runtime_error("TCP server requires restart after transaction cleanup failure");
+    }
+    if (nextSessionId_ == std::numeric_limits<SessionId>::max()) {
+        throw std::overflow_error("TCP session identifier range exhausted");
+    }
+    const auto session = nextSessionId_++;
+    std::exception_ptr connectionError;
+    try {
+        serveSession(descriptor, session);
+    } catch (...) {
+        connectionError = std::current_exception();
+    }
+    try {
+        // Complete durable rollback before this serial server may accept new work.
+        engine_.closeSession(session);
+    } catch (...) {
+        failed_ = true;
+        close();
+        std::throw_with_nested(std::runtime_error(
+            "TCP session transaction cleanup failed; server requires restart"));
+    }
+    if (connectionError) std::rethrow_exception(connectionError);
+}
+
+void TcpServer::serveSession(int descriptor, SessionId session) {
     const auto hello = readFrame(descriptor);
     if (!hello.has_value()) {
         return;
@@ -165,7 +196,7 @@ void TcpServer::serveConnection(int descriptor) {
         const auto requestId = request->header.requestId;
         const auto source = decodeExecuteSqlPayload(*request);
         try {
-            const auto result = engine_.execute(source);
+            const auto result = engine_.execute(source, session);
             try {
                 writeFrame(descriptor, encodeQueryResultFrame(requestId, result));
             } catch (const ProtocolError&) {

@@ -32,6 +32,7 @@ add_library(minidb_core
     src/table_definition.cpp
     src/tuple_codec.cpp
     src/tuple_store.cpp
+    src/transaction_manager.cpp
     src/wal.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
@@ -217,6 +218,20 @@ add_test(NAME restartable_undo_test COMMAND restartable_undo_test)
 add_executable(restartable_undo_model_test tests/restartable_undo_model_test.cpp)
 target_link_libraries(restartable_undo_model_test PRIVATE minidb_core)
 add_test(NAME restartable_undo_model_test COMMAND restartable_undo_model_test)
+
+add_executable(runtime_clr_rollback_test tests/runtime_clr_rollback_test.cpp)
+target_link_libraries(runtime_clr_rollback_test PRIVATE minidb_core)
+add_test(NAME runtime_clr_rollback_test COMMAND runtime_clr_rollback_test)
+
+add_executable(explicit_tcp_transaction_test tests/explicit_tcp_transaction_test.cpp)
+target_link_libraries(explicit_tcp_transaction_test PRIVATE minidb_network)
+add_test(NAME explicit_tcp_transaction_test COMMAND explicit_tcp_transaction_test)
+
+foreach(transaction_test IN ITEMS explicit_transaction_test explicit_transaction_model_test explicit_recovery_model_test)
+    add_executable(${transaction_test} tests/${transaction_test}.cpp)
+    target_link_libraries(${transaction_test} PRIVATE minidb_network)
+    add_test(NAME ${transaction_test} COMMAND ${transaction_test})
+endforeach()
 
 add_executable(page_lsn_recovery_test tests/page_lsn_recovery_test.cpp)
 target_link_libraries(page_lsn_recovery_test PRIVATE minidb_network)

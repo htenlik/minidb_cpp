@@ -62,6 +62,8 @@ public:
     [[nodiscard]] CheckpointId checkpoint();
     [[nodiscard]] CheckpointId checkpoint(CheckpointMode mode);
     [[nodiscard]] bool onStatementCommitted() noexcept;
+    [[nodiscard]] bool onTransactionCompleted() noexcept;
+    [[nodiscard]] bool pending() const noexcept { return pending_; }
 
     [[nodiscard]] const CheckpointPolicy& policy() const noexcept { return policy_; }
     [[nodiscard]] const CheckpointStats& stats() const noexcept { return stats_; }
@@ -81,6 +83,7 @@ private:
     Lsn previousCheckpointEndLsn_ = INVALID_LSN;
     WalOffset lastCheckpointWalSize_ = wal_file_layout::HEADER_SIZE;
     std::uint64_t statementsSinceCheckpoint_ = 0;
+    bool pending_ = false;
 };
 
 } // namespace minidb

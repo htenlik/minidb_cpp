@@ -51,6 +51,10 @@ private:
     sql::SqlEngine& engine_;
     Socket listener_;
     std::uint16_t boundPort_ = 0;
+    SessionId nextSessionId_ = 1;
+    bool failed_ = false;
+
+    void serveSession(int descriptor, SessionId session);
 
     void sendProtocolFailure(
         int descriptor,
