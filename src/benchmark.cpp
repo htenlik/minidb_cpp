@@ -302,6 +302,8 @@ std::vector<std::string> supportedBenchmarkNames() {
         "txn_bplus_insert", "txn_mixed", "txn_wal_delta_friendly",
         "txn_wal_fragmentation", "recovery_full_scan", "recovery_loser",
         "recovery_clr_resume",
+        "transaction_implicit", "transaction_explicit", "transaction_rollback",
+        "transaction_recovery", "transaction_checkpoint",
         "checkpoint_latency", "checkpoint_retention", "recovery_checkpoint_compare",
         "recovery_page_lsn_compare",
     };
@@ -633,6 +635,20 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.fullScanRecovery.recoveryPageWrites
                << ",\"always_redo_redo_ns\":"
                << result.recovery.fullScanRecovery.redoNs << '}';
+        const auto& txn = result.transaction;
+        output << ",\"transaction\":{\"wal_bytes\":" << txn.walBytes
+               << ",\"wal_fsyncs\":" << txn.walFsyncs
+               << ",\"commit_fsyncs\":" << txn.commitFsyncs
+               << ",\"final_commit_ns\":" << txn.finalCommitNs
+               << ",\"rollback_ns\":" << txn.rollbackNs
+               << ",\"touched_pages\":" << txn.touchedPages
+               << ",\"original_before_image_pages\":" << txn.originalBeforeImagePages
+               << ",\"original_before_image_bytes\":" << txn.originalBeforeImageBytes
+               << ",\"peak_recovery_bytes\":" << txn.peakRecoveryBytes
+               << ",\"retained_wal_peak\":" << txn.retainedWalPeak
+               << ",\"retained_wal_after\":" << txn.retainedWalAfter
+               << ",\"checkpoint_pending\":" << (txn.checkpointPending ? "true" : "false")
+               << ",\"checkpoint_deferred\":" << (txn.checkpointDeferred ? "true" : "false") << '}';
         output << ",\"checkpoint\":{\"checkpoint_count\":"
                << result.checkpoint.checkpointsCompleted
                << ",\"checkpoint_total_ns\":" << result.checkpoint.checkpointDurationNs

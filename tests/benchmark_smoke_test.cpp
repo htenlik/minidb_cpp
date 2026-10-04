@@ -58,6 +58,38 @@ int main() {
                 && clr[0].recovery.recovery.undoUserRecordsCompensated == 3,
             "CLR restartable-UNDO benchmark smoke result was incomplete");
         std::cout << "benchmark family smoke tests passed\n";
+        for (const auto* name : {"transaction_implicit", "transaction_explicit", "transaction_rollback",
+                                 "transaction_recovery", "transaction_checkpoint"}) {
+            for (auto mode : {minidb::CheckpointMode::Sharp, minidb::CheckpointMode::Fuzzy}) {
+                minidb::test::TemporaryDatabase database(name);
+                minidb::bench::BenchmarkConfig transaction;
+                transaction.databasePath = database.path().string();
+                transaction.benchmark = name;
+                transaction.operations = 10;
+                transaction.checkpointWalBytes = 1024;
+                transaction.checkpointMode = mode;
+                transaction.walSegmentBytes = 16 * 1024;
+                const auto measured = minidb::bench::runConfiguredBenchmarks(transaction);
+                minidb::test::require(measured.size() == 1 && measured[0].validationPassed,
+                                      "Transaction benchmark failed validation");
+                const auto& result = measured[0];
+                if (transaction.benchmark == "transaction_implicit") {
+                    minidb::test::require(result.transaction.commitFsyncs == 10,
+                                          "Implicit benchmark did not commit every mutation");
+                } else if (transaction.benchmark == "transaction_explicit") {
+                    minidb::test::require(result.transaction.commitFsyncs == 1
+                        && result.transaction.originalBeforeImageBytes > 0,
+                        "Explicit benchmark did not measure one durable commit");
+                } else if (transaction.benchmark == "transaction_rollback"
+                           || transaction.benchmark == "transaction_recovery") {
+                    minidb::test::require(result.recovery.recovery.clrsAppended == 10,
+                                          "Rollback/recovery benchmark CLR count incorrect");
+                }
+                minidb::test::require(minidb::bench::resultsToJson(measured).find("\"transaction\":")
+                                          != std::string::npos,
+                                      "Transaction benchmark JSON metrics missing");
+            }
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "benchmark smoke test failure: " << error.what() << '\n';
