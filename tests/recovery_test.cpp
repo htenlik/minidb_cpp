@@ -129,8 +129,12 @@ void testExplicitRollbackAndZeroMutation() {
                 && !pool.isResident(pageId),
             "Explicit rollback did not restore and invalidate the page");
     const auto records = log.scan().records;
-    require(records.size() == recordsBefore,
-            "Unflushed in-memory mutation emitted BEGIN/ABORT WAL");
+    require(records.size() == recordsBefore + 4
+                && records[recordsBefore].type == minidb::LogRecordType::Begin
+                && records[recordsBefore + 2].type == minidb::LogRecordType::Compensation
+                && records.back().type == minidb::LogRecordType::Abort
+                && log.durableLsn() >= records.back().lsn,
+            "In-memory mutation rollback did not publish durable UPDATE/CLR/ABORT");
 }
 
 void appendRaw(const std::string& path, std::size_t count) {
