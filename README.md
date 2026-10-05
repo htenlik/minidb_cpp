@@ -16,7 +16,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - Persistent free-page reuse through a validated global free list
 - Versioned binary TCP protocol with command-line server and client
 - CRC32C-protected, segmented write-ahead log with safe segment reclamation
-- Implicit atomic recovery units for mutating SQL statements
+- Autocommit and explicit serial `BEGIN` / `COMMIT` / `ROLLBACK` transactions
 - STEAL / NO-FORCE physical REDO and restartable CLR-based UNDO
 - Persistent PageLSNs with database-format-v2 selective REDO and v1 migration
 - Sharp and opt-in fuzzy checkpoints with DPT/recLSN-bounded startup recovery
@@ -114,6 +114,7 @@ id | username | score
 | `SELECT` | `*` or named projections, optional `WHERE` |
 | `UPDATE` | Literal assignments with optional `WHERE` |
 | `DELETE` | Optional `WHERE` |
+| `BEGIN [TRANSACTION]`, `COMMIT`, `ROLLBACK` | One serial transaction spanning requests on the same connection |
 
 The type system contains `UINT32`, `INT64`, `BOOLEAN`, and `VARCHAR(1..4000)`, plus
 `NULL` for nullable columns. `WHERE` supports `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`,
@@ -122,7 +123,20 @@ equality predicate uses the persistent B+ tree; other predicates use a heap scan
 
 The current grammar intentionally excludes joins, aggregation and `GROUP BY`,
 `ORDER BY`, `LIMIT`/`OFFSET`, aliases, subqueries, set operations, secondary indexes,
-schema alteration, query optimization, and user-visible `BEGIN`/`COMMIT` transactions.
+schema alteration, and query optimization.
+
+Autocommit remains the default. To group mutations atomically, send these as separate
+requests on one connection:
+
+```sql
+BEGIN;
+INSERT INTO users VALUES (3, 'carol', 30, TRUE);
+UPDATE users SET username = 'caroline' WHERE id = 3;
+COMMIT;
+```
+
+Use `ROLLBACK` to discard the whole transaction. Disconnect also rolls it back. Only
+one transaction may be active globally; see [transactions.md](docs/transactions.md).
 
 ## Storage engine
 
@@ -148,8 +162,8 @@ satisfied. See [buffer-pool.md](docs/buffer-pool.md).
 
 ## WAL and crash recovery
 
-MiniDB++ treats each mutating SQL statement as one implicit recovery unit; it does not
-expose user-managed transactions. Physical WAL supports complete 4096-byte page images,
+MiniDB++ supports implicit statement transactions and explicit multi-statement
+transactions. Physical WAL supports complete 4096-byte page images,
 an opt-in byte-range before/after encoding, and opt-in per-record adaptive selection,
 with transaction chains, LSNs, and
 CRC32C validation. Full-page logging remains the default. The buffer
@@ -163,13 +177,13 @@ during recovery; CLRs are REDO-able and never themselves undone.
 The observable commit rule is:
 
 ```text
-durable COMMIT    -> recover the statement as committed
-no durable COMMIT -> recover the statement as aborted
+durable COMMIT    -> recover the transaction as committed
+no durable COMMIT -> recover the transaction as aborted
 ```
 
-A successful mutation is returned to the client only after its COMMIT record is
-fsynced. This is a correctness-first physical logging design and does not claim ARIES,
-general transactions, or crash-safe operation without the WAL sidecars.
+Autocommit mutations and explicit COMMIT return success only after COMMIT is fsynced.
+Statements inside BEGIN remain uncommitted until explicit COMMIT. The physical logging
+design does not claim ARIES or crash-safe operation without the WAL sidecars.
 
 Recovery is tested by real subprocess termination with `_exit`, bypassing normal
 destructors. Directed cases include crashes before and after COMMIT fsync, dirty STEAL
@@ -231,6 +245,7 @@ used during release verification.
 - [Adaptive physical WAL update encoding](docs/wal-adaptive.md)
 - [Persistent PageLSN and selective REDO](docs/page-lsn.md)
 - [Crash recovery](docs/recovery.md)
+- [Explicit serial transactions](docs/transactions.md)
 - [Compensation records and restartable UNDO](docs/clr-restartable-undo.md)
 - [Sharp checkpoints](docs/checkpoints.md)
 - [Fuzzy checkpoints, DPT, and recLSN](docs/fuzzy-checkpoints.md)
@@ -242,8 +257,9 @@ used during release verification.
 
 ## Current limitations
 
-- Database execution is single-threaded, with at most one active mutating statement.
-- There is no user-visible transaction syntax, MVCC, locking, or isolation model.
+- Database execution is single-threaded, with at most one active transaction globally.
+- There is no MVCC, locking, selectable isolation model, or savepoint support.
+- Long transactions retain original page images in memory until completion.
 - Byte-range/adaptive WAL adds diff CPU cost; adaptive bounds each update to the smaller
   existing physical encoding, while full-page logging remains the default.
 - Checkpoints are synchronous; fuzzy mode is opt-in and transaction overlap is deferred.

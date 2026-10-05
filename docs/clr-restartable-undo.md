@@ -1,14 +1,15 @@
 # Compensation log records and restartable UNDO
 
-MiniDB++ records recovery-time loser compensation in the WAL. A compensation log
+MiniDB++ records startup loser and live SQL ROLLBACK compensation in the WAL. A compensation log
 record (CLR) is a physical, REDO-able description of the page after one original
 update has been undone. A CLR is never itself undone. When UNDO reaches a CLR, it
 continues at `undoNextLSN`; this makes completed recovery work durable across repeated
 recovery crashes.
 
-This is deliberately narrower than ARIES. MiniDB++ still permits one serial implicit
-statement transaction, uses physical page logging, has no locks or physiological
-operations, and does not expose user-managed transactions.
+This is deliberately narrower than ARIES. MiniDB++ permits one serial implicit or
+explicit transaction, uses physical page logging, and has no locks or physiological
+operations. Live and startup rollback share the same CLR traversal; explicit scope and
+session behavior are documented in [transactions.md](transactions.md).
 
 ## Stable type and payload
 

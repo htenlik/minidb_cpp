@@ -1,9 +1,9 @@
-# Crash recovery and implicit statement transactions
+# Crash recovery and serial transactions
 
-Each mutating `CREATE TABLE`, `INSERT`, `UPDATE`, or `DELETE` statement is one internal
-atomic recovery unit. `SELECT` is read-only, and there is no
-user-visible transaction grammar. MiniDB++ still executes serially with at most one
-active mutation.
+Each mutating statement is an implicit atomic recovery unit unless grouped by SQL
+`BEGIN`/`COMMIT`/`ROLLBACK`. An explicit scope is one recovery unit spanning all its
+statements. `SELECT` is read-only. Execution remains serial with at most one active
+transaction. See [transactions.md](transactions.md) for session and error semantics.
 
 The default implementation uses physical full-page logging: every changed database page
 is represented by its complete 4096-byte before- and after-image. An explicit opt-in
@@ -23,12 +23,12 @@ CRC32C described in [wal.md](wal.md) enclose these payloads.
 
 | Offset | Width | Field |
 | ---: | ---: | --- |
-| 0 | 8 | database page count at logical statement start |
+| 0 | 8 | database page count at logical transaction start |
 | 8 | 8 | reserved, zero |
 
 The page count is captured before an allocation is possible. An in-memory transaction
-context is created at the statement boundary, but BEGIN is appended lazily only when a
-changed page must be logged. A successful zero-change update/delete and a semantic
+context is created at implicit statement start or explicit BEGIN, but WAL BEGIN is
+appended lazily only when a changed page must be logged. A successful zero-change update/delete and a semantic
 failure before mutation therefore emit no transaction WAL.
 
 ### PAGE_UPDATE payload (8208 bytes)
@@ -42,7 +42,7 @@ failure before mutation therefore emit no transaction WAL.
 | 16 | 4096 | full original before-image |
 | 4112 | 4096 | full current after-image |
 
-A page whose ID is below the BEGIN page count existed before the statement. This
+A page whose ID is below the BEGIN page count existed before the transaction. This
 includes a free-list page reused for another purpose, so rollback restores its exact
 Free Page encoding. A newly appended page has flag bit 0 clear and a canonical all-zero
 before-image; loser cleanup removes it by truncating the file to the BEGIN page count.
@@ -60,8 +60,10 @@ is logged/evicted, is reloaded, and changes again, records may contain `S0 -> S1
 `S0 -> S2`. REDO order ends at S2; either record can restore S0 during idempotent UNDO.
 
 COMMIT and ABORT have empty payloads. Their `prevLSN` completes the exact per-transaction
-chain. Transaction IDs are monotonic `uint64_t` values; zero is invalid, and startup
-chooses one above the maximum ID in retained WAL history.
+chain. Logged transaction IDs are monotonic `uint64_t` values; zero is invalid, and
+startup uses the maximum of the checkpoint's next ID and one above retained WAL IDs.
+An entirely unlogged read-only ID may be reused after restart; see
+[transactions.md](transactions.md#wal-and-completion).
 
 ## Runtime mutation and durability path
 
@@ -105,12 +107,14 @@ DiskManager transaction-agnostic. Catalog and free-list root changes cannot bypa
 
 ## In-process rollback
 
-An exception after mutation requires every guard to have released its pin. The buffer
-pool discards touched frames without flushing, existing pages are physically restored
-from original images, appended pages are discarded and the file is truncated, and the
-database file is fsynced. Only then is ABORT appended and fsynced. A durable ABORT thus
-means rollback was already stable; recovery can skip that transaction. This strong,
-expensive ordering avoids compensation log records while statement errors are uncommon.
+After all guards release, rollback prepares and forces the transaction's outstanding
+WAL, discards touched buffers, and invokes the same `undoTransaction` CLR traversal as
+startup recovery. Each compensated page follows WAL-before-data ordering, and ABORT is
+forced only after compensation and truncation are durable. Live delta rollback uses
+the retained original image as its base to preserve earlier NO-FORCE winner contents.
+No unlogged page-restoration path remains. Interrupted SQL ROLLBACK resumes at startup.
+An explicit scope retains original images across statement boundaries; statement
+completion prepares WAL but does not commit it.
 
 ## Startup recovery
 
@@ -138,7 +142,8 @@ ordering, and the single-active-transaction model.
   in ascending LSN order. PageLSN-aware records are skipped when the current persistent
   PageLSN is at least the record LSN; unknown/older pages are updated and assigned that
   record LSN. Legacy update records always replay.
-- A transaction with durable ABORT is skipped because rollback preceded that ABORT.
+- A transaction with durable ABORT requires no UNDO. Its CLRs remain REDO candidates;
+  persistent PageLSN skips already-durable compensations.
 - A loser has BEGIN/PAGE_UPDATE records but no terminal record and must be the final
   active transaction. Existing-page original images or delta before-ranges are applied,
   each original existing-page update is physically compensated by a forced type-5 CLR.

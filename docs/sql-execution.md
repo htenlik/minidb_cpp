@@ -161,13 +161,15 @@ reopen.
 - PK UPDATE/DELETE use one index lookup plus mutation; arbitrary forms use O(N)
   discovery plus the selected mutations.
 
-This is a specific access-path rule, not a planner or optimizer. There is no
-user-visible transaction manager. In the active server, `RecoveryCoordinator` wraps
-each mutating statement in an implicit WAL-backed recovery unit: a durable COMMIT is
-recovered as committed, while a statement without durable COMMIT is undone. Direct
-standalone construction of the semantic/storage layers without that coordinator retains
+This is a specific access-path rule, not a planner or optimizer. `SqlEngine` owns a
+`TransactionManager` that maintains autocommit or an explicit session-owned scope.
+`BEGIN [TRANSACTION]`, `COMMIT`, and `ROLLBACK` have separate AST alternatives and
+command results. One recovery context spans every statement in an explicit scope;
+only its final COMMIT is durable success. Mutation errors roll back the entire scope
+through CLRs; read/parse errors preserve it. See [transactions.md](transactions.md).
+Direct standalone construction of the semantic/storage layers without that coordinator retains
 only their local validation and compensation behavior.
 
-Unsupported features remain those outside the Milestone 6 grammar: JOIN, aggregation,
+Unsupported features include JOIN, aggregation,
 GROUP BY, ORDER BY, LIMIT, aliases, subqueries, schema changes, secondary indexes,
-user-visible transactions, and query planning.
+savepoints, concurrent transactions, and query planning.

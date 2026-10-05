@@ -2,7 +2,7 @@
 
 MiniDB++ uses a versioned sidecar write-ahead log with log sequence numbers (LSNs),
 buffered append and `fsync` durability, safe scanning, write-ahead ordering, implicit
-durable statement commit, and startup REDO/UNDO. Full-page physical updates remain the
+and explicit durable transaction commit, and startup REDO/UNDO. Full-page physical updates remain the
 default; an opt-in physical byte-range encoding is documented in
 [wal-byte-range.md](wal-byte-range.md), and opt-in per-record minimum-size selection is
 documented in [wal-adaptive.md](wal-adaptive.md). This protocol is not ARIES;
@@ -56,7 +56,7 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 | 8 | 4 | total record length | header plus payload |
 | 12 | 4 | payload length | total length minus 48 |
 | 16 | 8 | LSN | equals this record's global logical position |
-| 24 | 8 | `TransactionId` | statement transaction identity |
+| 24 | 8 | `TransactionId` | implicit or explicit transaction identity |
 | 32 | 8 | previous LSN | earlier record or `INVALID_LSN` |
 | 40 | 4 | checksum | CRC32C of the complete record with these four bytes zero |
 | 44 | 4 | flags/reserved | zero in version 1 |
@@ -193,7 +193,9 @@ winners are REDOed and a tail loser is undone. Sharp checkpoints bound normal re
 to their tail; fuzzy checkpoints retain history back to the oldest required recLSN.
 Segmented WAL deletes only whole segments behind the corresponding floor. Logical WAL
 generation continues to rise while physical retention depends on dirty-page lifetime.
-There is no archive/PITR, transaction-overlapping checkpoint, user transaction SQL, concurrency,
+Explicit transactions reuse these same BEGIN/update/COMMIT/CLR/ABORT formats and one
+`prevLSN` chain across statements; see [transactions.md](transactions.md).
+There is no archive/PITR, transaction-overlapping checkpoint, concurrency,
 group commit, or torn-page protection.
 
 ## Reference

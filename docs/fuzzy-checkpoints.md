@@ -9,8 +9,9 @@ This is a deliberately serial subset of ideas used by ARIES-style recovery. The
 [original ARIES paper record](https://research.ibm.com/publications/aries-a-transaction-recovery-method-supporting-fine-granularity-locking-and-partial-rollbacks-using-write-ahead-logging)
 describes a broader protocol with transaction and dirty-page tables, PageLSNs, fuzzy
 checkpoints, CLRs, locking, and partial rollback. MiniDB++ is not ARIES-compliant: it has
-one implicit statement transaction at a time, physical restartable-UNDO CLRs, and
-publishes fuzzy checkpoints only between statements.
+one implicit or explicit transaction at a time, physical restartable-UNDO CLRs, and
+publishes fuzzy checkpoints only between completed transactions. Automatic triggers
+remain pending while an explicit scope is active; runtime ATT snapshots stay empty.
 
 ## Dirty Page Table ownership and lifetime
 
@@ -21,7 +22,7 @@ write or dirty eviction clears recLSN only after the write succeeds; a later upd
 starts a new dirty period with a new recLSN. `BufferPoolManager::dirtyPageTableSnapshot()`
 returns a canonical PageId-ordered metadata snapshot without reading mutable page bytes.
 
-Because the current mutation API discovers the physical update at statement commit,
+Because the current mutation API discovers the physical update at statement preparation,
 write intent can temporarily mark a frame pending-dirty before an LSN exists. A fuzzy
 checkpoint cannot run in that interval: the no-active-statement restriction guarantees
 that every snapshotted dirty frame has its exact recLSN and PageLSN assigned.
@@ -78,7 +79,7 @@ Each future-compatible ATT entry is 48 bytes:
 | 12 | 4 | reserved (`0`) |
 | 16 | 8 | BEGIN LSN |
 | 24 | 8 | last LSN, at or after BEGIN |
-| 32 | 8 | statement start database-page count |
+| 32 | 8 | transaction start database-page count |
 | 40 | 8 | reserved (`0`) |
 
 The codec rejects unsupported versions and sizes, unknown status values, noncanonical or

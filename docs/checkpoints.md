@@ -3,7 +3,7 @@
 MiniDB++ preserves its quiescent **sharp** checkpoint and adds an opt-in, dirty-page
 **fuzzy** checkpoint. Sharp remains the default and its record bytes are unchanged: it
 requires zero pinned frames, flushes every dirty frame, and synchronizes the database.
-Fuzzy mode also runs between statements, but permits pinned frames and persists a
+Fuzzy mode also runs between completed transactions, but permits pinned frames and persists a
 DPT/recLSN snapshot without writing database pages. Persistent PageLSN complements both.
 
 The resulting invariant is:
@@ -131,9 +131,15 @@ checkpoint-ID continuity but do not become authoritative without control publica
 ## Policy, metrics, and boundary
 
 The internal API is `CheckpointManager::checkpoint(mode)`. There is no `CHECKPOINT` SQL
-statement. Automatic policy is evaluated only after successful mutating commit.
+statement. Automatic policy is evaluated after successful mutation statements and
+transaction completion. While an explicit transaction is active, a threshold trigger
+sets `pending()` without publishing a checkpoint. COMMIT, ROLLBACK, error rollback,
+and disconnect retry the pending request at the next safe boundary. Manual sharp and
+fuzzy checkpoints reject active transactions, including read-only ones. Production
+fuzzy ATT snapshots therefore remain empty, and reclamation cannot discard active UNDO.
 `--checkpoint-wal-bytes N` uses post-checkpoint WAL growth (default 64 MiB), while
-`--checkpoint-statements N` is an optional commit counter; zero disables either.
+`--checkpoint-statements N` counts successful mutation statements, including those
+inside an explicit scope later rolled back; zero disables either threshold.
 `--checkpoint-mode sharp|fuzzy` selects the mode and defaults to `sharp`. There
 is no mandatory shutdown checkpoint.
 
