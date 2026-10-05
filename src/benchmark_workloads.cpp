@@ -1530,8 +1530,17 @@ BenchmarkResult runExplicitTransactionBenchmark(const BenchmarkConfig& config, s
     };
     BenchmarkResult result;
     result.benchmark = std::string(name);
-    result.storageBackend = "serial_explicit_transaction";
+    result.storageBackend = "buffer_pool";
     result.configuration = config;
+    // Report the effective measured setup, not unused generic CLI defaults.
+    result.configuration.rows = 1;
+    result.configuration.warmupOperations = 0;
+    result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    if (name != "transaction_checkpoint") {
+        result.configuration.checkpointWalBytes = 0;
+        result.configuration.checkpointStatements = 0;
+    }
     result.seed = config.seed;
     result.environment = currentEnvironment();
     if (name == "transaction_recovery") {

@@ -600,6 +600,7 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << result.recovery.recovery.undoRestartCount
                << ",\"undo_page_writes\":"
                << result.recovery.recovery.undoPageWrites
+               << ",\"pages_truncated\":" << result.recovery.recovery.pagesTruncated
                << ",\"undo_wal_bytes\":"
                << result.recovery.recovery.undoWalBytes
                << ",\"recovery_page_reads\":"

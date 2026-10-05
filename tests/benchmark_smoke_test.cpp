@@ -73,6 +73,14 @@ int main() {
                 minidb::test::require(measured.size() == 1 && measured[0].validationPassed,
                                       "Transaction benchmark failed validation");
                 const auto& result = measured[0];
+                minidb::test::require(result.storageBackend == "buffer_pool"
+                    && result.configuration.rows == 1 && result.configuration.warmupOperations == 0,
+                    "Transaction benchmark reported unused generic configuration");
+                if (transaction.benchmark != "transaction_checkpoint") {
+                    minidb::test::require(result.configuration.checkpointWalBytes == 0
+                        && result.configuration.checkpointStatements == 0,
+                        "Transaction comparison reported checkpoints enabled when disabled");
+                }
                 if (transaction.benchmark == "transaction_implicit") {
                     minidb::test::require(result.transaction.commitFsyncs == 10,
                                           "Implicit benchmark did not commit every mutation");
@@ -88,6 +96,9 @@ int main() {
                 minidb::test::require(minidb::bench::resultsToJson(measured).find("\"transaction\":")
                                           != std::string::npos,
                                       "Transaction benchmark JSON metrics missing");
+                minidb::test::require(minidb::bench::resultsToJson(measured).find("\"pages_truncated\":")
+                                          != std::string::npos,
+                                      "Rollback truncation metric missing from JSON");
             }
         }
         return 0;
