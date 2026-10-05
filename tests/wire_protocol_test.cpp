@@ -101,6 +101,19 @@ void testCommandResult() {
     const sql::QueryResult query = input;
     minidb::test::require(decodeQueryResultFrame(encodeQueryResultFrame(123, query)) == query,
                           "Command QueryResult failed round-trip");
+    std::uint8_t commandId = 5;
+    for (auto kind : {sql::CommandKind::Begin, sql::CommandKind::Commit,
+                      sql::CommandKind::Rollback}) {
+        const sql::CommandResult control{kind, 0, std::nullopt, {}};
+        const auto encoded = encodeCommandResultPayload(control);
+        minidb::test::require(encoded.size() == 40 && octet(encoded[0]) == 0
+                                  && octet(encoded[1]) == commandId++
+                                  && std::all_of(encoded.begin() + 2, encoded.end(),
+                                                 [](std::byte value) { return value == std::byte{0}; }),
+                              "Transaction command changed v1 result field layout");
+        minidb::test::require(decodeCommandResultPayload(encoded) == control,
+                              "Transaction command did not round-trip");
+    }
 }
 
 void testSelectValuesAndError() {

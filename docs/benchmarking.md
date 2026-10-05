@@ -302,6 +302,9 @@ The output root is `{"schema_version":1,"results":[...]}`. Each result contains:
   writes, WAL/database/control syncs, checkpoint
   latency, and separately reclaimed segments/bytes/reclamation latency; configuration
   records byte/statement thresholds and enablement;
+- `transaction`: generated WAL bytes, WAL/COMMIT fsync counts, terminal COMMIT or
+  ROLLBACK latency, touched pages, original-before-image pages/bytes, estimated peak
+  recovery-context bytes, pending/deferred checkpoint flags, and retained WAL peak/after;
 - `storage.before` and `storage.after`: pages, bytes, free and resident pages;
 - `execution`: average rows examined and index lookups;
 - `environment`: version context, configured Git commit, compiler, build type, platform,
@@ -323,6 +326,42 @@ Persistent PageLSN metric semantics and the relationship to sharp checkpoints ar
 [page-lsn.md](page-lsn.md).
 
 ## Limitations and interpretation
+
+### Explicit transaction experiments
+
+`transaction_implicit` and `transaction_explicit` execute identical SQL updates of one
+INT64 field in a pre-created single-row table. `--operations 1000` means 1,000 distinct
+values, either 1,000 autocommits or one BEGIN/COMMIT scope. Setup and its sharp/fuzzy
+checkpoint are untimed. Statement percentiles include implicit commit but exclude the
+explicit terminal COMMIT; throughput uses total time including BEGIN and completion.
+`transaction.final_commit_ns` reports explicit completion separately. Ordinary automatic
+checkpoints are disabled for this comparison. This is a hot, serial, same-page workload,
+not evidence of a universal throughput improvement.
+
+```bash
+./build-release/minidb_bench --benchmark transaction_implicit --operations 1000 --json implicit.benchmark.json
+./build-release/minidb_bench --benchmark transaction_explicit --operations 1000 --json explicit.benchmark.json
+./build-release/minidb_bench --benchmark transaction_rollback --operations 1000
+./build-release/minidb_bench --benchmark transaction_recovery --operations 1000
+./build-release/minidb_bench --benchmark transaction_checkpoint --operations 1000 \
+  --checkpoint-wal-bytes 4096 --wal-segment-bytes 16384 --checkpoint-mode sharp
+```
+
+Run rollback/recovery at 10, 100, and 1,000 updates. Live rollback reports terminal
+latency, CLR count/bytes, compensation writes, and truncation operations in `recovery`.
+Recovery forks a writer, flushes loser pages under STEAL, exits without destructors,
+then measures real startup analysis/REDO/UNDO and total open/validation/close time.
+`recovery.total_ns` isolates the recovery phases from that enclosing wall time.
+
+The checkpoint workload verifies pending=true and zero published checkpoints while
+active, then exactly one checkpoint after COMMIT. Repeat with `--checkpoint-mode fuzzy`.
+Retained peak includes buffered WAL; retained-after includes completion and optional
+reclamation, so fuzzy retention may remain high while its DPT still needs history.
+Before-image metrics exclude map allocator overhead, temporary encodings, and global
+statistics vectors; they are recovery-state estimates, not RSS. See
+[transactions.md](transactions.md) for the long-transaction memory and preparation costs.
+
+### General limitations
 
 - This harness is single-process and single-client; it is not a concurrency benchmark.
 - WAL batch forcing is synchronous and single-threaded; it is not group commit.

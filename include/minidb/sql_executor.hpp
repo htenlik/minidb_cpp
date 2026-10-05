@@ -3,6 +3,7 @@
 #include "minidb/catalog.hpp"
 #include "minidb/sql_ast.hpp"
 #include "minidb/sql_semantics.hpp"
+#include "minidb/transaction_manager.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -35,6 +36,9 @@ enum class CommandKind {
     Insert,
     Update,
     Delete,
+    Begin,
+    Commit,
+    Rollback,
 };
 
 struct CommandResult {
@@ -73,15 +77,18 @@ public:
         Catalog& catalog,
         RecoveryCoordinator* recovery = nullptr,
         CheckpointManager* checkpoints = nullptr)
-        : executor_(catalog), recovery_(recovery), checkpoints_(checkpoints) {}
+        : executor_(catalog), transactions_(recovery, checkpoints) {}
 
-    [[nodiscard]] QueryResult execute(std::string_view source);
-    [[nodiscard]] QueryResult execute(const Statement& statement);
+    [[nodiscard]] QueryResult execute(std::string_view source, SessionId session = LOCAL_SESSION_ID);
+    [[nodiscard]] QueryResult execute(const Statement& statement, SessionId session = LOCAL_SESSION_ID);
+    void closeSession(SessionId session) { transactions_.closeSession(session); }
+    void shutdown() { transactions_.shutdown(); }
+    [[nodiscard]] TransactionManager& transactionManager() noexcept { return transactions_; }
+    [[nodiscard]] const TransactionManager& transactionManager() const noexcept { return transactions_; }
 
 private:
     SqlExecutor executor_;
-    RecoveryCoordinator* recovery_;
-    CheckpointManager* checkpoints_;
+    TransactionManager transactions_;
 };
 
 } // namespace minidb::sql

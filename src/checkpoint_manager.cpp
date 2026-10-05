@@ -151,6 +151,7 @@ CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
             previousCheckpointEndLsn_ = endLsn;
             lastCheckpointWalSize_ = checkpointWalEnd;
             statementsSinceCheckpoint_ = 0;
+            pending_ = false;
             return checkpointId;
         }
         const auto beginLsn = logManager_.append(LogRecord{
@@ -263,6 +264,7 @@ CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
         previousCheckpointEndLsn_ = endLsn;
         lastCheckpointWalSize_ = recoveryStart;
         statementsSinceCheckpoint_ = 0;
+        pending_ = false;
         return checkpointId;
     } catch (...) {
         ++stats_.checkpointFailures;
@@ -272,11 +274,16 @@ CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
 
 bool CheckpointManager::onStatementCommitted() noexcept {
     ++statementsSinceCheckpoint_;
+    return onTransactionCompleted();
+}
+
+bool CheckpointManager::onTransactionCompleted() noexcept {
     const auto walGrowth = logManager_.lastValidOffset() - lastCheckpointWalSize_;
     const bool walTriggered = policy_.walBytes != 0 && walGrowth >= policy_.walBytes;
     const bool statementTriggered = policy_.statements != 0
         && statementsSinceCheckpoint_ >= policy_.statements;
-    if (!walTriggered && !statementTriggered) return false;
+    pending_ = pending_ || walTriggered || statementTriggered;
+    if (!pending_ || recovery_.hasActiveStatement() || recovery_.rollbackActive()) return false;
     try {
         static_cast<void>(checkpoint());
         return true;

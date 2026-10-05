@@ -112,8 +112,11 @@ protocol errors.
 | 12 | 28 | `ExecutionStats` |
 | 40 | 0 or 8 | optional `RecordId` |
 
-Command IDs are 1 `CreateTable`, 2 `Insert`, 3 `Update`, and 4 `Delete`. Unknown flag
-bits are rejected.
+Command IDs are 1 `CreateTable`, 2 `Insert`, 3 `Update`, 4 `Delete`, 5 `Begin`,
+6 `Commit`, and 7 `Rollback`. Transaction-control commands report zero affected rows
+and no RID. These additive IDs do not change v1 framing or payload offsets; clients
+that reject unknown command IDs must be updated to consume transaction responses.
+Unknown flag bits are rejected.
 
 ### `SELECT_RESULT`
 

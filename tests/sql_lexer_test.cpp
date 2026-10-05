@@ -55,7 +55,8 @@ void testEmptyWhitespaceAndLocations() {
 void testKeywordsCaseAndIdentifierBoundaries() {
     constexpr std::string_view source =
         "CREATE TABLE INSERT INTO VALUES SELECT FROM WHERE UPDATE SET DELETE "
-        "PRIMARY KEY NOT NULL UINT32 INT64 BOOLEAN VARCHAR TRUE FALSE AND OR";
+        "PRIMARY KEY NOT NULL UINT32 INT64 BOOLEAN VARCHAR TRUE FALSE AND OR "
+        "BEGIN TRANSACTION COMMIT ROLLBACK";
     const auto tokens = lex(source);
     const std::vector<TokenKind> expected{
         TokenKind::Create, TokenKind::Table, TokenKind::Insert, TokenKind::Into,
@@ -63,7 +64,9 @@ void testKeywordsCaseAndIdentifierBoundaries() {
         TokenKind::Update, TokenKind::Set, TokenKind::Delete, TokenKind::Primary,
         TokenKind::Key, TokenKind::Not, TokenKind::Null, TokenKind::Uint32,
         TokenKind::Int64, TokenKind::Boolean, TokenKind::Varchar, TokenKind::True,
-        TokenKind::False, TokenKind::And, TokenKind::Or, TokenKind::EndOfFile,
+        TokenKind::False, TokenKind::And, TokenKind::Or,
+        TokenKind::Begin, TokenKind::Transaction, TokenKind::Commit,
+        TokenKind::Rollback, TokenKind::EndOfFile,
     };
     minidb::test::require(kinds(tokens) == expected, "Not every SQL keyword was recognized");
 
@@ -77,6 +80,25 @@ void testKeywordsCaseAndIdentifierBoundaries() {
                               && mixed[1].value == "selectValue"
                               && mixed[2].value == "_from",
                           "Lexer did not preserve source spelling");
+}
+
+void testTransactionKeywords() {
+    const auto tokens = lex(
+        "bEgIn TrAnSaCtIoN cOmMiT rOlLbAcK begin2 transaction_id commitCount rollbacked");
+    minidb::test::require(kinds(tokens) == std::vector<TokenKind>{
+                              TokenKind::Begin, TokenKind::Transaction,
+                              TokenKind::Commit, TokenKind::Rollback,
+                              TokenKind::Identifier, TokenKind::Identifier,
+                              TokenKind::Identifier, TokenKind::Identifier,
+                              TokenKind::EndOfFile},
+                          "Transaction keywords lost case folding/identifier boundaries");
+    minidb::test::require(tokens[0].lexeme == "bEgIn"
+                              && tokens[1].value == "TrAnSaCtIoN"
+                              && minidb::sql::tokenKindName(tokens[0].kind) == "BEGIN"
+                              && minidb::sql::tokenKindName(tokens[1].kind) == "TRANSACTION"
+                              && minidb::sql::tokenKindName(tokens[2].kind) == "COMMIT"
+                              && minidb::sql::tokenKindName(tokens[3].kind) == "ROLLBACK",
+                          "Transaction keyword source spelling/debug names were incorrect");
 }
 
 void testPunctuationAndMaximalMunch() {
@@ -198,6 +220,7 @@ int main() {
     try {
         testEmptyWhitespaceAndLocations();
         testKeywordsCaseAndIdentifierBoundaries();
+        testTransactionKeywords();
         testPunctuationAndMaximalMunch();
         testIntegersAndStrings();
         testComments();

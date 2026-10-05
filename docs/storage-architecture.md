@@ -125,7 +125,10 @@ production graph attaches LogManager and the
 coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encoding.
 
 The engine remains single-threaded. Guards are not locks or latches. Physical
-analysis/REDO/UNDO provides one implicit recovery unit per mutating statement. Sharp
+analysis/REDO/UNDO provides autocommit per mutating statement or one explicit unit
+across statements. SqlEngine's TransactionManager owns session/scope policy; recovery
+owns physical before-images and the WAL chain. Storage layers do not inspect SQL
+transaction state. See [transactions.md](transactions.md). Sharp
 full-buffer and opt-in fuzzy DPT checkpoints share the double-slotted `database.db.ckpt`
 recovery pointer; segmented WAL reclaims whole files behind the mode-specific floor.
 Selective REDO additionally skips a committed v2 update when the disk PageLSN is equal

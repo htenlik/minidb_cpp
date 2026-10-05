@@ -27,7 +27,7 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--wal-segment-bytes N` | 16777216 | Fixed segmented-WAL payload capacity |
 | `--wal-update-mode MODE` | `full-page` | `full-page`, `byte-range`, or `adaptive` page updates |
 | `--checkpoint-wal-bytes N` | 67108864 | Automatic checkpoint growth threshold; zero disables |
-| `--checkpoint-statements N` | 0 | Automatic checkpoint commit threshold; zero disables |
+| `--checkpoint-statements N` | 0 | Successful mutation-statement threshold; deferred during explicit transactions; zero disables |
 | `--redo-persisted-percent N` | 100 | Persisted recovery-tail updates in `recovery_page_lsn_compare` (`0..100`) |
 | `--tuple-sizes MODE` | mixed | `small`, `medium`, `large`, or `mixed` |
 | `--seed N` | 12345 | Deterministic workload seed |
@@ -67,3 +67,13 @@ selective and AlwaysRedo policies and reports checks, skips, applies, reads, and
 visit count against CLR resume and expose full-page CLR WAL volume. Its timing includes
 deliberately interrupted recovery passes and is not a universal speed claim.
 These are deterministic baselines, not timing-gated CI assertions.
+
+Explicit-transaction workloads are `transaction_implicit`, `transaction_explicit`,
+`transaction_rollback`, `transaction_recovery`, and `transaction_checkpoint`. They use
+`--operations` same-row SQL updates and honor the WAL update mode and buffer capacity.
+The first two compare autocommit with a single explicit commit. Rollback/recovery expose
+CLR work at 10/100/1000 updates. The checkpoint case needs a reachable threshold, e.g.
+`--checkpoint-wal-bytes 4096 --wal-segment-bytes 16384`, and supports sharp/fuzzy modes.
+The `transaction` JSON section reports completion latency, WAL/fsync costs, before-image
+memory, and deferred checkpoint/retention measurements; `recovery` reports CLR work and
+recovery phases. See [measurement definitions](../docs/benchmarking.md#explicit-transaction-experiments).

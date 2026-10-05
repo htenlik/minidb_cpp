@@ -26,10 +26,12 @@ namespace minidb::net {
 class DatabaseServer {
 public:
     DatabaseServer(std::string databasePath, ServerConfig config);
+    ~DatabaseServer();
 
     void start() { server_->start(); }
     void serve(std::size_t connectionLimit = 0) { server_->serve(connectionLimit); }
-    void close() noexcept { server_->close(); }
+    // Call explicitly to observe a rollback/durability failure during shutdown.
+    void close();
 
     [[nodiscard]] std::uint16_t port() const noexcept { return server_->port(); }
     [[nodiscard]] TcpServer& tcpServer() noexcept { return *server_; }

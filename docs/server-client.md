@@ -95,13 +95,20 @@ The final query reports `PrimaryKeyLookup` and one index lookup.
 
 ## Persistence and reconnects
 
-Every mutating statement runs as one implicit recovery unit. Operation guards leave
-scope before commit preparation; the server returns success only after the COMMIT
-record is durable. Database pages are not forced at this boundary, and `SELECT` does
-not perform a global flush. Startup recovery REDOs durable-COMMIT winners and UNDOs a
-tail loser, so clean reconnects and tested process crashes preserve statement
-atomicity. There is still no user-visible multi-statement transaction syntax. See
-[recovery.md](recovery.md) for the exact commit boundary and limitations.
+By default each mutating statement is one implicit transaction. `BEGIN [TRANSACTION]`
+opens a serial explicit transaction owned by that connection; subsequent requests share
+its transaction ID and WAL chain until `COMMIT` or `ROLLBACK`. Intermediate statement
+success is not a durable commit. COMMIT forces WAL, not database pages; ROLLBACK uses
+restartable CLR UNDO and forces ABORT before returning. `SELECT` reads the connection's
+own changes without globally flushing. A mutation execution error rolls back the whole
+scope; parser and SELECT errors leave it active.
+
+EOF and protocol failures roll back the connection's active scope before serving the
+next client. Graceful `DatabaseServer::close()` rolls back; it never commits implicitly.
+If cleanup fails, the server stops accepting work and requires reopen/recovery. A hard
+crash leaves startup recovery to undo the loser. A crash after COMMIT fsync but before
+the response can leave a committed transaction without an acknowledgement. See
+[transactions.md](transactions.md) and [recovery.md](recovery.md).
 
 A client connection can carry many sequential requests. A normal SQL error does not end
 the session. Clients may disconnect and reconnect with a new HELLO exchange; later clients

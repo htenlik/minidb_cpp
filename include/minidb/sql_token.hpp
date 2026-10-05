@@ -36,6 +36,10 @@ enum class TokenKind {
     False,
     And,
     Or,
+    Begin,
+    Transaction,
+    Commit,
+    Rollback,
 
     LeftParen,
     RightParen,

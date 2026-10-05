@@ -14,10 +14,12 @@
 
 namespace {
 
+using minidb::sql::BeginStatement;
 using minidb::sql::BinaryExpression;
 using minidb::sql::BinaryOperator;
 using minidb::sql::BooleanLiteral;
 using minidb::sql::ColumnSpecification;
+using minidb::sql::CommitStatement;
 using minidb::sql::CreateTableStatement;
 using minidb::sql::DeleteStatement;
 using minidb::sql::InsertStatement;
@@ -25,6 +27,7 @@ using minidb::sql::IntegerLiteral;
 using minidb::sql::NullConstraint;
 using minidb::sql::NullLiteral;
 using minidb::sql::Parser;
+using minidb::sql::RollbackStatement;
 using minidb::sql::SelectStatement;
 using minidb::sql::SqlError;
 using minidb::sql::SqlErrorKind;
@@ -284,6 +287,47 @@ void testMalformedStatementFamilies() {
     requireParserError("CREATE TABLE t (id UINT32,)", "trailing comma");
 }
 
+void testTransactionControlStatements() {
+    for (const auto source : {"BEGIN", "BEGIN;", "bEgIn tRaNsAcTiOn;",
+                              "BEGIN /* transaction control */ TRANSACTION"}) {
+        const auto statement = parse(source);
+        static_cast<void>(requireStatement<BeginStatement>(statement,
+            "BEGIN did not produce an explicit transaction AST node"));
+        minidb::test::require(minidb::sql::toDebugString(statement) == "Begin",
+                              "BEGIN debug string was incorrect");
+    }
+    for (const auto source : {"COMMIT", "COMMIT;", "cOmMiT; -- finished"}) {
+        const auto statement = parse(source);
+        static_cast<void>(requireStatement<CommitStatement>(statement,
+            "COMMIT did not produce an explicit transaction AST node"));
+        minidb::test::require(minidb::sql::toDebugString(statement) == "Commit",
+                              "COMMIT debug string was incorrect");
+    }
+    for (const auto source : {"ROLLBACK", "ROLLBACK;", "rOlLbAcK; -- aborted"}) {
+        const auto statement = parse(source);
+        static_cast<void>(requireStatement<RollbackStatement>(statement,
+            "ROLLBACK did not produce an explicit transaction AST node"));
+        minidb::test::require(minidb::sql::toDebugString(statement) == "Rollback",
+                              "ROLLBACK debug string was incorrect");
+    }
+    const auto located = parse("-- transaction\n  BEGIN TRANSACTION; -- trailing");
+    minidb::test::require(located.span.begin.line == 2
+                              && located.span.begin.column == 3
+                              && located.span.end.line == 2
+                              && located.span.end.column == 21,
+                          "Transaction AST did not preserve the complete source span");
+
+    for (const auto source : {
+             "BEGIN TRANSACTION TRANSACTION", "BEGIN WORK", "BEGIN foo", "BEGIN 1",
+             "BEGIN ()", "BEGIN IMMEDIATE", "BEGIN READ ONLY", "BEGIN; COMMIT;",
+             "BEGIN TRANSACTION; ROLLBACK;", "COMMIT TRANSACTION", "COMMIT WORK",
+             "COMMIT 1", "COMMIT; garbage", "COMMIT;;", "ROLLBACK TRANSACTION",
+             "ROLLBACK TO checkpoint", "ROLLBACK WORK", "ROLLBACK ()", "ROLLBACK;;",
+             "TRANSACTION", "SAVEPOINT s", "RELEASE s", "SET TRANSACTION"}) {
+        requireParserError(source);
+    }
+}
+
 void testErrorLocationsAndNestingLimit() {
     try {
         static_cast<void>(parse("SELECT id\nFROM t\nWHERE )"));
@@ -337,6 +381,7 @@ int main() {
         testSelectProjectionAndExpressionPrecedence();
         testUpdateDeleteAndOptionalTerminator();
         testMalformedStatementFamilies();
+        testTransactionControlStatements();
         testErrorLocationsAndNestingLimit();
         testLargeExpressionAndAstMove();
         std::cout << "sql_parser_test passed\n";

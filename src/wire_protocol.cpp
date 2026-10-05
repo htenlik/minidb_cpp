@@ -14,6 +14,9 @@ constexpr std::uint16_t COMMAND_CREATE_TABLE = 1;
 constexpr std::uint16_t COMMAND_INSERT = 2;
 constexpr std::uint16_t COMMAND_UPDATE = 3;
 constexpr std::uint16_t COMMAND_DELETE = 4;
+constexpr std::uint16_t COMMAND_BEGIN = 5;
+constexpr std::uint16_t COMMAND_COMMIT = 6;
+constexpr std::uint16_t COMMAND_ROLLBACK = 7;
 constexpr std::uint16_t ACCESS_NONE = 0;
 constexpr std::uint16_t ACCESS_HEAP_SCAN = 1;
 constexpr std::uint16_t ACCESS_PRIMARY_KEY = 2;
@@ -162,6 +165,9 @@ std::uint16_t encodeCommandKind(sql::CommandKind kind) {
     case sql::CommandKind::Insert: return COMMAND_INSERT;
     case sql::CommandKind::Update: return COMMAND_UPDATE;
     case sql::CommandKind::Delete: return COMMAND_DELETE;
+    case sql::CommandKind::Begin: return COMMAND_BEGIN;
+    case sql::CommandKind::Commit: return COMMAND_COMMIT;
+    case sql::CommandKind::Rollback: return COMMAND_ROLLBACK;
     }
     throw ProtocolError("unknown command kind");
 }
@@ -172,6 +178,9 @@ sql::CommandKind decodeCommandKind(std::uint16_t value) {
     case COMMAND_INSERT: return sql::CommandKind::Insert;
     case COMMAND_UPDATE: return sql::CommandKind::Update;
     case COMMAND_DELETE: return sql::CommandKind::Delete;
+    case COMMAND_BEGIN: return sql::CommandKind::Begin;
+    case COMMAND_COMMIT: return sql::CommandKind::Commit;
+    case COMMAND_ROLLBACK: return sql::CommandKind::Rollback;
     default: throw ProtocolError("invalid command kind ID");
     }
 }

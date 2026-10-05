@@ -28,6 +28,8 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -1508,6 +1510,133 @@ BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
     return result;
 }
 
+BenchmarkResult runExplicitTransactionBenchmark(const BenchmarkConfig& config, std::string_view name) {
+    removeDatabase(config);
+    net::ServerConfig settings{"127.0.0.1", 0, 8,
+        static_cast<std::size_t>(config.bufferFrames), static_cast<std::size_t>(config.lruK)};
+    settings.walUpdateMode = config.walUpdateMode;
+    settings.walSegmentBytes = config.walSegmentBytes;
+    settings.checkpointWalBytes = 0;
+    settings.checkpointMode = config.checkpointMode;
+    {
+        net::DatabaseServer server(config.databasePath, settings);
+        static_cast<void>(server.sqlEngine().execute(
+            "CREATE TABLE counter (id UINT32 PRIMARY KEY, value INT64 NOT NULL)"));
+        static_cast<void>(server.sqlEngine().execute("INSERT INTO counter VALUES (1, 0)"));
+        static_cast<void>(server.checkpointManager().checkpoint());
+    }
+    const auto update = [](std::uint64_t index) {
+        return "UPDATE counter SET value = " + std::to_string(index + 1) + " WHERE id = 1";
+    };
+    BenchmarkResult result;
+    result.benchmark = std::string(name);
+    result.storageBackend = "buffer_pool";
+    result.configuration = config;
+    // Report the effective measured setup, not unused generic CLI defaults.
+    result.configuration.rows = 1;
+    result.configuration.warmupOperations = 0;
+    result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    if (name != "transaction_checkpoint") {
+        result.configuration.checkpointWalBytes = 0;
+        result.configuration.checkpointStatements = 0;
+    }
+    result.seed = config.seed;
+    result.environment = currentEnvironment();
+    if (name == "transaction_recovery") {
+        const auto child = ::fork();
+        if (child < 0) throw std::runtime_error("transaction benchmark fork failed");
+        if (child == 0) {
+            try {
+                net::DatabaseServer server(config.databasePath, settings);
+                static_cast<void>(server.sqlEngine().execute("BEGIN"));
+                for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+                    static_cast<void>(server.sqlEngine().execute(update(operation)));
+                }
+                server.bufferPool().flushAll();
+                server.diskManager().sync();
+                ::_exit(86);
+            } catch (...) { ::_exit(87); }
+        }
+        int status = 0;
+        if (::waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 86) {
+            throw std::runtime_error("transaction benchmark loser setup failed");
+        }
+        result.transaction.retainedWalPeak = walPhysicalBytes(config.databasePath);
+        std::vector<std::uint64_t> elapsed;
+        measure(elapsed, [&] {
+            net::DatabaseServer server(config.databasePath, settings);
+            result.recovery.recovery = server.startupRecoveryStats();
+            result.validationPassed = std::get<std::int64_t>(std::get<sql::SelectResult>(
+                server.sqlEngine().execute("SELECT value FROM counter")).rows.at(0).at(0)) == 0;
+            server.catalog().validate();
+            server.pageAllocator().validate();
+        });
+        result.timing = summarizeTimings(elapsed, totalLatency(elapsed));
+    } else {
+        const bool implicit = name == "transaction_implicit";
+        const bool rollback = name == "transaction_rollback";
+        const bool checkpoint = name == "transaction_checkpoint";
+        if (checkpoint) {
+            settings.checkpointWalBytes = config.checkpointWalBytes;
+            settings.checkpointStatements = config.checkpointStatements;
+        }
+        net::DatabaseServer server(config.databasePath, settings);
+        auto& engine = server.sqlEngine();
+        server.logManager().resetStats();
+        server.recoveryCoordinator().resetStats();
+        server.checkpointManager().resetStats();
+        engine.transactionManager().resetStats();
+        const auto walStart = server.logManager().lastValidOffset();
+        std::vector<std::uint64_t> elapsed;
+        const auto start = Clock::now();
+        if (!implicit) static_cast<void>(engine.execute("BEGIN"));
+        for (std::uint64_t operation = 0; operation < config.operations; ++operation) {
+            measure(elapsed, [&] { static_cast<void>(engine.execute(update(operation))); });
+        }
+        result.transaction.touchedPages = engine.transactionManager().touchedPageCount();
+        result.transaction.checkpointPending = server.checkpointManager().pending();
+        result.transaction.checkpointDeferred = checkpoint
+            && server.checkpointManager().stats().checkpointsCompleted == 0;
+        result.transaction.retainedWalPeak = server.logManager().physicalWalBytes()
+            + server.logManager().stats().bufferedBytes;
+        if (!implicit) {
+            const auto terminalStart = Clock::now();
+            static_cast<void>(engine.execute(rollback ? "ROLLBACK" : "COMMIT"));
+            const auto terminalNs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - terminalStart).count());
+            if (rollback) result.transaction.rollbackNs = terminalNs;
+            else result.transaction.finalCommitNs = terminalNs;
+        }
+        const auto totalNs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+        result.timing = summarizeTimings(elapsed, totalNs);
+        result.transaction.walBytes = server.logManager().lastValidOffset() - walStart;
+        result.transaction.walFsyncs = server.logManager().stats().fsyncCalls;
+        result.transaction.commitFsyncs = server.recoveryCoordinator().stats().commitFsyncs;
+        const auto& stats = engine.transactionManager().stats();
+        result.transaction.originalBeforeImagePages = stats.originalBeforeImagePages;
+        result.transaction.originalBeforeImageBytes = stats.originalBeforeImageBytes;
+        result.transaction.peakRecoveryBytes = stats.peakTransactionRecoveryBytes;
+        result.recovery.transactions = server.recoveryCoordinator().stats();
+        if (rollback) result.recovery.recovery = server.recoveryCoordinator().lastRollbackStats();
+        result.checkpoint = server.checkpointManager().stats();
+        result.wal.manager = server.logManager().stats();
+        result.validationPassed = std::get<std::int64_t>(std::get<sql::SelectResult>(
+            engine.execute("SELECT value FROM counter")).rows.at(0).at(0))
+                == (rollback ? 0 : static_cast<std::int64_t>(config.operations));
+        if (checkpoint) result.validationPassed = result.validationPassed
+            && result.transaction.checkpointPending && result.transaction.checkpointDeferred
+            && !server.checkpointManager().pending() && result.checkpoint.checkpointsCompleted == 1;
+        server.catalog().validate();
+        server.pageAllocator().validate();
+        server.bufferPool().flushAll();
+    }
+    result.transaction.retainedWalAfter = walPhysicalBytes(config.databasePath);
+    cleanupDatabase(config);
+    return result;
+}
+
 BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
     removeDatabase(config);
     BenchmarkResult result;
@@ -1823,6 +1952,7 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     if (name == "wal_segment_rotation") return runWalSegmentRotation(config);
     if (name == "wal_reclamation") return runWalReclamation(config);
     if (name.starts_with("wal_")) return runWal(config, name);
+    if (name.starts_with("transaction_")) return runExplicitTransactionBenchmark(config, name);
     if (name.starts_with("txn_")) return runTransactional(config, name);
     if (name == "recovery_full_scan" || name == "recovery_loser") {
         return runRecoveryBenchmark(config, name);

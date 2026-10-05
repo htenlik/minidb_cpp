@@ -18,6 +18,7 @@ reserved and ASCII case-insensitive. The keyword set is:
 ```text
 CREATE TABLE INSERT INTO VALUES SELECT FROM WHERE UPDATE SET DELETE
 PRIMARY KEY NOT NULL UINT32 INT64 BOOLEAN VARCHAR TRUE FALSE AND OR
+BEGIN TRANSACTION COMMIT ROLLBACK
 ```
 
 Punctuation/operators are `(`, `)`, `,`, `;`, `*`, `=`, `!=`, `<>`, `<`, `<=`, `>`,
@@ -52,7 +53,11 @@ keywords.
 
 ```text
 statement
-    := (create_table | insert | select | update | delete) [';'] EOF
+    := (create_table | insert | select | update | delete | begin | commit | rollback) [';'] EOF
+
+begin    := BEGIN [TRANSACTION]
+commit   := COMMIT
+rollback := ROLLBACK
 
 create_table
     := CREATE TABLE identifier '('
@@ -112,7 +117,8 @@ the parser otherwise does not apply Schema policy.
 ## AST and diagnostics
 
 Statement nodes are `CreateTableStatement`, `InsertStatement`, `SelectStatement`,
-`UpdateStatement`, and `DeleteStatement`. Expression nodes are identifier, literal,
+`UpdateStatement`, `DeleteStatement`, `BeginStatement`, `CommitStatement`, and
+`RollbackStatement`. Expression nodes are identifier, literal,
 unary NOT, and binary comparison/AND/OR nodes. Recursive children use `unique_ptr`, so
 ownership is explicit and ASTs are move-only. Statements, expressions, columns,
 assignments, types, and literals retain useful source spans. A deterministic debug
@@ -135,7 +141,7 @@ ranges, and VARCHAR limits are handled by the semantic layer.
 
 JOIN, qualified identifiers, aliases, projection expressions, functions, aggregates,
 DISTINCT, GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET, subqueries, UNION, multi-row VALUES,
-INSERT ... SELECT, arithmetic, CREATE INDEX, DROP, ALTER, transactions, and
+INSERT ... SELECT, arithmetic, CREATE INDEX, DROP, ALTER, savepoints, isolation clauses, and
 placeholders are unsupported by the grammar.
 
 Lexing is O(source bytes), predictive parsing is O(token count), expression parsing is

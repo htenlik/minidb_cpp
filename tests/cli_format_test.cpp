@@ -29,6 +29,15 @@ int main() {
             minidb::cli::formatQueryResult(command) == "UPDATE\n2 rows affected\n",
             "CLI command formatting changed");
 
+        for (auto kind : {minidb::sql::CommandKind::Begin, minidb::sql::CommandKind::Commit,
+                          minidb::sql::CommandKind::Rollback}) {
+            const std::string name = kind == minidb::sql::CommandKind::Begin ? "BEGIN"
+                : kind == minidb::sql::CommandKind::Commit ? "COMMIT" : "ROLLBACK";
+            minidb::test::require(minidb::cli::formatQueryResult(
+                minidb::sql::CommandResult{kind, 0, std::nullopt, {}}) == name + "\nOK\n",
+                "Transaction CLI result fabricated affected rows or lost its command");
+        }
+
         minidb::test::requireThrows<std::invalid_argument>(
             [] { static_cast<void>(minidb::cli::formatQueryResult(
                 minidb::sql::SelectResult{{"one"}, {{1U, 2U}}, {}, {}})); },

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <limits>
 #include <numeric>
@@ -77,8 +78,7 @@ bool isPageAffectingRecord(LogRecordType type) noexcept {
 
 DiskManager::Page compensatedPageFor(
     const LogRecord& record,
-    DiskManager& diskManager,
-    RecoveryStats& stats) {
+    const std::function<void(PageId, DiskManager::Page&)>& readUndoBase) {
     DiskManager::Page compensated{};
     if (record.type == LogRecordType::PageUpdate) {
         compensated = decodePageUpdateLogPayload(record.payload).beforeImage;
@@ -87,8 +87,7 @@ DiskManager::Page compensatedPageFor(
     } else if (record.type == LogRecordType::PageDeltaUpdate
                || record.type == LogRecordType::PageDeltaUpdateV2) {
         const auto identity = pageUpdateIdentity(record);
-        diskManager.readPhysicalPage(identity.pageId, compensated);
-        ++stats.recoveryPageReads;
+        readUndoBase(identity.pageId, compensated);
         if (record.type == LogRecordType::PageDeltaUpdate) {
             applyPageDeltaBefore(
                 compensated, decodePageDeltaUpdateLogPayload(record.payload));
@@ -104,6 +103,107 @@ DiskManager::Page compensatedPageFor(
     }
     if (supportsPersistentPageLsn(compensated)) clearPersistentPageLsn(compensated);
     return compensated;
+}
+
+// Both startup loser recovery and live transaction rollback use this one WAL
+// traversal/durability protocol. Live rollback supplies its retained original
+// page as the delta base: disk may not yet contain an earlier NO-FORCE winner.
+void undoTransaction(
+    DiskManager& disk,
+    LogManager& log,
+    TransactionId transactionId,
+    std::uint64_t startPageCount,
+    Lsn transactionLastLsn,
+    bool hadClrs,
+    const std::function<LogRecord(Lsn)>& readRecord,
+    const std::function<void(PageId, DiskManager::Page&)>& readUndoBase,
+    RecoveryStats& stats,
+    bool liveRollback = false) {
+    const auto undoStart = std::chrono::steady_clock::now();
+    auto nextUndoLsn = transactionLastLsn;
+    bool appendedClr = false;
+    while (isValidLsn(nextUndoLsn)) {
+        const auto record = readRecord(nextUndoLsn);
+        if (record.transactionId != transactionId) {
+            throw WalError(WalErrorKind::CorruptRecord,
+                           "UNDO chain crosses transaction ownership");
+        }
+        if (record.type == LogRecordType::Begin) break;
+        if (record.type == LogRecordType::Compensation) {
+            nextUndoLsn = decodeCompensationLogPayload(record.payload).undoNextLsn;
+            ++stats.undoClrsEncountered;
+            ++stats.undoRecordsSkippedByClr;
+            continue;
+        }
+        if (!isPageUpdateRecord(record.type)) {
+            throw WalError(WalErrorKind::CorruptRecord,
+                           "UNDO chain contains a non-undoable record");
+        }
+        ++stats.undoUserRecordsVisited;
+        const auto identity = pageUpdateIdentity(record);
+        nextUndoLsn = record.prevLsn;
+        // Appended pages are removed by the idempotent final truncation.
+        if (!identity.beforePageExisted) continue;
+
+        auto compensated = compensatedPageFor(record, readUndoBase);
+        const bool pageSupportsLsn = supportsPersistentPageLsn(compensated);
+        recoveryFailPoint("recovery_before_clr_append");
+        const auto payload = encodeCompensationLogPayload(CompensationLogPayload{
+            identity.pageId, true, pageSupportsLsn, nextUndoLsn, record.lsn, compensated,
+        });
+        const auto clrLsn = log.append(LogRecord{
+            LogRecordType::Compensation, transactionId, transactionLastLsn,
+            payload, INVALID_LSN,
+        });
+        transactionLastLsn = clrLsn;
+        appendedClr = true;
+        ++stats.clrsAppended;
+        ++stats.undoUserRecordsCompensated;
+        stats.undoWalBytes += wal_record_layout::HEADER_SIZE + payload.size();
+        recoveryFailPoint("recovery_after_clr_append");
+        log.flushUpTo(clrLsn);
+        recoveryFailPoint("recovery_after_clr_wal_force");
+        if (pageSupportsLsn) writePersistentPageLsn(compensated, clrLsn);
+        disk.writePhysicalPage(identity.pageId, compensated);
+        disk.sync();
+        ++stats.databaseSyncCalls;
+        ++stats.databaseWrites;
+        ++stats.recoveryPageWrites;
+        ++stats.pagesUndone;
+        ++stats.undoPageWrites;
+        recoveryFailPoint("recovery_after_compensation_page_write");
+        recoveryFailPoint("recovery_after_undo_page");
+        recoveryFailPoint("recovery_midway_loser_chain");
+    }
+    if (appendedClr || hadClrs) recoveryFailPoint("recovery_after_final_clr");
+    const auto beforeCount = disk.pageCount();
+    if (beforeCount > startPageCount) {
+        disk.truncateToPageCount(startPageCount);
+        stats.pagesTruncated += beforeCount - startPageCount;
+        disk.sync();
+        ++stats.databaseSyncCalls;
+        recoveryFailPoint("recovery_after_appended_page_truncation");
+    }
+    stats.loserLastLsn = transactionLastLsn;
+    stats.loserLastUndoNextLsn = nextUndoLsn;
+    stats.undoNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - undoStart).count());
+    disk.sync();
+    ++stats.databaseSyncCalls;
+    recoveryFailPoint("recovery_after_database_sync");
+    if (liveRollback) recoveryFailPoint("rollback_after_database_sync");
+    recoveryFailPoint("recovery_before_abort_append");
+    const auto abortLsn = log.append(LogRecord{
+        LogRecordType::Abort, transactionId, transactionLastLsn, {}, INVALID_LSN,
+    });
+    recoveryFailPoint("recovery_after_abort_append");
+    log.flushUpTo(abortLsn);
+    ++stats.abortedTransactions;
+    stats.durableAbortObserved = true;
+    recoveryFailPoint("recovery_after_abort_fsync");
+    recoveryFailPoint("recovery_after_abort_sync");
+    if (liveRollback) recoveryFailPoint("rollback_after_abort_sync");
 }
 
 TransactionId nextTransactionIdFrom(const WalScanResult& scan) {
@@ -598,113 +698,26 @@ RecoveryStats RecoveryManager::recover() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - redoStart).count());
 
-    const auto undoStart = std::chrono::steady_clock::now();
     if (loser != nullptr) {
-        auto nextUndoLsn = loser->lastLsn;
-        auto transactionLastLsn = loser->lastLsn;
-        bool appendedClr = false;
-        while (isValidLsn(nextUndoLsn)) {
-            const auto foundRecord = recordsByLsn.find(nextUndoLsn);
-            if (foundRecord == recordsByLsn.end()) {
-                throw WalError(WalErrorKind::CorruptRecord,
-                               "UNDO chain references unavailable WAL history");
-            }
-            const auto& record = *foundRecord->second;
-            if (record.transactionId != loser->id) {
-                throw WalError(WalErrorKind::CorruptRecord,
-                               "UNDO chain crosses transaction ownership");
-            }
-            if (record.type == LogRecordType::Begin) break;
-            if (record.type == LogRecordType::Compensation) {
-                const auto compensation = decodeCompensationLogPayload(record.payload);
-                nextUndoLsn = compensation.undoNextLsn;
-                ++stats.undoClrsEncountered;
-                ++stats.undoRecordsSkippedByClr;
-                continue;
-            }
-            if (!isPageUpdateRecord(record.type)) {
-                throw WalError(WalErrorKind::CorruptRecord,
-                               "UNDO chain contains a non-undoable record");
-            }
-            ++stats.undoUserRecordsVisited;
-            const auto identity = pageUpdateIdentity(record);
-            nextUndoLsn = record.prevLsn;
-            if (!identity.beforePageExisted) {
-                // Appended pages are removed by the idempotent final truncation.
-                continue;
-            }
-
-            auto compensated = compensatedPageFor(record, diskManager_, stats);
-            const bool pageSupportsLsn = supportsPersistentPageLsn(compensated);
-            recoveryFailPoint("recovery_before_clr_append");
-            const auto payload = encodeCompensationLogPayload(CompensationLogPayload{
-                identity.pageId,
-                true,
-                pageSupportsLsn,
-                nextUndoLsn,
-                record.lsn,
-                compensated,
-            });
-            const auto clrLsn = logManager_.append(LogRecord{
-                LogRecordType::Compensation,
-                loser->id,
-                transactionLastLsn,
-                payload,
-                INVALID_LSN,
-            });
-            transactionLastLsn = clrLsn;
-            appendedClr = true;
-            ++stats.clrsAppended;
-            ++stats.undoUserRecordsCompensated;
-            stats.undoWalBytes += wal_record_layout::HEADER_SIZE + payload.size();
-            recoveryFailPoint("recovery_after_clr_append");
-            logManager_.flushUpTo(clrLsn);
-            recoveryFailPoint("recovery_after_clr_wal_force");
-
-            if (pageSupportsLsn) writePersistentPageLsn(compensated, clrLsn);
-            diskManager_.writePhysicalPage(identity.pageId, compensated);
-            diskManager_.sync();
-            ++stats.databaseSyncCalls;
-            ++stats.databaseWrites;
-            ++stats.recoveryPageWrites;
-            ++stats.pagesUndone;
-            ++stats.undoPageWrites;
-            recoveryFailPoint("recovery_after_compensation_page_write");
-            recoveryFailPoint("recovery_after_undo_page");
-            recoveryFailPoint("recovery_midway_loser_chain");
-        }
-        if (appendedClr || !loser->clrs.empty()) {
-            recoveryFailPoint("recovery_after_final_clr");
-        }
-        const auto beforeCount = diskManager_.pageCount();
-        if (beforeCount > loser->begin.startPageCount) {
-            diskManager_.truncateToPageCount(loser->begin.startPageCount);
-            stats.pagesTruncated = beforeCount - loser->begin.startPageCount;
-            diskManager_.sync();
-            ++stats.databaseSyncCalls;
-            recoveryFailPoint("recovery_after_appended_page_truncation");
-        }
-        loser->lastLsn = transactionLastLsn;
-        loser->lastUndoNextLsn = nextUndoLsn;
-    }
-    stats.undoNs = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - undoStart).count());
-    diskManager_.sync();
-    ++stats.databaseSyncCalls;
-    recoveryFailPoint("recovery_after_database_sync");
-
-    if (loser != nullptr) {
-        recoveryFailPoint("recovery_before_abort_append");
-        const auto abortLsn = logManager_.append(LogRecord{
-            LogRecordType::Abort, loser->id, loser->lastLsn, {}, INVALID_LSN,
-        });
-        recoveryFailPoint("recovery_after_abort_append");
-        logManager_.flushUpTo(abortLsn);
-        ++stats.abortedTransactions;
-        stats.durableAbortObserved = true;
-        recoveryFailPoint("recovery_after_abort_fsync");
-        recoveryFailPoint("recovery_after_abort_sync");
+        undoTransaction(
+            diskManager_, logManager_, loser->id, loser->begin.startPageCount,
+            loser->lastLsn, !loser->clrs.empty(),
+            [&](Lsn lsn) -> LogRecord {
+                const auto found = recordsByLsn.find(lsn);
+                if (found == recordsByLsn.end()) {
+                    throw WalError(WalErrorKind::CorruptRecord,
+                                   "UNDO chain references unavailable WAL history");
+                }
+                return *found->second;
+            },
+            [&](PageId pageId, DiskManager::Page& page) {
+                diskManager_.readPhysicalPage(pageId, page);
+                ++stats.recoveryPageReads;
+            }, stats);
+    } else {
+        diskManager_.sync();
+        ++stats.databaseSyncCalls;
+        recoveryFailPoint("recovery_after_database_sync");
     }
     diskManager_.reloadDatabaseHeader();
     stats.totalNs = static_cast<std::uint64_t>(
@@ -732,6 +745,40 @@ TransactionId RecoveryCoordinator::activeTransactionId() const noexcept {
     return active_.has_value() ? active_->transactionId : INVALID_TRANSACTION_ID;
 }
 
+bool RecoveryCoordinator::hasMaterializedWalBegin() const noexcept {
+    return active_.has_value() && isValidLsn(active_->beginLsn);
+}
+
+Lsn RecoveryCoordinator::lastLsn() const noexcept {
+    return active_.has_value() ? active_->previousLsn : INVALID_LSN;
+}
+
+std::size_t RecoveryCoordinator::touchedPageCount() const noexcept {
+    return active_.has_value() ? active_->pages.size() : 0;
+}
+
+std::uint64_t RecoveryCoordinator::transactionWalBytes() const noexcept {
+    return active_.has_value() ? active_->walBytes : 0;
+}
+
+std::uint64_t RecoveryCoordinator::originalBeforeImageBytes() const noexcept {
+    if (!active_.has_value()) return 0;
+    return static_cast<std::uint64_t>(std::count_if(
+        active_->pages.begin(), active_->pages.end(),
+        [](const auto& page) { return page.second.beforeExisted; }))
+        * database_format::PAGE_SIZE;
+}
+
+std::uint64_t RecoveryCoordinator::transactionRecoveryBytes() const noexcept {
+    if (!active_.has_value()) return 0;
+    return sizeof(ActiveStatement)
+        + active_->pages.size() * sizeof(decltype(active_->pages)::value_type);
+}
+
+std::uint64_t RecoveryCoordinator::peakTransactionRecoveryBytes() const noexcept {
+    return active_.has_value() ? active_->peakRecoveryBytes : 0;
+}
+
 void RecoveryCoordinator::beginStatement() {
     if (active_.has_value()) throw std::logic_error("A mutating statement is already active");
     if (nextTransactionId_ == INVALID_TRANSACTION_ID) {
@@ -740,6 +787,7 @@ void RecoveryCoordinator::beginStatement() {
     active_.emplace(ActiveStatement{
         nextTransactionId_++, diskManager_.pageCount(), INVALID_LSN, INVALID_LSN, {},
     });
+    active_->peakRecoveryBytes = transactionRecoveryBytes();
     ++stats_.transactionsBegun;
 }
 
@@ -766,6 +814,8 @@ void RecoveryCoordinator::notePageWriteIntent(
         {},
         INVALID_LSN,
     });
+    active_->peakRecoveryBytes = std::max(
+        active_->peakRecoveryBytes, transactionRecoveryBytes());
     ++stats_.pagesFirstWritten;
 }
 
@@ -780,6 +830,7 @@ void RecoveryCoordinator::ensureBeginLogged() {
         INVALID_LSN,
     });
     stats_.walTotalBytesGenerated += wal_record_layout::HEADER_SIZE + payload.size();
+    active_->walBytes += wal_record_layout::HEADER_SIZE + payload.size();
     active_->previousLsn = active_->beginLsn;
     recoveryFailPoint("after_begin_append");
 }
@@ -793,6 +844,7 @@ Lsn RecoveryCoordinator::appendTransactionRecord(
         type, active_->transactionId, active_->previousLsn, std::move(payload), INVALID_LSN,
     });
     stats_.walTotalBytesGenerated += recordBytes;
+    active_->walBytes += recordBytes;
     active_->previousLsn = lsn;
     return lsn;
 }
@@ -948,8 +1000,9 @@ void RecoveryCoordinator::requireNoPins() const {
     }
 }
 
-void RecoveryCoordinator::commitStatement() {
+void RecoveryCoordinator::prepareStatement() {
     if (!active_.has_value()) throw std::logic_error("No statement transaction is active");
+    if (rollbackActive_) throw std::logic_error("Transaction rollback is in progress");
     requireNoPins();
     if (bufferPool_ != nullptr) {
         for (auto& [pageId, state] : active_->pages) {
@@ -957,6 +1010,10 @@ void RecoveryCoordinator::commitStatement() {
             bufferPool_->prepareResidentPageForCommit(pageId);
         }
     }
+}
+
+void RecoveryCoordinator::commitStatement() {
+    prepareStatement();
     if (!isValidLsn(active_->beginLsn)) {
         ++stats_.zeroWriteTransactions;
         ++stats_.transactionsCommitted;
@@ -975,12 +1032,25 @@ void RecoveryCoordinator::commitStatement() {
 
 void RecoveryCoordinator::rollbackStatement() {
     if (!active_.has_value()) throw std::logic_error("No statement transaction is active");
-    requireNoPins();
+    // Log the final resident states before invalidation. In particular, the
+    // transaction may have failed midway through its most recent SQL statement.
+    prepareStatement();
     rollbackActive_ = true;
+    lastRollbackStats_ = {};
     const auto startPageCount = active_->startPageCount;
-    const auto transactionId = active_->transactionId;
-    const auto previousLsn = active_->previousLsn;
-    const bool logged = isValidLsn(active_->beginLsn);
+    if (!hasMaterializedWalBegin() && diskManager_.pageCount() > startPageCount) {
+        // Even an all-zero newly appended page must be removed on restart if
+        // rollback is interrupted; BEGIN carries the transaction's boundary.
+        ensureBeginLogged();
+    }
+    if (!hasMaterializedWalBegin()) {
+        ++stats_.zeroWriteTransactions;
+        ++stats_.transactionsRolledBack;
+        active_.reset();
+        rollbackActive_ = false;
+        return;
+    }
+    logManager_.flushUpTo(active_->previousLsn);
     if (bufferPool_ != nullptr) {
         for (const auto& [pageId, state] : active_->pages) {
             static_cast<void>(state);
@@ -988,27 +1058,23 @@ void RecoveryCoordinator::rollbackStatement() {
         }
         bufferPool_->discardPagesAtOrAboveForRecovery(static_cast<PageId>(startPageCount));
     }
-    for (const auto& [pageId, state] : active_->pages) {
-        if (state.beforeExisted) {
-            diskManager_.writePhysicalPage(pageId, state.before);
-            ++stats_.rollbackDatabaseWrites;
-        }
-    }
-    if (diskManager_.pageCount() > startPageCount) {
-        diskManager_.truncateToPageCount(startPageCount);
-    }
-    diskManager_.sync();
-    recoveryFailPoint("rollback_after_database_sync");
-    active_.reset();
-    if (logged) {
-        const auto abortLsn = logManager_.append(LogRecord{
-            LogRecordType::Abort, transactionId, previousLsn, {}, INVALID_LSN,
-        });
-        stats_.walTotalBytesGenerated += wal_record_layout::HEADER_SIZE;
-        logManager_.flushUpTo(abortLsn);
-        recoveryFailPoint("rollback_after_abort_sync");
-    }
+    lastRollbackStats_.loserTransactions = 1;
+    undoTransaction(
+        diskManager_, logManager_, active_->transactionId, startPageCount,
+        active_->previousLsn, false,
+        [&](Lsn lsn) { return logManager_.readRecordAt(lsn); },
+        [&](PageId pageId, DiskManager::Page& page) {
+            const auto found = active_->pages.find(pageId);
+            if (found == active_->pages.end() || !found->second.beforeExisted) {
+                throw std::logic_error("Rollback page has no original before-image");
+            }
+            page = found->second.before;
+        }, lastRollbackStats_, true);
+    stats_.walTotalBytesGenerated += lastRollbackStats_.undoWalBytes
+        + wal_record_layout::HEADER_SIZE;
+    stats_.rollbackDatabaseWrites += lastRollbackStats_.undoPageWrites;
     diskManager_.reloadDatabaseHeader();
+    active_.reset();
     rollbackActive_ = false;
     ++stats_.transactionsRolledBack;
 }

@@ -160,12 +160,26 @@ public:
 
     void attachBufferPool(BufferPoolManager& bufferPool) noexcept;
     void beginStatement();
+    // Finalize a successful statement inside a still-active transaction. This
+    // logs resident changes without COMMIT, WAL force, or database-page force.
+    void prepareStatement();
     void commitStatement();
     void rollbackStatement();
 
     [[nodiscard]] bool hasActiveStatement() const noexcept { return active_.has_value(); }
     [[nodiscard]] bool rollbackActive() const noexcept { return rollbackActive_; }
     [[nodiscard]] TransactionId activeTransactionId() const noexcept;
+    [[nodiscard]] bool hasMaterializedWalBegin() const noexcept;
+    [[nodiscard]] Lsn lastLsn() const noexcept;
+    [[nodiscard]] std::size_t touchedPageCount() const noexcept;
+    [[nodiscard]] std::uint64_t transactionWalBytes() const noexcept;
+    [[nodiscard]] std::uint64_t originalBeforeImageBytes() const noexcept;
+    // Accounted context/PageState storage, excluding std::map allocator overhead.
+    [[nodiscard]] std::uint64_t transactionRecoveryBytes() const noexcept;
+    [[nodiscard]] std::uint64_t peakTransactionRecoveryBytes() const noexcept;
+    [[nodiscard]] const RecoveryStats& lastRollbackStats() const noexcept {
+        return lastRollbackStats_;
+    }
     [[nodiscard]] TransactionId nextTransactionId() const noexcept { return nextTransactionId_; }
     [[nodiscard]] WalUpdateMode updateMode() const noexcept { return updateMode_; }
     [[nodiscard]] const TransactionRuntimeStats& stats() const noexcept { return stats_; }
@@ -192,6 +206,8 @@ private:
         Lsn beginLsn = INVALID_LSN;
         Lsn previousLsn = INVALID_LSN;
         std::map<PageId, PageState> pages;
+        std::uint64_t walBytes = 0;
+        std::uint64_t peakRecoveryBytes = 0;
     };
 
     DiskManager& diskManager_;
@@ -202,6 +218,7 @@ private:
     std::optional<ActiveStatement> active_;
     bool rollbackActive_ = false;
     TransactionRuntimeStats stats_{};
+    RecoveryStats lastRollbackStats_{};
 
     void ensureBeginLogged();
     [[nodiscard]] Lsn appendTransactionRecord(

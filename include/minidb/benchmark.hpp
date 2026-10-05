@@ -122,6 +122,21 @@ struct RecoveryBenchmarkMetrics {
 };
 
 struct BenchmarkResult {
+    struct TransactionMetrics {
+        std::uint64_t walBytes = 0;
+        std::uint64_t walFsyncs = 0;
+        std::uint64_t commitFsyncs = 0;
+        std::uint64_t finalCommitNs = 0;
+        std::uint64_t rollbackNs = 0;
+        std::uint64_t touchedPages = 0;
+        std::uint64_t originalBeforeImagePages = 0;
+        std::uint64_t originalBeforeImageBytes = 0;
+        std::uint64_t peakRecoveryBytes = 0;
+        std::uint64_t retainedWalPeak = 0;
+        std::uint64_t retainedWalAfter = 0;
+        bool checkpointPending = false;
+        bool checkpointDeferred = false;
+    } transaction;
     std::string benchmark;
     std::string storageBackend;
     std::uint64_t seed = 0;
