@@ -107,7 +107,8 @@ void concurrentReaders() {
         }
         client.close();
     }); });
-    for (auto& reader : readers) reader.join(); errors.rethrow();
+    for (auto& reader : readers) reader.join();
+    errors.rethrow();
     require(fixture.gate().stats().peakConcurrentReaders > 1,
             "Autocommit SELECT did not actually overlap according to lease instrumentation");
     std::cout << "TCP autocommit SELECT peak readers=" << fixture.gate().stats().peakConcurrentReaders << '\n';
