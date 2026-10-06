@@ -135,7 +135,10 @@ statement. Automatic policy is evaluated after successful mutation statements an
 transaction completion. While an explicit transaction is active, a threshold trigger
 sets `pending()` without publishing a checkpoint. COMMIT, ROLLBACK, error rollback,
 and disconnect retry the pending request at the next safe boundary. Manual sharp and
-fuzzy checkpoints reject active transactions, including read-only ones. Production
+fuzzy checkpoints reject active writers and otherwise obtain exclusive database access,
+waiting behind READ ONLY transactions. Automatic publication runs under the completing
+writer's still-owned exclusive lease. Writer preference prevents new readers bypassing
+a queued checkpoint. Production
 fuzzy ATT snapshots therefore remain empty, and reclamation cannot discard active UNDO.
 `--checkpoint-wal-bytes N` uses post-checkpoint WAL growth (default 64 MiB), while
 `--checkpoint-statements N` counts successful mutation statements, including those
@@ -155,6 +158,9 @@ archive/PITR, transaction-overlapping checkpoint, physiological WAL, or concurre
 PageLSN complements rather than replaces the scan boundary: checkpoints reduce WAL
 analysis volume, while PageLSN reduces writes within the selected tail. See
 [wal-segments.md](wal-segments.md) and [page-lsn.md](page-lsn.md).
+
+See [concurrency-baseline.md](concurrency-baseline.md) for access-gate ownership and
+the prohibition on requesting a shared-to-exclusive upgrade from a read-only owner.
 
 The design is informed by C. Mohan et al., “ARIES: A Transaction Recovery Method
 Supporting Fine-Granularity Locking and Partial Rollbacks Using Write-Ahead Logging,”

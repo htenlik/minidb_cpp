@@ -3,8 +3,10 @@
 #include "minidb/checkpoint_control.hpp"
 #include "minidb/checkpoint_types.hpp"
 #include "minidb/recovery.hpp"
+#include "minidb/database_access_gate.hpp"
 
 #include <cstdint>
+#include <mutex>
 
 namespace minidb {
 
@@ -61,14 +63,15 @@ public:
 
     [[nodiscard]] CheckpointId checkpoint();
     [[nodiscard]] CheckpointId checkpoint(CheckpointMode mode);
-    [[nodiscard]] bool onStatementCommitted() noexcept;
-    [[nodiscard]] bool onTransactionCompleted() noexcept;
-    [[nodiscard]] bool pending() const noexcept { return pending_; }
+    void attachAccessGate(DatabaseAccessGate& gate) noexcept { gate_ = &gate; }
+    [[nodiscard]] bool onStatementCommitted(const DatabaseAccessGate::Lease* lease = nullptr) noexcept;
+    [[nodiscard]] bool onTransactionCompleted(const DatabaseAccessGate::Lease* lease = nullptr) noexcept;
+    [[nodiscard]] bool pending() const noexcept { std::lock_guard lock(mutex_); return pending_; }
 
     [[nodiscard]] const CheckpointPolicy& policy() const noexcept { return policy_; }
-    [[nodiscard]] const CheckpointStats& stats() const noexcept { return stats_; }
-    [[nodiscard]] CheckpointId nextCheckpointId() const noexcept { return nextCheckpointId_; }
-    void resetStats() noexcept { stats_ = {}; }
+    [[nodiscard]] CheckpointStats stats() const noexcept { std::lock_guard lock(mutex_); return stats_; }
+    [[nodiscard]] CheckpointId nextCheckpointId() const noexcept { std::lock_guard lock(mutex_); return nextCheckpointId_; }
+    void resetStats() noexcept { std::lock_guard lock(mutex_); stats_ = {}; }
 
 private:
     RecoveryCoordinator& recovery_;
@@ -84,6 +87,9 @@ private:
     WalOffset lastCheckpointWalSize_ = wal_file_layout::HEADER_SIZE;
     std::uint64_t statementsSinceCheckpoint_ = 0;
     bool pending_ = false;
+    DatabaseAccessGate* gate_ = nullptr;
+    mutable std::recursive_mutex mutex_;
+    [[nodiscard]] CheckpointId checkpointExclusive(CheckpointMode mode);
 };
 
 } // namespace minidb

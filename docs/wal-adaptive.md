@@ -152,7 +152,7 @@ run in Adaptive mode.
 
 Persistent PageLSN and the optional fuzzy-checkpoint DPT enable two-stage selective
 REDO; restartable UNDO uses the independent canonical full-page CLR format. There is
-still no concurrency, locking, MVCC, or crash-atomic
-checkpoint/update protocol beyond the documented statement model. Adaptive mode computes
+still no multiple-writer recovery, fine-grained locking, or MVCC. The database access
+gate permits concurrent readers while preserving serial writer recovery. Adaptive mode computes
 canonical deltas even when it later chooses FullPage, trading CPU work for bounded WAL
 volume.

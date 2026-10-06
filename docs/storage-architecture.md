@@ -124,7 +124,9 @@ frame state, and the pool enforces WAL durability before writing the dirty frame
 production graph attaches LogManager and the
 coordinator; TupleStore, tree, Catalog, and Table remain ignorant of WAL encoding.
 
-The engine remains single-threaded. Guards are not locks or latches. Physical
+The engine permits concurrent sessions/readers behind a database-wide shared/exclusive
+gate, with one exclusive writer. Page guards now also own shared/exclusive frame latches.
+Physical
 analysis/REDO/UNDO provides autocommit per mutating statement or one explicit unit
 across statements. SqlEngine's TransactionManager owns session/scope policy; recovery
 owns physical before-images and the WAL chain. Storage layers do not inspect SQL
@@ -133,7 +135,11 @@ full-buffer and opt-in fuzzy DPT checkpoints share the double-slotted `database.
 recovery pointer; segmented WAL reclaims whole files behind the mode-specific floor.
 Selective REDO additionally skips a committed v2 update when the disk PageLSN is equal
 or newer. There is still no archive/PITR, transaction-overlapping checkpoint,
-lock, MVCC, concurrent transaction, or torn-page protection. Restartable physical CLR
+fine-grained locks, MVCC, multiple-writer recovery, or torn-page protection. Restartable physical CLR
 handling remains inside recovery; page-owning layers do not interpret it. See [wal.md](wal.md),
 [wal-segments.md](wal-segments.md), [fuzzy-checkpoints.md](fuzzy-checkpoints.md), [recovery.md](recovery.md),
 [checkpoints.md](checkpoints.md), and [page-lsn.md](page-lsn.md).
+
+Session contexts hold database leases; read-only contexts never own physical recovery.
+Buffer metadata/LRU-K and DiskManager I/O are synchronized for simultaneous readers.
+See [concurrency-baseline.md](concurrency-baseline.md) for ownership and latch order.

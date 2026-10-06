@@ -28,7 +28,7 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
         diskManager_, logManager_, recoveryStats_.nextTransactionId,
         config.walUpdateMode);
     bufferPool_ = std::make_unique<BufferPoolManager>(
-        diskManager_, config.bufferFrames, config.lruK, &logManager_, recovery_.get());
+        diskManager_, config.bufferFrames, config.lruK, &logManager_, recovery_.get(), true);
     recovery_->attachBufferPool(*bufferPool_);
     checkpoints_ = std::make_unique<CheckpointManager>(
         *recovery_, *bufferPool_, diskManager_, logManager_, checkpointControl_,

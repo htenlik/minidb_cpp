@@ -21,6 +21,8 @@ Select exactly one of `--benchmark NAME` and `--suite quick|baseline`. Options a
 | `--reopen-interval N` | 250 | Operations per reopen segment |
 | `--buffer-frames N` | 64 | Bounded capacity for buffer and active engine workloads |
 | `--lru-k N` | 2 | LRU-K history length for buffer and active engine workloads (`K >= 1`) |
+| `--client-threads N` | 1 | Concurrent TCP clients, 1..64, for `concurrency_*` |
+| `--writer-hold-ms N` | 20 | Additional writer hold after readers queue, 0..1000 ms |
 | `--wal-payload-bytes N` | 128 | Opaque bytes per standalone WAL record |
 | `--wal-batch-size N` | 10 | Records between forces in `wal_batch_flush` |
 | `--wal-buffer-bytes N` | 65536 | LogManager memory-buffer capacity |
@@ -77,3 +79,12 @@ CLR work at 10/100/1000 updates. The checkpoint case needs a reachable threshold
 The `transaction` JSON section reports completion latency, WAL/fsync costs, before-image
 memory, and deferred checkpoint/retention measurements; `recovery` reports CLR work and
 recovery phases. See [measurement definitions](../docs/benchmarking.md#explicit-transaction-experiments).
+
+Concurrent reader workloads are `concurrency_pk_read`, `concurrency_heap_read`,
+`concurrency_read_only`, `concurrency_serial_read`, `concurrency_writer_exclusion`, and
+`concurrency_buffer_reads`. Use 1/2/4/8/16 clients for scaling, 16/32 frames for buffer
+pressure, and the same rows/operations/seed. Writer exclusion measures one queued SELECT
+per client and reports that effective count. Read-only and serialized comparisons use
+shared versus exclusive transaction batches on the same engine. Setup is a sharp
+checkpoint; reported cache mode is hot, warmup is zero, and automatic thresholds are
+zero. See [concurrency measurement definitions](../docs/benchmarking.md#concurrent-reader-experiments).

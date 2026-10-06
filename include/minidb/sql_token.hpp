@@ -40,6 +40,9 @@ enum class TokenKind {
     Transaction,
     Commit,
     Rollback,
+    Read,
+    Only,
+    Write,
 
     LeftParen,
     RightParen,

@@ -9,7 +9,7 @@ This is a deliberately serial subset of ideas used by ARIES-style recovery. The
 [original ARIES paper record](https://research.ibm.com/publications/aries-a-transaction-recovery-method-supporting-fine-granularity-locking-and-partial-rollbacks-using-write-ahead-logging)
 describes a broader protocol with transaction and dirty-page tables, PageLSNs, fuzzy
 checkpoints, CLRs, locking, and partial rollback. MiniDB++ is not ARIES-compliant: it has
-one implicit or explicit transaction at a time, physical restartable-UNDO CLRs, and
+one WAL-producing implicit or explicit writer at a time, physical restartable-UNDO CLRs, and
 publishes fuzzy checkpoints only between completed transactions. Automatic triggers
 remain pending while an explicit scope is active; runtime ATT snapshots stay empty.
 

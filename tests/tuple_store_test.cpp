@@ -340,11 +340,11 @@ void testMetadataAndChainCorruption() {
             storage.diskManager.pageCount() + 5);
         writeUint64(metadata, minidb::tuple_heap_metadata_layout::TUPLE_COUNT_OFFSET, 1);
     });
-    requireMetadataCorruption("tuple_heap_count_mismatch", [](auto&, auto& store, auto& metadata) {
+    requireMetadataCorruption("tuple_heap_count_mismatch", [](auto&, auto&, auto& metadata) {
         writeUint64(
             metadata,
             minidb::tuple_heap_metadata_layout::TUPLE_COUNT_OFFSET,
-            store.size() + 1);
+            readUint64(metadata, minidb::tuple_heap_metadata_layout::TUPLE_COUNT_OFFSET) + 1);
     }, true);
 
     for (const bool corruptNext : {true, false}) {

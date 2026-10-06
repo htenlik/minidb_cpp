@@ -101,6 +101,21 @@ int main() {
                                       "Rollback truncation metric missing from JSON");
             }
         }
+        for (const auto name : {"concurrency_pk_read", "concurrency_heap_read", "concurrency_read_only",
+                               "concurrency_serial_read", "concurrency_writer_exclusion", "concurrency_buffer_reads"}) {
+            minidb::test::TemporaryDatabase database(name);
+            minidb::bench::BenchmarkConfig config;
+            config.databasePath = database.path().string(); config.benchmark = name;
+            config.rows = 32; config.operations = 24; config.clientThreads = 4; config.bufferFrames = 3;
+            config.writerHoldMs = 1;
+            const auto results = minidb::bench::runConfiguredBenchmarks(config);
+            minidb::test::require(results.size() == 1 && results[0].validationPassed
+                && results[0].timing.operationCount == (config.benchmark == "concurrency_writer_exclusion" ? 4U : 24U)
+                && results[0].concurrency.server.peakActiveSessions >= 4,
+                "Concurrency benchmark did not measure/validate connected clients");
+            minidb::test::require(minidb::bench::resultsToJson(results).find("\"concurrency\":") != std::string::npos,
+                "Concurrency benchmark JSON metrics missing");
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "benchmark smoke test failure: " << error.what() << '\n';

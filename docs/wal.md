@@ -103,7 +103,7 @@ rejects an unknown LSN, writes pending bytes, calls POSIX `fsync`, and only then
 the durable LSN. Because the whole current buffer is flushed, durability can advance
 beyond the requested target to the latest appended record. Repeating a request already
 covered by `durableLsn` is a no-op. There is no background logger or asynchronous/group
-commit in the current single-threaded design.
+commit in the current single-writer design.
 
 Standalone/eager opening validates and scans every complete record, reconstructing its
 next, last-appended, and current durable positions. The standalone scanner validates
@@ -195,7 +195,7 @@ Segmented WAL deletes only whole segments behind the corresponding floor. Logica
 generation continues to rise while physical retention depends on dirty-page lifetime.
 Explicit transactions reuse these same BEGIN/update/COMMIT/CLR/ABORT formats and one
 `prevLSN` chain across statements; see [transactions.md](transactions.md).
-There is no archive/PITR, transaction-overlapping checkpoint, concurrency,
+There is no archive/PITR, transaction-overlapping checkpoint, multiple-writer recovery,
 group commit, or torn-page protection.
 
 ## Reference

@@ -147,7 +147,9 @@ std::string toDebugString(const Statement& statement) {
             return "Delete(table=" + deletion.tableName + ", where="
                 + (deletion.where ? toDebugString(*deletion.where) : "<none>") + ')';
         },
-        [](const BeginStatement&) { return std::string("Begin"); },
+        [](const BeginStatement& begin) {
+            return std::string(begin.accessMode == TransactionAccessMode::ReadOnly ? "Begin(readOnly)" : "Begin");
+        },
         [](const CommitStatement&) { return std::string("Commit"); },
         [](const RollbackStatement&) { return std::string("Rollback"); },
     }, statement.node);

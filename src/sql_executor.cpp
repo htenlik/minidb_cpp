@@ -838,9 +838,11 @@ QueryResult SqlEngine::execute(std::string_view source, SessionId session) {
 
 QueryResult SqlEngine::execute(const Statement& statement, SessionId session) {
     try {
+        auto sessionGuard = transactions_.lockSession(session);
         transactions_.requireSession(session);
         if (std::holds_alternative<BeginStatement>(statement.node)) {
-            transactions_.begin(session);
+            transactions_.begin(session, std::get<BeginStatement>(statement.node).accessMode
+                == TransactionAccessMode::ReadOnly ? AccessMode::ReadOnly : AccessMode::ReadWrite);
             return CommandResult{CommandKind::Begin, 0, std::nullopt, {}};
         }
         if (std::holds_alternative<CommitStatement>(statement.node)) {
@@ -852,9 +854,12 @@ QueryResult SqlEngine::execute(const Statement& statement, SessionId session) {
             return CommandResult{CommandKind::Rollback, 0, std::nullopt, {}};
         }
         if (std::holds_alternative<SelectStatement>(statement.node)) {
-            auto result = executor_.execute(statement);
-            transactions_.completeRead(session);
-            return result;
+            transactions_.beginRead(session);
+            try {
+                auto result = executor_.execute(statement);
+                transactions_.completeRead(session);
+                return result;
+            } catch (...) { transactions_.failRead(session); throw; }
         }
         transactions_.beginMutation(session);
         try {

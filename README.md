@@ -15,6 +15,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - Bounded buffer pool with move-only RAII page guards and LRU-K eviction
 - Persistent free-page reuse through a validated global free list
 - Versioned binary TCP protocol with command-line server and client
+- Bounded concurrent TCP sessions, concurrent readers, and one database-wide exclusive writer
 - CRC32C-protected, segmented write-ahead log with safe segment reclamation
 - Autocommit and explicit serial `BEGIN` / `COMMIT` / `ROLLBACK` transactions
 - STEAL / NO-FORCE physical REDO and restartable CLR-based UNDO
@@ -114,7 +115,7 @@ id | username | score
 | `SELECT` | `*` or named projections, optional `WHERE` |
 | `UPDATE` | Literal assignments with optional `WHERE` |
 | `DELETE` | Optional `WHERE` |
-| `BEGIN [TRANSACTION]`, `COMMIT`, `ROLLBACK` | One serial transaction spanning requests on the same connection |
+| `BEGIN [TRANSACTION] [READ ONLY\|READ WRITE]`, `COMMIT`, `ROLLBACK` | Session transactions; BEGIN defaults to READ WRITE |
 
 The type system contains `UINT32`, `INT64`, `BOOLEAN`, and `VARCHAR(1..4000)`, plus
 `NULL` for nullable columns. `WHERE` supports `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`,
@@ -135,8 +136,10 @@ UPDATE users SET username = 'caroline' WHERE id = 3;
 COMMIT;
 ```
 
-Use `ROLLBACK` to discard the whole transaction. Disconnect also rolls it back. Only
-one transaction may be active globally; see [transactions.md](docs/transactions.md).
+Use `ROLLBACK` to discard the whole transaction. Disconnect also rolls it back.
+`BEGIN READ ONLY` retains shared database access; multiple readers can overlap. A
+READ WRITE transaction retains exclusive access through durable completion. See
+[transactions.md](docs/transactions.md) and [concurrency](docs/concurrency-baseline.md).
 
 ## Storage engine
 
@@ -245,7 +248,8 @@ used during release verification.
 - [Adaptive physical WAL update encoding](docs/wal-adaptive.md)
 - [Persistent PageLSN and selective REDO](docs/page-lsn.md)
 - [Crash recovery](docs/recovery.md)
-- [Explicit serial transactions](docs/transactions.md)
+- [Explicit transactions](docs/transactions.md)
+- [Concurrent readers and database access](docs/concurrency-baseline.md)
 - [Compensation records and restartable UNDO](docs/clr-restartable-undo.md)
 - [Sharp checkpoints](docs/checkpoints.md)
 - [Fuzzy checkpoints, DPT, and recLSN](docs/fuzzy-checkpoints.md)
@@ -257,22 +261,22 @@ used during release verification.
 
 ## Current limitations
 
-- Database execution is single-threaded, with at most one active transaction globally.
-- There is no MVCC, locking, selectable isolation model, or savepoint support.
+- Writers exclude all database readers/writers for their entire transaction.
+- There are no multiple writers, fine-grained locks, MVCC, isolation-level selection, or savepoints.
 - Long transactions retain original page images in memory until completion.
 - Byte-range/adaptive WAL adds diff CPU cost; adaptive bounds each update to the smaller
   existing physical encoding, while full-page logging remains the default.
 - Checkpoints are synchronous; fuzzy mode is opt-in and transaction overlap is deferred.
 - There is no point-in-time recovery or WAL archive.
 - Query planning, joins, aggregation, and secondary indexes are not implemented.
-- The TCP endpoint has no TLS, authentication, authorization, or multi-client execution;
+- The TCP endpoint has no TLS, authentication, or authorization;
   it is intended for local development and protocol experimentation.
 
 ## Future work
 
 - Finer-grained physiological/logical WAL and recovery experiments
 - Transaction-overlapping checkpoint and recovery experiments
-- Multi-transaction concurrency and isolation
+- Multiple writers, finer-grained locking, and isolation
 - Additional indexes and query-planning functionality
 
 ## Development

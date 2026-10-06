@@ -220,18 +220,23 @@ void testNewPageFlushesAndReset() {
                             [](std::byte value) { return value == std::byte{0}; }),
                 "new page was not zero initialized");
         page->data()[17] = std::byte{0x71};
+        minidb::test::requireThrows<std::logic_error>([&] { static_cast<void>(pool.flushPage(pageId)); },
+            "Flush read a dirty page while its content latch was still owned");
+        page->drop();
         const auto nonresidentPageId = disk.appendPage();
-        require(pool.flushPage(pageId), "flushPage rejected resident pinned page");
-        require(pool.pinCount(pageId) == 1 && pool.isDirty(pageId) == false,
+        require(pool.flushPage(pageId), "flushPage rejected resident page");
+        require(pool.pinCount(pageId) == 0 && pool.isDirty(pageId) == false,
                 "flushPage unpinned page or left it dirty");
         const auto writes = pool.stats().physicalPageWrites;
         require(pool.flushPage(pageId) && pool.stats().physicalPageWrites == writes,
                 "flushing clean page performed physical write");
         require(!pool.flushPage(nonresidentPageId),
                 "flushPage loaded or accepted nonresident page");
+        page = pool.fetchPageWrite(pageId);
         page->data()[18] = std::byte{0x72};
+        page->drop();
         pool.flushAll();
-        require(pool.pinCount(pageId) == 1 && pool.isDirty(pageId) == false,
+        require(pool.pinCount(pageId) == 0 && pool.isDirty(pageId) == false,
                 "flushAll evicted/unpinned frame or left it dirty");
         page->drop();
         pool.resetStats();

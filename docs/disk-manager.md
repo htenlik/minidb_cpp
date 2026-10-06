@@ -27,7 +27,7 @@ PageId appendPage();
 void flush();
 
 PageId pageCount() const;
-const database_format::DatabaseHeader& databaseHeader() const;
+database_format::DatabaseHeader databaseHeader() const;
 void updateCatalogRootPageId(PageId);
 void updateFreeListRootPageId(PageId);
 ```
@@ -51,6 +51,9 @@ BufferPoolManager. The legacy fixed RecordStore and Pager-specific tests/benchma
 the old API intentionally.
 
 DiskManager deliberately has no cache, replacement policy, pin count, dirty state,
-PageAllocator free-list logic, WAL rule, or thread synchronization. Those belong to
-other layers. Physical I/O completion does not imply transactional durability or crash
+PageAllocator free-list logic, or WAL rule. An internal I/O mutex protects the shared
+fstream seek/read/write position and header/page-count state; header/count access returns
+snapshots. Concurrent reads cannot race through the file position. Compound database
+operations still require the access gate described in
+[concurrency-baseline.md](concurrency-baseline.md). Physical I/O completion does not imply transactional durability or crash
 recovery.

@@ -6,7 +6,8 @@ logical byte stream split across files. PostgreSQL's
 and [continuous-archiving](https://www.postgresql.org/docs/current/continuous-archiving.html)
 documentation provide architectural background for segment lifecycle and retention,
 but MiniDB++ uses its own small format, sharp/dirty-page-fuzzy checkpoints, full-page records, and
-synchronous single-threaded implementation.
+synchronous single-appender implementation. Database writer/checkpoint exclusion and
+serialized committed-page writeback protect WAL access; there is no background appender.
 
 For `database.db`, active WAL lives in:
 

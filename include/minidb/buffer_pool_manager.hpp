@@ -9,7 +9,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <deque>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -43,11 +47,14 @@ struct BufferPoolStats {
     std::uint64_t pinnedFrames = 0;
     std::uint64_t evictableFrames = 0;
     std::uint64_t capacity = 0;
+    std::uint64_t frameAvailabilityWaits = 0;
+    std::uint64_t contentLatchWaits = 0;
 
     bool operator==(const BufferPoolStats&) const = default;
 };
 
-// A fixed-capacity, single-threaded page cache. The DiskManager outlives this object.
+// Metadata is serialized; guards latch frame contents after pinning. DiskManager
+// and this manager must outlive all guards. No frame-latch wait holds metadata.
 class BufferPoolManager {
 public:
     BufferPoolManager(
@@ -55,7 +62,8 @@ public:
         std::size_t frameCount,
         std::size_t k = 2,
         WalFlushProvider* walProvider = nullptr,
-        PageRecoveryHook* recoveryHook = nullptr);
+        PageRecoveryHook* recoveryHook = nullptr,
+        bool waitForReadFrames = false);
     ~BufferPoolManager();
 
     BufferPoolManager(const BufferPoolManager&) = delete;
@@ -70,9 +78,9 @@ public:
     void flushAll();
 
     [[nodiscard]] BufferPoolStats stats() const noexcept;
-    void resetStats() noexcept { stats_ = {}; }
+    void resetStats() noexcept;
     [[nodiscard]] std::size_t capacity() const noexcept { return frames_.size(); }
-    [[nodiscard]] std::size_t residentPageCount() const noexcept { return pageTable_.size(); }
+    [[nodiscard]] std::size_t residentPageCount() const noexcept;
     [[nodiscard]] bool isResident(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<FrameId> frameIdForPage(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<std::uint32_t> pinCount(PageId pageId) const noexcept;
@@ -91,19 +99,25 @@ public:
     void discardPagesAtOrAboveForRecovery(PageId firstPageId);
 
     void validate() const;
-    void validateReplacer() const { replacer_.validate(); }
+    void validateReplacer() const;
 
 private:
     friend class BasicPageGuard;
 
     DiskManager& diskManager_;
+    // Recursive only for existing metadata helper/snapshot calls. All LRU-K
+    // access is under this latch; the replacer itself has no redundant mutex.
+    mutable std::recursive_mutex metadataLatch_;
+    std::condition_variable_any frameReleased_;
     std::vector<BufferFrame> frames_;
+    std::vector<std::unique_ptr<std::shared_mutex>> frameLatches_;
     std::unordered_map<PageId, FrameId> pageTable_;
     std::deque<FrameId> freeFrames_;
     LRUKReplacer replacer_;
     WalFlushProvider* walProvider_;
     PageRecoveryHook* recoveryHook_;
     BufferPoolStats stats_{};
+    bool waitForReadFrames_;
 
     [[nodiscard]] std::optional<BasicPageGuard> fetchPage(PageId pageId, bool writable);
     [[nodiscard]] std::optional<FrameId> availableFrame() const;
@@ -113,6 +127,7 @@ private:
     void prepareFrameForWrite(BufferFrame& frame);
     void installPage(FrameId frameId, PageId pageId, DiskManager::Page page, bool dirty);
     void releasePin(FrameId frameId);
+    void noteGuardWriteIntent(FrameId frameId, PageId pageId);
     [[nodiscard]] std::span<const std::byte, database_format::PAGE_SIZE> readData(
         FrameId frameId,
         PageId pageId) const;

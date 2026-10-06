@@ -55,10 +55,11 @@ void testGrammarCorpus() {
 }
 
 void testRandomTransactionGrammar() {
-    constexpr std::array<std::string_view, 4> statements{
-        "BEGIN", "BEGIN TRANSACTION", "COMMIT", "ROLLBACK"};
-    constexpr std::array<std::string_view, 4> debugNames{
-        "Begin", "Begin", "Commit", "Rollback"};
+    constexpr std::array<std::string_view, 8> statements{
+        "BEGIN", "BEGIN TRANSACTION", "COMMIT", "ROLLBACK",
+        "BEGIN READ ONLY", "BEGIN TRANSACTION READ ONLY", "BEGIN READ WRITE", "BEGIN TRANSACTION READ WRITE"};
+    constexpr std::array<std::string_view, 8> debugNames{
+        "Begin", "Begin", "Commit", "Rollback", "Begin(readOnly)", "Begin(readOnly)", "Begin", "Begin"};
     constexpr std::array<std::string_view, 8> suffixes{
         "; BEGIN", "; COMMIT", " garbage", " (", " = 1",
         " TRANSACTION TRANSACTION", " TO savepoint", "; ROLLBACK"};

@@ -244,6 +244,17 @@ void runScenario(std::uint64_t seed, std::size_t capacity, std::size_t k) {
             const auto choice = random() % 100U;
             if (choice < 25U) {
                 const auto pageId = static_cast<PageId>(1U + random() % (logical.size() - 1U));
+                if (std::any_of(held.begin(), held.end(), [&](const HeldGuard& item) {
+                    return item.pageId == pageId && std::holds_alternative<minidb::WritePageGuard>(item.guard);
+                })) {
+                    minidb::test::requireThrows<std::logic_error>(
+                        [&] { static_cast<void>(pool.fetchPageRead(pageId)); }, "Recursive writer/read latch accepted");
+                    // The attempted resident fetch still records access, then
+                    // unwinds its reservation when content acquisition fails.
+                    const auto frame = model.fetch(pageId, false);
+                    model.release(*frame);
+                    continue;
+                }
                 auto actual = pool.fetchPageRead(pageId);
                 const auto expected = model.fetch(pageId, false);
                 require(actual.has_value() == expected.has_value(),
@@ -261,6 +272,13 @@ void runScenario(std::uint64_t seed, std::size_t capacity, std::size_t k) {
                 }
             } else if (choice < 50U) {
                 const auto pageId = static_cast<PageId>(1U + random() % (logical.size() - 1U));
+                if (std::any_of(held.begin(), held.end(), [&](const HeldGuard& item) { return item.pageId == pageId; })) {
+                    minidb::test::requireThrows<std::logic_error>(
+                        [&] { static_cast<void>(pool.fetchPageWrite(pageId)); }, "Frame upgrade/recursive write accepted");
+                    const auto frame = model.fetch(pageId, false);
+                    model.release(*frame);
+                    continue;
+                }
                 auto actual = pool.fetchPageWrite(pageId);
                 const auto expected = model.fetch(pageId, true);
                 require(actual.has_value() == expected.has_value(),
@@ -306,11 +324,20 @@ void runScenario(std::uint64_t seed, std::size_t capacity, std::size_t k) {
                 held.pop_back();
             } else if (choice < 85U) {
                 const auto pageId = static_cast<PageId>(1U + random() % (logical.size() - 1U));
-                require(pool.flushPage(pageId) == model.flushPage(pageId),
-                        "random flushPage residency result disagreed with model");
+                if (model.dirty(pageId).value_or(false) && model.pins(pageId).value_or(0) != 0) {
+                    minidb::test::requireThrows<std::logic_error>([&] { static_cast<void>(pool.flushPage(pageId)); },
+                        "Flush accessed contents protected by a live guard");
+                } else {
+                    require(pool.flushPage(pageId) == model.flushPage(pageId),
+                            "random flushPage residency result disagreed with model");
+                }
             } else if (choice < 90U) {
-                pool.flushAll();
-                model.flushAll();
+                if (std::any_of(held.begin(), held.end(), [&](const HeldGuard& item) {
+                    return model.dirty(item.pageId).value_or(false);
+                })) {
+                    minidb::test::requireThrows<std::logic_error>([&] { pool.flushAll(); },
+                        "FlushAll accessed pinned dirty contents");
+                } else { pool.flushAll(); model.flushAll(); }
             } else if (!held.empty()) {
                 const auto index = static_cast<std::size_t>(random() % held.size());
                 if (auto* write = std::get_if<minidb::WritePageGuard>(&held[index].guard)) {

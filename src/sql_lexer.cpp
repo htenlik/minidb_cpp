@@ -37,6 +37,9 @@ constexpr std::array KEYWORDS{
     Keyword{"AND", TokenKind::And},
     Keyword{"OR", TokenKind::Or},
     Keyword{"BEGIN", TokenKind::Begin},
+    Keyword{"READ", TokenKind::Read},
+    Keyword{"ONLY", TokenKind::Only},
+    Keyword{"WRITE", TokenKind::Write},
     Keyword{"TRANSACTION", TokenKind::Transaction},
     Keyword{"COMMIT", TokenKind::Commit},
     Keyword{"ROLLBACK", TokenKind::Rollback},
@@ -109,6 +112,9 @@ std::string_view tokenKindName(TokenKind kind) noexcept {
     case TokenKind::And: return "AND";
     case TokenKind::Or: return "OR";
     case TokenKind::Begin: return "BEGIN";
+    case TokenKind::Read: return "READ";
+    case TokenKind::Only: return "ONLY";
+    case TokenKind::Write: return "WRITE";
     case TokenKind::Transaction: return "TRANSACTION";
     case TokenKind::Commit: return "COMMIT";
     case TokenKind::Rollback: return "ROLLBACK";

@@ -1,6 +1,6 @@
-# Explicit serial transactions
+# Explicit transactions
 
-MiniDB++ supports `BEGIN [TRANSACTION]`, `COMMIT`, and `ROLLBACK`, case-insensitively,
+MiniDB++ supports `BEGIN [TRANSACTION] [READ ONLY|READ WRITE]`, `COMMIT`, and `ROLLBACK`, case-insensitively,
 with an optional semicolon. Send one statement per request on the same TCP connection:
 
 ```sql
@@ -18,28 +18,31 @@ not commit. SELECT observes the connection's own changes.
 
 ## Lifecycle and ownership
 
-`TransactionManager`, owned by `SqlEngine`, keeps `Idle` or `Active` plus the owning
-SessionId. `RecoveryCoordinator` holds physical recovery state for that complete scope.
-Storage, indexes, and the parser do not manage transaction lifetime. The server executes
-serially and permits only one explicit transaction globally. A different session cannot
-read, mutate, commit, or roll back the owner's active scope. TCP connections receive
-monotonic process-local session IDs; embedded calls default to session zero.
+`TransactionManager`, owned by `SqlEngine`, keeps independent session contexts with
+Idle/Active state, fixed access mode, and a database lease. BEGIN defaults to READ WRITE
+and obtains exclusive access before creating the physical RecoveryCoordinator context.
+BEGIN READ ONLY obtains shared access and has no physical/WAL context. Multiple reader
+sessions coexist; writers and checkpoints exclude all database operations. Each
+connection owns its scope and cannot complete another session's transaction. TCP IDs
+are unique process-local IDs; embedded callers use distinct SessionIds for concurrent
+sessions and explicitly close them. Session zero is the default embedded session.
 
 Nested BEGIN, COMMIT while idle, and ROLLBACK while idle return execution errors.
-There are no savepoints, multiple active transactions, locks, MVCC, or isolation levels.
+There are no savepoints, multiple writers, fine-grained locks, MVCC, or isolation levels.
 Do not copy a transaction manager or use multiple independent managers against the same
 storage/recovery objects.
 
 ## WAL and completion
 
-BEGIN allocates an in-memory transaction ID and captures the current page count before
+READ WRITE BEGIN allocates an in-memory transaction ID and captures the current page count before
 any allocation. With serial ownership that is also the pre-first-mutation boundary.
 The WAL BEGIN is materialized only by the first logged change. Each successful mutating
 statement prepares the latest resident touched pages without committing or forcing them.
 Eviction may prepare and force updates sooner under STEAL.
 
-Read-only BEGIN/SELECT/COMMIT and BEGIN/SELECT/ROLLBACK generate no transaction WAL.
-Their in-memory IDs increase during the process; an ID never persisted in WAL or a
+Scopes containing only reads generate no transaction WAL on COMMIT or ROLLBACK.
+An explicitly READ ONLY scope has no WAL transaction ID. READ WRITE scopes that only
+read allocate an in-memory ID; an ID never persisted in WAL or a
 checkpoint can be reused after restart. Logged transaction IDs remain monotonic across
 reopen. Avoiding that ephemeral-ID reuse would require durable reservation even for
 read-only transactions.
@@ -72,21 +75,27 @@ then returns to Idle. There is no statement savepoint or persistent SQL failed s
 An I/O/completion failure makes the engine unavailable until reopen; it cannot safely
 continue from uncertain COMMIT or partial CLR progress.
 
+In READ ONLY, mutation policy errors instead leave the transaction active and usable;
+they do not execute the mutation or generate WAL. No shared-to-exclusive upgrade exists.
+
 EOF, protocol failures, and broken TCP connections roll back their owned scope before
-the serial server accepts subsequent work. `DatabaseServer::close()` also rolls back
-durably and reports failures; destruction attempts the same cleanup. A hard process
+waiting readers/writers may enter. A read-only disconnect simply releases shared access.
+`DatabaseServer::close()` stops admission, cancels waits, joins worker cleanup, rolls back
+durably, and reports failures; destruction attempts the same cleanup. A hard process
 crash instead leaves startup recovery to finish the loser. Shutdown never commits.
 
-`CREATE TABLE` is permitted inside a transaction. Its catalog entries, metadata, heap,
+`CREATE TABLE` is permitted inside a READ WRITE transaction. Its catalog entries, metadata, heap,
 index, and allocator changes use existing recovery hooks; rollback removes the created
 table and restores the page-count/free-list state. This does not imply support for
 unimplemented ALTER, DROP, or other DDL.
 
 ## Checkpoints and reclamation
 
-Manual sharp and fuzzy checkpoints reject an active scope, including read-only scopes.
+Manual sharp/fuzzy checkpoints reject an active writer, and otherwise obtain exclusive
+access, waiting behind read-only scopes. Calling from a thread retaining its own shared
+lease is a prohibited upgrade. Automatic triggers run only at writer boundaries.
 Automatic WAL-byte and successful-mutation-statement thresholds set `pending()` while
-active. COMMIT, ROLLBACK, error rollback, and disconnect evaluate that pending request
+an explicit writer is active. COMMIT, ROLLBACK, error rollback, and disconnect evaluate that pending request
 at the next safe boundary. Failed automatic checkpoints remain pending for retry.
 Statements later rolled back still count toward this work-based threshold.
 

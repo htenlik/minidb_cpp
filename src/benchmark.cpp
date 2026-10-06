@@ -65,6 +65,9 @@ void validateConfig(const BenchmarkConfig& config) {
         || config.walBufferBytes > MAX_CONFIG_COUNT || config.repetitions > 100) {
         throw std::invalid_argument("benchmark configuration exceeds safety limits");
     }
+    if (config.clientThreads == 0 || config.clientThreads > 64 || config.writerHoldMs > 1000) {
+        throw std::invalid_argument("client threads must be 1..64 and writer hold must be 0..1000 ms");
+    }
     if (config.walPayloadBytes > wal_record_layout::MAX_PAYLOAD_SIZE) {
         throw std::invalid_argument("WAL payload exceeds the maximum record payload");
     }
@@ -143,6 +146,8 @@ void writeBufferJson(std::ostringstream& output, const BufferPoolStats& buffer) 
            << ",\"resident_pages\":" << buffer.residentPages
            << ",\"pinned_frames\":" << buffer.pinnedFrames
            << ",\"evictable_frames\":" << buffer.evictableFrames
+           << ",\"frame_availability_waits\":" << buffer.frameAvailabilityWaits
+           << ",\"content_latch_waits\":" << buffer.contentLatchWaits
            << ",\"capacity\":" << buffer.capacity << '}';
 }
 
@@ -179,6 +184,10 @@ ParseResult parseArguments(std::span<const std::string_view> arguments) {
                 requireValue(arguments, index, argument), argument);
         } else if (argument == "--lru-k") {
             result.config.lruK = parseUnsigned(requireValue(arguments, index, argument), argument);
+        } else if (argument == "--client-threads") {
+            result.config.clientThreads = parseUnsigned(requireValue(arguments, index, argument), argument);
+        } else if (argument == "--writer-hold-ms") {
+            result.config.writerHoldMs = parseUnsigned(requireValue(arguments, index, argument), argument);
         } else if (argument == "--wal-payload-bytes") {
             result.config.walPayloadBytes = parseUnsigned(
                 requireValue(arguments, index, argument), argument);
@@ -265,6 +274,8 @@ std::string usageText() {
         "  --reopen-interval N   operations between reopen events (default 250)\n"
         "  --buffer-frames N     bounded buffer frame capacity (default 64)\n"
         "  --lru-k N             LRU-K history length (default 2)\n"
+        "  --client-threads N    concurrent TCP clients, 1..64 (default 1)\n"
+        "  --writer-hold-ms N    writer exclusion hold, 0..1000 ms (default 20)\n"
         "  --wal-payload-bytes N WAL payload bytes per record (default 128)\n"
         "  --wal-batch-size N    records per synchronous batch flush (default 10)\n"
         "  --wal-buffer-bytes N  in-memory WAL buffer capacity (default 65536)\n"
@@ -304,6 +315,8 @@ std::vector<std::string> supportedBenchmarkNames() {
         "recovery_clr_resume",
         "transaction_implicit", "transaction_explicit", "transaction_rollback",
         "transaction_recovery", "transaction_checkpoint",
+        "concurrency_pk_read", "concurrency_heap_read", "concurrency_read_only",
+        "concurrency_serial_read", "concurrency_writer_exclusion", "concurrency_buffer_reads",
         "checkpoint_latency", "checkpoint_retention", "recovery_checkpoint_compare",
         "recovery_page_lsn_compare",
     };
@@ -372,6 +385,8 @@ BufferPoolStats accumulateBufferStats(
     accumulated.unpinOperations += next.unpinOperations;
     accumulated.appendedPages += next.appendedPages;
     accumulated.walFlushRequests += next.walFlushRequests;
+    accumulated.frameAvailabilityWaits += next.frameAvailabilityWaits;
+    accumulated.contentLatchWaits += next.contentLatchWaits;
     accumulated.residentPages = std::max(accumulated.residentPages, next.residentPages);
     accumulated.pinnedFrames = std::max(accumulated.pinnedFrames, next.pinnedFrames);
     accumulated.evictableFrames = std::max(
@@ -424,6 +439,8 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
                << ",\"repetitions\":" << config.repetitions
                << ",\"buffer_frames\":" << config.bufferFrames
                << ",\"lru_k\":" << config.lruK
+               << ",\"client_threads\":" << config.clientThreads
+               << ",\"writer_hold_ms\":" << config.writerHoldMs
                << ",\"wal_payload_bytes\":" << config.walPayloadBytes
                << ",\"wal_batch_size\":" << config.walBatchSize
                << ",\"wal_buffer_bytes\":" << config.walBufferBytes
@@ -454,6 +471,24 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
         writePagerJson(output, result.pager);
         output << ",\"buffer\":";
         writeBufferJson(output, result.buffer);
+        const auto& concurrency = result.concurrency;
+        output << ",\"concurrency\":{\"peak_concurrent_readers\":" << concurrency.gate.peakConcurrentReaders
+               << ",\"active_readers\":" << concurrency.gate.activeReaders
+               << ",\"writer_active\":" << (concurrency.gate.writerActive ? "true" : "false")
+               << ",\"shared_acquisitions\":" << concurrency.gate.sharedAcquisitions
+               << ",\"exclusive_acquisitions\":" << concurrency.gate.exclusiveAcquisitions
+               << ",\"reader_wait_count\":" << concurrency.gate.readerWaitCount
+               << ",\"writer_wait_count\":" << concurrency.gate.writerWaitCount
+               << ",\"reader_wait_ns\":" << concurrency.gate.readerWaitNs
+               << ",\"writer_wait_ns\":" << concurrency.gate.writerWaitNs
+               << ",\"cancelled_acquisitions\":" << concurrency.gate.cancelledWaits
+               << ",\"active_sessions\":" << concurrency.server.activeSessions
+               << ",\"peak_active_sessions\":" << concurrency.server.peakActiveSessions
+               << ",\"connection_rejects\":" << concurrency.server.connectionRejects
+               << ",\"disconnect_while_waiting\":" << concurrency.server.disconnectWhileWaiting
+               << ",\"writer_transaction_ns\":" << concurrency.writerTransactionNs
+               << ",\"completion_spread_ns\":" << concurrency.completionSpreadNs
+               << ",\"begin_p95_ns\":" << concurrency.beginP95Ns << '}';
         output << ",\"wal\":{\"wal_records\":" << result.wal.walRecords
                << ",\"wal_payload_bytes\":" << result.wal.walPayloadBytes
                << ",\"physical_wal_bytes_before\":"
@@ -698,6 +733,18 @@ std::string resultsToJson(const std::vector<BenchmarkResult>& results) {
 
 std::string formatHuman(const BenchmarkResult& result) {
     std::ostringstream output;
+    if (result.benchmark.starts_with("concurrency_")) {
+        const auto& metrics = result.concurrency;
+        output << "concurrency clients/peak readers/peak sessions: " << result.configuration.clientThreads
+               << '/' << metrics.gate.peakConcurrentReaders << '/' << metrics.server.peakActiveSessions << '\n'
+               << "gate reader/writer waits, wait ns: " << metrics.gate.readerWaitCount
+               << '/' << metrics.gate.writerWaitCount << ", " << metrics.gate.readerWaitNs
+               << '/' << metrics.gate.writerWaitNs << '\n'
+               << "writer lifetime/completion spread/BEGIN p95 ns: " << metrics.writerTransactionNs
+               << '/' << metrics.completionSpreadNs << '/' << metrics.beginP95Ns << '\n'
+               << "buffer frame/content wait events: " << result.buffer.frameAvailabilityWaits
+               << '/' << result.buffer.contentLatchWaits << '\n';
+    }
     output << std::fixed << std::setprecision(2)
            << "benchmark: " << result.benchmark << " (repetition " << result.repetition << ")\n"
            << "storage backend: " << result.storageBackend << '\n'

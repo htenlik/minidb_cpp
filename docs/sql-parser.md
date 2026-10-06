@@ -18,7 +18,7 @@ reserved and ASCII case-insensitive. The keyword set is:
 ```text
 CREATE TABLE INSERT INTO VALUES SELECT FROM WHERE UPDATE SET DELETE
 PRIMARY KEY NOT NULL UINT32 INT64 BOOLEAN VARCHAR TRUE FALSE AND OR
-BEGIN TRANSACTION COMMIT ROLLBACK
+BEGIN TRANSACTION COMMIT ROLLBACK READ ONLY WRITE
 ```
 
 Punctuation/operators are `(`, `)`, `,`, `;`, `*`, `=`, `!=`, `<>`, `<`, `<=`, `>`,
@@ -55,7 +55,7 @@ keywords.
 statement
     := (create_table | insert | select | update | delete | begin | commit | rollback) [';'] EOF
 
-begin    := BEGIN [TRANSACTION]
+begin    := BEGIN [TRANSACTION] [READ (ONLY | WRITE)]
 commit   := COMMIT
 rollback := ROLLBACK
 

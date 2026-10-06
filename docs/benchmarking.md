@@ -154,7 +154,7 @@ scan reads, 2% inserts, 2% updates, and 1% deletes (95/5 read/write).
 `mixed_write_heavy` is 45% primary-key reads, 5% scans, 20% inserts, 15% updates, and
 15% deletes (50/50). A seeded live-key model keeps targets meaningful.
 
-TCP workloads use one loopback client at a time. Their latency includes wire framing,
+The original `tcp_*` workloads use one loopback client at a time. Their latency includes wire framing,
 socket transfer, server execution, and durable WAL COMMIT for mutations; database pages
 are not forced per response. They must not be compared to local SQL without accounting
 for those semantics.
@@ -363,7 +363,7 @@ statistics vectors; they are recovery-state estimates, not RSS. See
 
 ### General limitations
 
-- This harness is single-process and single-client; it is not a concurrency benchmark.
+- Original workload families use one client; `concurrency_*` explicitly measure concurrent clients.
 - WAL batch forcing is synchronous and single-threaded; it is not group commit.
 - Per-operation timer overhead matters for very cheap cache hits.
 - Reopen mode cannot bypass the OS page cache.
@@ -377,6 +377,58 @@ statistics vectors; they are recovery-state estimates, not RSS. See
 The legacy unbounded Pager and bounded pool are not equivalent memory configurations.
 See [buffer-pool.md](buffer-pool.md) for exact LRU-K, guard, flush, metric, and
 scan-resistance definitions.
+
+## Concurrent reader experiments
+
+`concurrency_pk_read` and `concurrency_heap_read` measure real loopback TCP SELECTs
+using `--client-threads N` (1..64). Run 1/2/4/8/16 against the same immutable rows,
+operation count, seed, frame capacity, and build. Setup inserts 96-byte payload rows
+and completes a sharp checkpoint before measurement. Connections/handshakes are
+untimed; warmup is zero and automatic checkpoints are disabled. Requests are partitioned
+by operation number so all thread counts issue the same query set.
+
+```bash
+./build-release/minidb_bench --benchmark concurrency_pk_read --rows 1024 \
+  --operations 512 --client-threads 8 --buffer-frames 64 --json readers.benchmark.json
+./build-release/minidb_bench --benchmark concurrency_heap_read --rows 1024 \
+  --operations 512 --client-threads 8 --buffer-frames 64
+./build-release/minidb_bench --benchmark concurrency_buffer_reads --rows 1024 \
+  --operations 512 --client-threads 8 --buffer-frames 16
+./build-release/minidb_bench --benchmark concurrency_read_only --rows 1024 \
+  --operations 512 --client-threads 8 --buffer-frames 64
+./build-release/minidb_bench --benchmark concurrency_serial_read --rows 1024 \
+  --operations 512 --client-threads 8 --buffer-frames 64
+./build-release/minidb_bench --benchmark concurrency_writer_exclusion --rows 1024 \
+  --client-threads 8 --writer-hold-ms 20 --buffer-frames 64
+```
+
+`concurrency_read_only` retains one READ ONLY scope per client batch.
+`concurrency_serial_read` issues identical queries in READ WRITE scopes, deliberately
+serializing those batches through exclusive access. This is a reproducible scheduling
+baseline on the current engine, not a historical binary performance comparison. Both
+include BEGIN/COMMIT in total wall time; SELECT percentiles exclude those controls and
+`concurrency.begin_p95_ns` separately reports BEGIN wait/response latency.
+
+`concurrency_buffer_reads` uses the PK SQL/TCP path under small-buffer pressure; repeat
+with 16/32 frames and 1/2/4/8 clients. Buffer metadata, LRU-K, and miss I/O are serialized;
+current Table::open validation also examines storage each request. These are whole-engine
+costs, not isolated B+ lookup times, and additional readers need not improve throughput.
+
+`concurrency_writer_exclusion` queues exactly one reader request per client behind a
+READ WRITE update, verifies all readers are waiting, holds another `--writer-hold-ms`
+(0..1000), then commits. Effective operation count is the client count. It reports
+request wait/response latency, total writer lifetime from BEGIN through COMMIT response,
+gate reader waiting nanoseconds, and first-to-last completion spread. No blocked reader
+observes the intermediate value.
+
+The additive `concurrency` JSON object includes gate admissions/waits/peak shared leases,
+peak/active sessions, rejections/cancellations, writer duration, completion spread, and
+BEGIN p95. `buffer` adds frame-availability wait calls and content-latch contention
+counts. Gate readers are lease holders, not a CPU-utilization measurement. Throughput
+uses wall time through final client completion; request percentiles use individual
+samples. `timing.mean_ns` remains wall-time per operation, not concurrent request mean.
+Machine-specific reports stay outside tracked files; there are no timing assertions
+or linear-scaling claims. See [concurrency-baseline.md](concurrency-baseline.md).
 
 ## Controlled pre/post and replacement-policy comparisons
 

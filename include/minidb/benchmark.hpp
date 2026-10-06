@@ -5,6 +5,7 @@
 #include "minidb/pager.hpp"
 #include "minidb/recovery.hpp"
 #include "minidb/checkpoint_manager.hpp"
+#include "minidb/tcp_server.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +32,8 @@ struct BenchmarkConfig {
     std::uint64_t reopenInterval = 250;
     std::uint64_t bufferFrames = 64;
     std::uint64_t lruK = 2;
+    std::uint64_t clientThreads = 1;
+    std::uint64_t writerHoldMs = 20;
     std::uint64_t walPayloadBytes = 128;
     std::uint64_t walBatchSize = 10;
     std::uint64_t walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
@@ -122,6 +125,13 @@ struct RecoveryBenchmarkMetrics {
 };
 
 struct BenchmarkResult {
+    struct ConcurrencyMetrics {
+        DatabaseAccessStats gate;
+        net::ServerConcurrencyStats server;
+        std::uint64_t writerTransactionNs = 0;
+        std::uint64_t completionSpreadNs = 0;
+        std::uint64_t beginP95Ns = 0;
+    } concurrency;
     struct TransactionMetrics {
         std::uint64_t walBytes = 0;
         std::uint64_t walFsyncs = 0;

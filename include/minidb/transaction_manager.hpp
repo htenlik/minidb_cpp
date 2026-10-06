@@ -1,17 +1,21 @@
 #pragma once
 
+#include "minidb/database_access_gate.hpp"
 #include "minidb/recovery.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 
 namespace minidb {
-
 class CheckpointManager;
 using SessionId = std::uint64_t;
 inline constexpr SessionId LOCAL_SESSION_ID = 0;
-
 enum class TransactionState { Idle, Active };
+enum class SessionCloseReason { Disconnect, Shutdown };
 
 struct ExplicitTransactionStats {
     std::uint64_t explicitTransactionsBegun = 0;
@@ -29,55 +33,94 @@ struct ExplicitTransactionStats {
     std::uint64_t peakTransactionRecoveryBytes = 0;
 };
 
-// Owns SQL transaction lifetime and session policy. RecoveryCoordinator owns the
-// physical transaction state, shared unchanged by every statement in the scope.
+// Session state is serialized per session; queries from different sessions are
+// independent. Only a holder of the exclusive database lease touches recovery.
 class TransactionManager {
+    struct SessionContext;
 public:
-    TransactionManager(RecoveryCoordinator* recovery, CheckpointManager* checkpoints)
-        : recovery_(recovery), checkpoints_(checkpoints) {}
+    class SessionGuard {
+        friend class TransactionManager;
+        std::shared_ptr<SessionContext> context_;
+        std::unique_lock<std::recursive_mutex> lock_;
+        explicit SessionGuard(std::shared_ptr<SessionContext> context);
+    public:
+        SessionGuard(SessionGuard&&) noexcept = default;
+        SessionGuard& operator=(SessionGuard&&) = delete;
+    };
+    TransactionManager(RecoveryCoordinator* recovery, CheckpointManager* checkpoints);
+    ~TransactionManager();
     TransactionManager(const TransactionManager&) = delete;
     TransactionManager& operator=(const TransactionManager&) = delete;
-    TransactionManager(TransactionManager&&) = delete;
-    TransactionManager& operator=(TransactionManager&&) = delete;
 
+    [[nodiscard]] SessionGuard lockSession(SessionId session);
+    void setCancellationProbe(SessionId session, DatabaseAccessGate::CancelProbe probe);
     void requireSession(SessionId session) const;
-    void begin(SessionId session);
+    void begin(SessionId session, AccessMode mode = AccessMode::ReadWrite);
     void commit(SessionId session);
     void rollback(SessionId session);
     void beginMutation(SessionId session);
     void completeMutation(SessionId session);
     void failMutation(SessionId session);
+    void beginRead(SessionId session);
     void completeRead(SessionId session);
-    void closeSession(SessionId session);
+    void failRead(SessionId session);
+    void closeSession(SessionId session, SessionCloseReason reason = SessionCloseReason::Disconnect);
     void shutdown();
 
-    [[nodiscard]] bool hasActiveExplicitTransaction() const noexcept { return active_.has_value(); }
+    [[nodiscard]] DatabaseAccessGate& accessGate() noexcept { return gate_; }
+    [[nodiscard]] const DatabaseAccessGate& accessGate() const noexcept { return gate_; }
+    [[nodiscard]] bool hasActiveExplicitTransaction() const noexcept { return activeCount_.load() != 0; }
+    [[nodiscard]] bool hasActiveExplicitTransaction(SessionId session) const;
+    [[nodiscard]] std::optional<AccessMode> accessMode(SessionId session) const;
     [[nodiscard]] TransactionState state() const noexcept {
-        return active_ ? TransactionState::Active : TransactionState::Idle;
+        return hasActiveExplicitTransaction() ? TransactionState::Active : TransactionState::Idle;
     }
-    [[nodiscard]] TransactionId activeTransactionId() const noexcept;
-    [[nodiscard]] bool hasMaterializedWalBegin() const noexcept;
-    [[nodiscard]] Lsn lastLsn() const noexcept;
-    [[nodiscard]] std::size_t touchedPageCount() const noexcept;
-    [[nodiscard]] std::uint64_t transactionWalBytes() const noexcept;
-    [[nodiscard]] const ExplicitTransactionStats& stats() const noexcept { return stats_; }
-    void resetStats() noexcept { stats_ = {}; }
+    // Writer diagnostics are snapshots. READ ONLY sessions have no WAL identity.
+    [[nodiscard]] TransactionId activeTransactionId() const;
+    [[nodiscard]] bool hasMaterializedWalBegin() const;
+    [[nodiscard]] Lsn lastLsn() const;
+    [[nodiscard]] std::size_t touchedPageCount() const;
+    [[nodiscard]] std::uint64_t transactionWalBytes() const;
+    [[nodiscard]] ExplicitTransactionStats stats() const;
+    void resetStats();
 
 private:
-    struct TransactionContext {
-        SessionId owner;
-        std::uint64_t initialWalBytes;
+    struct SessionContext {
+        std::recursive_mutex mutex;
+        std::optional<AccessMode> explicitMode;
+        std::optional<DatabaseAccessGate::Lease> lease;
+        DatabaseAccessGate::CancelProbe cancelled;
+        TransactionId writerId = INVALID_TRANSACTION_ID;
+        std::uint64_t initialWalBytes = 0;
+        bool closed = false;
+        std::atomic<bool> cancelRequested{false};
+    };
+    struct WriterDiagnostics {
+        TransactionId id = INVALID_TRANSACTION_ID;
+        bool logged = false;
+        Lsn last = INVALID_LSN;
+        std::size_t touched = 0;
+        std::uint64_t bytes = 0;
     };
     RecoveryCoordinator* recovery_;
     CheckpointManager* checkpoints_;
-    std::optional<TransactionContext> active_;
+    DatabaseAccessGate gate_;
+    mutable std::mutex sessionsMutex_;
+    std::unordered_map<SessionId, std::shared_ptr<SessionContext>> sessions_;
+    mutable std::mutex statsMutex_;
     ExplicitTransactionStats stats_{};
-    bool failed_ = false;
+    WriterDiagnostics writer_{};
+    std::atomic<std::size_t> activeCount_{0};
+    std::atomic<bool> failed_{false};
+    std::atomic<bool> stopped_{false};
 
-    void requireActive(SessionId session) const;
-    void captureMemoryStats();
-    void finishRollback();
-    void safeBoundary() noexcept;
+    [[nodiscard]] std::shared_ptr<SessionContext> sessionContext(SessionId session);
+    [[nodiscard]] std::shared_ptr<SessionContext> findSession(SessionId session) const;
+    void requireWriter(const SessionContext& session) const;
+    void captureWriterStats();
+    void finishRollback(SessionContext& session);
+    void endExplicit(SessionContext& session);
+    void safeBoundary(SessionContext& session) noexcept;
+    [[nodiscard]] static DatabaseAccessGate::CancelProbe cancellation(SessionContext& session);
 };
-
 } // namespace minidb

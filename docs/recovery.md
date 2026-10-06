@@ -2,8 +2,10 @@
 
 Each mutating statement is an implicit atomic recovery unit unless grouped by SQL
 `BEGIN`/`COMMIT`/`ROLLBACK`. An explicit scope is one recovery unit spanning all its
-statements. `SELECT` is read-only. Execution remains serial with at most one active
-transaction. See [transactions.md](transactions.md) for session and error semantics.
+statements. Concurrent readers produce no WAL transaction context. All write-capable
+execution is serialized through an exclusive database lease, preserving at most one
+WAL-producing transaction/loser. See [transactions.md](transactions.md) and
+[concurrency-baseline.md](concurrency-baseline.md).
 
 The default implementation uses physical full-page logging: every changed database page
 is represented by its complete 4096-byte before- and after-image. An explicit opt-in
@@ -136,7 +138,7 @@ it begins at the oldest retained logical position (byte 64 for unreclaimed WAL).
 incomplete final record is truncated to the last valid record boundary. Interior
 magic/version/length/checksum corruption is fatal and is never treated as a tail.
 Analysis validates one BEGIN, exact same-transaction `prevLSN` chains, terminal-record
-ordering, and the single-active-transaction model.
+ordering, and the single-WAL-writer transaction model.
 
 - A winner has durable COMMIT. Its full after-images or delta after-ranges are considered
   in ascending LSN order. PageLSN-aware records are skipped when the current persistent
@@ -187,10 +189,10 @@ Sharp and dirty-page-fuzzy checkpoints are documented in [checkpoints.md](checkp
 and [fuzzy-checkpoints.md](fuzzy-checkpoints.md). Obsolete whole WAL segments are deleted
 only behind the selected mode's retention floor; see
 [wal-segments.md](wal-segments.md). Persistent PageLSN reduces redundant REDO writes but
-does not add archive/PITR, concurrent transaction,
-lock, MVCC, isolation, torn-page protection, or crash-safe group commit. A usable
+does not add archive/PITR, multiple-writer recovery,
+fine-grained locks, MVCC, torn-page protection, or crash-safe group commit. A usable
 checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
-before the response reaches a client is inherently ambiguous: the statement committed,
+before the response reaches a client is inherently ambiguous: the transaction committed,
 but the client must reconnect and query state. Wire request IDs are not deduplication
 tokens.
 

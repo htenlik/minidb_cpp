@@ -108,7 +108,12 @@ Statement Parser::parseStatement() {
         node = parseDelete();
     } else if (match(TokenKind::Begin)) {
         static_cast<void>(match(TokenKind::Transaction));
-        node = BeginStatement{};
+        BeginStatement begin;
+        if (match(TokenKind::Read)) {
+            if (match(TokenKind::Only)) begin.accessMode = TransactionAccessMode::ReadOnly;
+            else if (!match(TokenKind::Write)) failAt(peek(), "expected ONLY or WRITE after READ");
+        }
+        node = begin;
     } else if (match(TokenKind::Commit)) {
         node = CommitStatement{};
     } else if (match(TokenKind::Rollback)) {

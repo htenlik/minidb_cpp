@@ -174,6 +174,10 @@ PageId PageAllocator::allocatePage() {
 
 void PageAllocator::releasePage(PageId pageId) {
     requireExistingDataPage(diskManager_, pageId, "Released page ID");
+    if (bufferPool_.pinCount(pageId).value_or(0) != 0) {
+        throw StorageError(StorageErrorKind::PinnedPageRelease,
+            "Cannot release a page while another page guard still pins it.");
+    }
     const auto freePages = freePageIds();
     if (std::find(freePages.begin(), freePages.end(), pageId) != freePages.end()) {
         throw StorageError(
