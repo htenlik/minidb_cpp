@@ -18,6 +18,7 @@ TransactionManager::~TransactionManager() {
 }
 std::shared_ptr<TransactionManager::SessionContext> TransactionManager::sessionContext(SessionId session) {
     std::lock_guard lock(sessionsMutex_);
+    if (stopped_ && !sessions_.contains(session)) throw AccessCancelled();
     auto& context = sessions_[session];
     if (!context) context = std::make_shared<SessionContext>();
     return context;
@@ -28,7 +29,13 @@ std::shared_ptr<TransactionManager::SessionContext> TransactionManager::findSess
     return found == sessions_.end() ? nullptr : found->second;
 }
 TransactionManager::SessionGuard TransactionManager::lockSession(SessionId session) {
-    return SessionGuard(sessionContext(session));
+    SessionGuard guard(sessionContext(session));
+    if (guard.context_->closed) throw AccessCancelled();
+    return guard;
+}
+DatabaseAccessGate::CancelProbe TransactionManager::cancellation(SessionContext& session) {
+    return [&session] { return session.cancelRequested.load()
+        || (session.cancelled && session.cancelled()); };
 }
 void TransactionManager::setCancellationProbe(SessionId session, DatabaseAccessGate::CancelProbe probe) {
     auto guard = lockSession(session);
@@ -59,8 +66,8 @@ void TransactionManager::begin(SessionId session, AccessMode mode) {
     if (mode == AccessMode::ReadWrite && !recovery_) {
         throw std::logic_error("READ WRITE transactions require WAL-enabled SqlEngine");
     }
-    auto lease = mode == AccessMode::ReadOnly ? gate_.acquireShared(context.cancelled)
-                                             : gate_.acquireExclusive(context.cancelled);
+    auto lease = mode == AccessMode::ReadOnly ? gate_.acquireShared(cancellation(context))
+                                             : gate_.acquireExclusive(cancellation(context));
     requireSession(session);
     if (mode == AccessMode::ReadWrite) {
         assert(!recovery_->hasActiveStatement());
@@ -146,7 +153,7 @@ void TransactionManager::beginMutation(SessionId session) {
         throw std::logic_error("Mutation is not permitted in a READ ONLY transaction; no lock upgrade is supported");
     }
     if (!context.explicitMode) {
-        context.lease.emplace(gate_.acquireExclusive(context.cancelled));
+        context.lease.emplace(gate_.acquireExclusive(cancellation(context)));
         requireSession(session);
         if (recovery_) {
             assert(!recovery_->hasActiveStatement());
@@ -190,7 +197,7 @@ void TransactionManager::failMutation(SessionId session) {
 }
 void TransactionManager::beginRead(SessionId session) {
     auto guard = lockSession(session); requireSession(session);
-    if (!guard.context_->explicitMode) guard.context_->lease.emplace(gate_.acquireShared(guard.context_->cancelled));
+    if (!guard.context_->explicitMode) guard.context_->lease.emplace(gate_.acquireShared(cancellation(*guard.context_)));
     requireSession(session);
 }
 void TransactionManager::completeRead(SessionId session) {
@@ -206,12 +213,22 @@ void TransactionManager::failRead(SessionId session) {
 void TransactionManager::closeSession(SessionId session) {
     auto context = findSession(session);
     if (!context) return;
+    context->cancelRequested = true; // Cancel admission before waiting for its session latch.
     std::lock_guard lock(context->mutex);
     if (context->explicitMode) {
         if (failed_) throw std::runtime_error("Transaction cleanup failed; database requires reopen");
         const bool writer = context->explicitMode == AccessMode::ReadWrite;
         finishRollback(*context);
         if (writer) { std::lock_guard statsLock(statsMutex_); ++stats_.disconnectRollbacks; }
+    } else if (context->lease && context->lease->mode() == AccessMode::ReadWrite
+               && recovery_ && recovery_->hasActiveStatement()) {
+        // An externally requested shutdown can interrupt implicit completion.
+        // Do not release exclusion while that physical transaction is unfinished.
+        if (failed_) throw std::runtime_error("Transaction cleanup failed; database requires reopen");
+        requireWriter(*context);
+        try { recovery_->rollbackStatement(); }
+        catch (...) { failed_ = true; gate_.shutdown(); throw; }
+        safeBoundary(*context);
     }
     context->closed = true;
     context->lease.reset();

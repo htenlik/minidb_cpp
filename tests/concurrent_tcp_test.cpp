@@ -133,16 +133,17 @@ void exclusionDisconnectAndCancellation() {
     }
     static_cast<void>(owner.execute("BEGIN"));
     static_cast<void>(owner.execute("UPDATE t SET value = 'cancelled' WHERE id = 1"));
-    for (const auto query : {"SELECT * FROM t", "BEGIN"}) {
+    for (bool queuedBytes : {false, true}) for (const auto query : {"SELECT * FROM t", "BEGIN"}) {
         auto waiting = rawClient(fixture.database.port());
         writeFrame(waiting.get(), makeExecuteSqlFrame(88, query));
         await([&] { const auto stats = fixture.gate().stats(); return stats.waitingReaders + stats.waitingWriters == 1; },
               "TCP gate waiter was not queued");
+        if (queuedBytes) writeFrame(waiting.get(), makeExecuteSqlFrame(89, "SELECT * FROM t"));
         waiting.reset();
         await([&] { const auto stats = fixture.gate().stats(); return stats.waitingReaders + stats.waitingWriters == 0; },
               "Disconnected socket leaked a database waiter");
     }
-    require(fixture.database.tcpServer().concurrencyStats().disconnectWhileWaiting >= 2,
+    require(fixture.database.tcpServer().concurrencyStats().disconnectWhileWaiting >= 4,
             "Waiting disconnect metric missing");
     owner.close();
     auto fresh = fixture.client();

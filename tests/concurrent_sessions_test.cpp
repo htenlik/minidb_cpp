@@ -1,5 +1,6 @@
 #include "minidb/database_server.hpp"
 #include "minidb/sql_error.hpp"
+#include "minidb/table.hpp"
 #include "concurrency_utils.hpp"
 
 #include <atomic>
@@ -134,9 +135,36 @@ void checkpointFairness() {
         require(db.checkpointManager().stats().activeTransactionsCaptured == 0, "Runtime checkpoint captured ATT");
     }
 }
+void cancelEmbeddedWaiter() {
+    minidb::test::TemporaryDatabase path("cancel_embedded_waiter");
+    DatabaseServer db(path.path().string(), config()); setup(db);
+    exec(db, "BEGIN READ ONLY", 80);
+    std::atomic<bool> cancelled{false};
+    minidb::test::ThreadErrors errors;
+    std::jthread writer([&] { errors.run([&] {
+        try { exec(db, "BEGIN", 81); }
+        catch (const minidb::sql::SqlExecutionError&) { cancelled = true; }
+    }); });
+    await([&] { return db.sqlEngine().transactionManager().accessGate().stats().waitingWriters == 1; },
+          "Embedded writer did not queue");
+    db.sqlEngine().closeSession(81); writer.join(); errors.rethrow();
+    require(cancelled && !db.recoveryCoordinator().hasActiveStatement(), "External close did not cancel admission safely");
+    exec(db, "COMMIT", 80);
+    // Exercise cleanup of an unfinished implicit scope through the same public
+    // transaction boundary used by SqlEngine, without inventing an UNDO path.
+    db.sqlEngine().transactionManager().beginMutation(82);
+    auto table = db.catalog().openTable("t");
+    static_cast<void>(table.insert({std::uint32_t{2}, std::uint32_t{20}}));
+    db.sqlEngine().closeSession(82);
+    require(!db.recoveryCoordinator().hasActiveStatement() && !table.findByPrimaryKey(2),
+            "Closing unfinished implicit work released writer exclusion without UNDO");
+    db.close();
+    minidb::test::requireThrows<minidb::sql::SqlExecutionError>(
+        [&] { exec(db, "SELECT * FROM t", 83); }, "Shutdown did not return a controlled execution error");
+}
 }
 int main() {
-    try { readersAndWriter(); writerExclusion(); checkpointFairness();
+    try { readersAndWriter(); writerExclusion(); checkpointFairness(); cancelEmbeddedWaiter();
         std::cout << "concurrent_sessions_test passed (8 READ ONLY transactions, reader/writer exclusion, checkpoint fairness)\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

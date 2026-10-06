@@ -10,6 +10,10 @@
 #include <limits>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#ifdef __APPLE__
+#include <netinet/tcp_fsm.h>
+#endif
 #include <optional>
 #include <poll.h>
 #include <stdexcept>
@@ -22,6 +26,25 @@ namespace {
 
 std::string systemError(const char* operation) {
     return std::string(operation) + ": " + std::strerror(errno);
+}
+
+// FIN can arrive behind queued bytes. MSG_PEEK alone would keep such a closed
+// peer registered forever while its SQL request waits for database access.
+bool peerFinReceived(int descriptor) noexcept {
+#if defined(__APPLE__)
+    tcp_connection_info info{};
+    socklen_t size = sizeof(info);
+    return ::getsockopt(descriptor, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &size) == 0
+        && (info.tcpi_state == TCPS_CLOSE_WAIT || info.tcpi_state == TCPS_CLOSED);
+#elif defined(__linux__)
+    tcp_info info{};
+    socklen_t size = sizeof(info);
+    return ::getsockopt(descriptor, IPPROTO_TCP, TCP_INFO, &info, &size) == 0
+        && (info.tcpi_state == TCP_CLOSE_WAIT || info.tcpi_state == TCP_CLOSE);
+#else
+    static_cast<void>(descriptor);
+    return false; // Other POSIX platforms retain poll/EOF/error detection.
+#endif
 }
 
 ErrorCategory categoryFor(sql::SqlErrorKind kind) {
@@ -147,6 +170,7 @@ void TcpServer::serve(std::size_t connectionLimit) {
             Socket connection(descriptor);
             ++served;
             configureSocketForSafeWrites(descriptor);
+            reapWorkers();
             const auto session = registerConnection(descriptor);
             if (!session) {
                 sendProtocolFailure(descriptor, 0, "maximum concurrent sessions reached or server shutting down");
@@ -169,6 +193,7 @@ void TcpServer::serve(std::size_t connectionLimit) {
                             requestStop();
                         }
                         state->done = true;
+                        unregisterConnection(state->connection.get());
                     });
                 } catch (...) { workers_.pop_back(); throw; }
             } catch (...) { unregisterConnection(descriptor); throw; }
@@ -188,7 +213,9 @@ void TcpServer::serveConnection(int descriptor) {
         sendProtocolFailure(descriptor, 0, "maximum concurrent sessions reached or server shutting down");
         return;
     }
-    runConnection(descriptor, *session);
+    try { runConnection(descriptor, *session); }
+    catch (...) { unregisterConnection(descriptor); throw; }
+    unregisterConnection(descriptor);
 }
 
 std::optional<SessionId> TcpServer::registerConnection(int descriptor) {
@@ -204,7 +231,7 @@ std::optional<SessionId> TcpServer::registerConnection(int descriptor) {
         throw std::overflow_error("TCP session identifier range exhausted");
     }
     const auto session = nextSessionId_++;
-    connections_.insert(descriptor);
+    if (!connections_.insert(descriptor).second) throw std::logic_error("Connection is already being served");
     ++stats_.activeSessions;
     ++stats_.sessionsAccepted;
     stats_.peakActiveSessions = std::max(stats_.peakActiveSessions, stats_.activeSessions);
@@ -230,6 +257,7 @@ void TcpServer::runConnection(int descriptor, SessionId session, std::stop_token
                 const auto count = ::recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
                 disconnected = disconnected || count == 0
                     || (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+                if (count > 0) disconnected = disconnected || peerFinReceived(descriptor);
             }
             if (disconnected && !observedDisconnect) { observedDisconnect = true; ++disconnectWhileWaiting_; }
             return disconnected;
@@ -244,11 +272,9 @@ void TcpServer::runConnection(int descriptor, SessionId session, std::stop_token
     } catch (...) {
         failed_ = true;
         requestStop();
-        unregisterConnection(descriptor);
         std::throw_with_nested(std::runtime_error(
             "TCP session transaction cleanup failed; server requires restart"));
     }
-    unregisterConnection(descriptor);
     if (connectionError) std::rethrow_exception(connectionError);
 }
 

@@ -837,8 +837,8 @@ QueryResult SqlEngine::execute(std::string_view source, SessionId session) {
 }
 
 QueryResult SqlEngine::execute(const Statement& statement, SessionId session) {
-    auto sessionGuard = transactions_.lockSession(session);
     try {
+        auto sessionGuard = transactions_.lockSession(session);
         transactions_.requireSession(session);
         if (std::holds_alternative<BeginStatement>(statement.node)) {
             transactions_.begin(session, std::get<BeginStatement>(statement.node).accessMode

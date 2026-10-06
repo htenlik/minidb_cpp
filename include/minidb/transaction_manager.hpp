@@ -92,6 +92,7 @@ private:
         TransactionId writerId = INVALID_TRANSACTION_ID;
         std::uint64_t initialWalBytes = 0;
         bool closed = false;
+        std::atomic<bool> cancelRequested{false};
     };
     struct WriterDiagnostics {
         TransactionId id = INVALID_TRANSACTION_ID;
@@ -119,5 +120,6 @@ private:
     void finishRollback(SessionContext& session);
     void endExplicit(SessionContext& session);
     void safeBoundary(SessionContext& session) noexcept;
+    [[nodiscard]] static DatabaseAccessGate::CancelProbe cancellation(SessionContext& session);
 };
 } // namespace minidb
