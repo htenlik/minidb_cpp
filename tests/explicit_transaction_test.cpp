@@ -192,20 +192,28 @@ void checkpointDeferral() {
             for (int index = 0; index < 10; ++index) {
                 exec(server, "UPDATE t SET value = 'value" + std::to_string(index) + "' WHERE id = 1");
             }
-            require(server.checkpointManager().pending(), "Checkpoint trigger was lost during scope");
-            require(server.checkpointManager().stats().checkpointsCompleted == checkpointCount
+            if (mode == minidb::CheckpointMode::Sharp) {
+                require(server.checkpointManager().pending(), "Checkpoint trigger was lost during scope");
+                require(server.checkpointManager().stats().checkpointsCompleted == checkpointCount
                         && server.logManager().stats().segmentsDeleted == deleted,
                     "Checkpoint/reclamation ran while explicit transaction active");
+            } else {
+                require(server.checkpointManager().stats().checkpointsCompleted > checkpointCount
+                        && server.checkpointManager().stats().attEntriesCaptured > 0,
+                        "Fuzzy checkpoints did not capture live ATT at statement boundaries");
+            }
             for (auto requested : {minidb::CheckpointMode::Sharp, minidb::CheckpointMode::Fuzzy}) {
                 minidb::test::requireThrows<std::logic_error>([&] {
                     static_cast<void>(server.checkpointManager().checkpoint(requested));
                 }, "Manual active checkpoint succeeded");
             }
             exec(server, terminal);
-            require(!server.checkpointManager().pending()
-                        && server.checkpointManager().stats().checkpointsCompleted == checkpointCount + 1
-                        && server.checkpointManager().stats().activeTransactionsCaptured == 0,
-                    "Deferred checkpoint not completed with empty ATT");
+            require(!server.checkpointManager().pending(), "Checkpoint remains pending after completion");
+            if (mode == minidb::CheckpointMode::Sharp) {
+                require(server.checkpointManager().stats().checkpointsCompleted == checkpointCount + 1
+                            && server.checkpointManager().stats().activeTransactionsCaptured == 0,
+                        "Deferred sharp checkpoint not completed with empty ATT");
+            }
             validate(server);
         }
     }

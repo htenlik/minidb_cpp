@@ -42,13 +42,21 @@ CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
     return checkpointExclusive(mode);
 }
 
+CheckpointId CheckpointManager::checkpoint(CheckpointMode mode, const DatabaseAccessGate::Lease& lease) {
+    if (gate_ && (!lease.owns(*gate_) || lease.mode() != AccessMode::ReadWrite)) {
+        throw std::logic_error("Active checkpoint requires the database exclusive lease");
+    }
+    return checkpointExclusive(mode);
+}
+
 CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
     std::lock_guard lock(mutex_);
     const auto started = std::chrono::steady_clock::now();
     ++stats_.checkpointsStarted;
     try {
-        if (recovery_.hasActiveStatement() || recovery_.rollbackActive()) {
-            throw std::logic_error("Checkpoint requires no active transaction or rollback");
+        if (recovery_.rollbackActive() || !recovery_.checkpointSafe()
+            || (mode == CheckpointMode::Sharp && recovery_.hasActiveStatement())) {
+            throw std::logic_error("Checkpoint requires a safe boundary; sharp checkpoints require no writer");
         }
         if (mode == CheckpointMode::Sharp && bufferPool_.totalPinCount() != 0) {
             throw std::logic_error("Checkpoint requires zero pinned buffer frames");
@@ -77,7 +85,7 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
             recoveryFailPoint("fuzzy_checkpoint_after_begin_append");
             const auto dirtyPages = bufferPool_.dirtyPageTableSnapshot();
             recoveryFailPoint("fuzzy_checkpoint_after_dpt_snapshot");
-            const std::vector<CheckpointTransactionEntry> activeTransactions;
+            const auto activeTransactions = recovery_.checkpointTransactions();
             const auto endPayload = encodeFuzzyCheckpointEndLogPayload({
                 checkpointId,
                 beginLsn,
@@ -112,8 +120,15 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
             recoveryFailPoint("fuzzy_checkpoint_after_control_sync");
 
             Lsn retentionFloor = beginLsn;
+            Lsn oldestRecLsn = INVALID_LSN;
             for (const auto& entry : dirtyPages) {
                 retentionFloor = std::min(retentionFloor, entry.recLsn);
+                if (!isValidLsn(oldestRecLsn) || entry.recLsn < oldestRecLsn) oldestRecLsn = entry.recLsn;
+            }
+            Lsn oldestBegin = INVALID_LSN;
+            for (const auto& entry : activeTransactions) {
+                retentionFloor = std::min(retentionFloor, entry.beginLsn);
+                if (!isValidLsn(oldestBegin) || entry.beginLsn < oldestBegin) oldestBegin = entry.beginLsn;
             }
             const auto checkpointElapsed = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -147,8 +162,11 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
                 stats_.checkpointMaxDurationNs, checkpointElapsed);
             stats_.dptEntriesCaptured += dirtyPages.size();
             stats_.activeTransactionsCaptured += activeTransactions.size();
+            stats_.attEntriesCaptured += activeTransactions.size();
             stats_.pinnedFramesObserved += bufferPool_.stats().pinnedFrames;
-            stats_.oldestRecLsn = dirtyPages.empty() ? INVALID_LSN : retentionFloor;
+            stats_.oldestRecLsn = oldestRecLsn;
+            stats_.oldestActiveTransactionBeginLsn = oldestBegin;
+            stats_.activeTransactionRetentionFloor = oldestBegin;
             stats_.retentionFloorLsn = retentionFloor;
             stats_.lastCheckpointId = checkpointId;
             stats_.lastCheckpointEndLsn = endLsn;
@@ -261,6 +279,8 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
         stats_.lastCheckpointEndLsn = endLsn;
         stats_.lastRecoveryStartOffset = recoveryStart;
         stats_.oldestRecLsn = INVALID_LSN;
+        stats_.oldestActiveTransactionBeginLsn = INVALID_LSN;
+        stats_.activeTransactionRetentionFloor = INVALID_LSN;
         stats_.retentionFloorLsn = beginLsn;
 
         if (!bufferPool_.dirtyPageTableSnapshot().empty()) {
@@ -293,7 +313,8 @@ bool CheckpointManager::onTransactionCompleted(const DatabaseAccessGate::Lease* 
     const bool statementTriggered = policy_.statements != 0
         && statementsSinceCheckpoint_ >= policy_.statements;
     pending_ = pending_ || walTriggered || statementTriggered;
-    if (!pending_ || recovery_.hasActiveStatement() || recovery_.rollbackActive()) return false;
+    if (!pending_ || recovery_.rollbackActive() || !recovery_.checkpointSafe()
+        || (policy_.mode == CheckpointMode::Sharp && recovery_.hasActiveStatement())) return false;
     try {
         static_cast<void>(checkpointExclusive(policy_.mode));
         return true;

@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -23,7 +24,40 @@ enum class RedoPolicy : std::uint8_t {
     PageLsnSelectiveRedo,
 };
 
+enum class RecoveryTransactionStatus : std::uint8_t { Active, Committed, Aborting, Aborted };
+
+// Value-only snapshots: neither sessions nor page/frame pointers belong in ATT.
+struct RecoveryTransactionEntry {
+    TransactionId transactionId = INVALID_TRANSACTION_ID;
+    RecoveryTransactionStatus status = RecoveryTransactionStatus::Active;
+    Lsn beginLsn = INVALID_LSN;
+    Lsn lastLsn = INVALID_LSN;
+    Lsn undoNextLsn = INVALID_LSN;
+    std::uint64_t startPageCount = 0;
+    std::uint64_t clrCount = 0;
+    bool hasDurableCommit = false;
+    bool hasDurableAbort = false;
+};
+
 struct RecoveryStats {
+    std::uint64_t analysisTransactions = 0;
+    std::uint64_t analysisWinners = 0;
+    std::uint64_t analysisLosers = 0;
+    std::uint64_t analysisAborted = 0;
+    std::uint64_t peakRecoveryTransactionTableSize = 0;
+    std::uint64_t multiLoserUndoSteps = 0;
+    std::uint64_t multiLoserClrsAppended = 0;
+    std::uint64_t transactionsCompletedDuringUndo = 0;
+    std::uint64_t recoveryLsnIndexEntries = 0;
+    // Accounted index keys/pointers + bucket array; excludes allocator overhead
+    // and scan-owned decoded payloads. O(retained scanned records).
+    std::uint64_t recoveryLsnIndexBytes = 0;
+    std::uint64_t checkpointActiveTransactionCount = 0;
+    std::uint64_t analysisActiveTransactions = 0;
+    std::uint64_t analysisAbortingTransactions = 0;
+    std::uint64_t lsnIndexEntries = 0;
+    std::uint64_t undoQueuePops = 0;
+    std::uint64_t undoQueuePeak = 0;
     std::uint64_t recordsAnalyzed = 0;
     std::uint64_t transactionsAnalyzed = 0;
     std::uint64_t committedTransactions = 0;
@@ -142,6 +176,12 @@ public:
           redoPolicy_(redoPolicy) {}
 
     [[nodiscard]] RecoveryStats recover();
+    [[nodiscard]] const std::vector<RecoveryTransactionEntry>& analysisTransactions() const noexcept {
+        return analysisTransactions_;
+    }
+    [[nodiscard]] const std::vector<RecoveryTransactionEntry>& recoveredTransactions() const noexcept {
+        return recoveredTransactions_;
+    }
 
 private:
     DiskManager& diskManager_;
@@ -149,6 +189,8 @@ private:
     CheckpointControl* checkpointControl_;
     bool forceFullScan_;
     RedoPolicy redoPolicy_;
+    std::vector<RecoveryTransactionEntry> analysisTransactions_;
+    std::vector<RecoveryTransactionEntry> recoveredTransactions_;
 };
 
 class RecoveryCoordinator final : public PageRecoveryHook {
@@ -160,6 +202,17 @@ public:
         WalUpdateMode updateMode = WalUpdateMode::FullPage);
 
     void attachBufferPool(BufferPoolManager& bufferPool) noexcept;
+    [[nodiscard]] TransactionId beginTransaction();
+    // Binding is operation-local physical ownership, not transaction-table ownership.
+    // Production binds only under the database-wide exclusive writer lease.
+    void bindTransaction(TransactionId id);
+    void beginMutation(TransactionId id);
+    void prepareTransaction(TransactionId id);
+    void commitTransaction(TransactionId id);
+    void rollbackTransaction(TransactionId id);
+    [[nodiscard]] std::vector<CheckpointTransactionEntry> checkpointTransactions() const;
+    [[nodiscard]] std::vector<RecoveryTransactionEntry> transactionSnapshot() const;
+    [[nodiscard]] bool checkpointSafe() const;
     void beginStatement();
     // Finalize a successful statement inside a still-active transaction. This
     // logs resident changes without COMMIT, WAL force, or database-page force.
@@ -167,21 +220,24 @@ public:
     void commitStatement();
     void rollbackStatement();
 
-    [[nodiscard]] bool hasActiveStatement() const noexcept { return activeSignal_.load(); }
+    [[nodiscard]] bool hasActiveStatement() const noexcept { return contextCount_.load() != 0; }
     [[nodiscard]] bool rollbackActive() const noexcept { return rollbackActive_; }
     [[nodiscard]] TransactionId activeTransactionId() const noexcept;
-    [[nodiscard]] bool hasMaterializedWalBegin() const noexcept;
-    [[nodiscard]] Lsn lastLsn() const noexcept;
-    [[nodiscard]] std::size_t touchedPageCount() const noexcept;
-    [[nodiscard]] std::uint64_t transactionWalBytes() const noexcept;
-    [[nodiscard]] std::uint64_t originalBeforeImageBytes() const noexcept;
+    [[nodiscard]] bool hasMaterializedWalBegin(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
+    [[nodiscard]] Lsn lastLsn(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
+    [[nodiscard]] std::size_t touchedPageCount(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
+    [[nodiscard]] std::uint64_t transactionWalBytes(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
+    [[nodiscard]] std::uint64_t originalBeforeImageBytes(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
     // Accounted context/PageState storage, excluding std::map allocator overhead.
-    [[nodiscard]] std::uint64_t transactionRecoveryBytes() const noexcept;
-    [[nodiscard]] std::uint64_t peakTransactionRecoveryBytes() const noexcept;
+    [[nodiscard]] std::uint64_t transactionRecoveryBytes(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
+    [[nodiscard]] std::uint64_t peakTransactionRecoveryBytes(TransactionId id = INVALID_TRANSACTION_ID) const noexcept;
     [[nodiscard]] const RecoveryStats& lastRollbackStats() const noexcept {
         return lastRollbackStats_;
     }
-    [[nodiscard]] TransactionId nextTransactionId() const noexcept { return nextTransactionId_; }
+    [[nodiscard]] TransactionId nextTransactionId() const noexcept {
+        std::lock_guard lock(contextsMutex_);
+        return nextTransactionId_;
+    }
     [[nodiscard]] WalUpdateMode updateMode() const noexcept { return updateMode_; }
     [[nodiscard]] const TransactionRuntimeStats& stats() const noexcept { return stats_; }
     void resetStats() noexcept { stats_ = {}; }
@@ -202,14 +258,11 @@ private:
         Lsn latestLsn = INVALID_LSN;
     };
 
-    struct ActiveStatement {
-        TransactionId transactionId = INVALID_TRANSACTION_ID;
-        std::uint64_t startPageCount = 0;
-        Lsn beginLsn = INVALID_LSN;
-        Lsn previousLsn = INVALID_LSN;
+    struct RecoveryTransactionContext : RecoveryTransactionEntry {
         std::map<PageId, PageState> pages;
         std::uint64_t walBytes = 0;
         std::uint64_t peakRecoveryBytes = 0;
+        bool safeBoundary = true;
     };
 
     DiskManager& diskManager_;
@@ -217,14 +270,19 @@ private:
     BufferPoolManager* bufferPool_ = nullptr;
     TransactionId nextTransactionId_ = 1;
     WalUpdateMode updateMode_ = WalUpdateMode::FullPage;
-    std::optional<ActiveStatement> active_;
+    std::map<TransactionId, RecoveryTransactionContext> contexts_;
+    // Non-owning handle into contexts_; never retained across erase/rebind.
+    RecoveryTransactionContext* active_ = nullptr;
+    mutable std::recursive_mutex contextsMutex_;
+    std::atomic<std::size_t> contextCount_{0};
     std::atomic<bool> activeSignal_{false};
     std::atomic<bool> rollbackActive_{false};
     TransactionRuntimeStats stats_{};
     RecoveryStats lastRollbackStats_{};
 
-    void ensureBeginLogged();
+    void ensureBeginLogged(RecoveryTransactionContext& context);
     [[nodiscard]] Lsn appendTransactionRecord(
+        RecoveryTransactionContext& context,
         LogRecordType type,
         std::vector<std::byte> payload = {});
     void requireNoPins() const;
