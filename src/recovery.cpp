@@ -403,6 +403,7 @@ RecoveryStats RecoveryManager::recover() {
     scan.truncatedTail = false;
     scan.fileBytes = scan.validBytes;
     std::map<TransactionId, AnalyzedTransaction> transactions;
+    std::size_t activeTransactionCount = 0;
     std::map<PageId, TransactionId> activePageOwners;
     std::map<CheckpointId, CheckpointBeginLogPayload> checkpointBegins;
     std::map<CheckpointId, Lsn> fuzzyCheckpointBegins;
@@ -455,10 +456,7 @@ RecoveryStats RecoveryManager::recover() {
             validateCheckpointRecord(record);
             if ((record.type == LogRecordType::CheckpointBegin
                  || record.type == LogRecordType::CheckpointEnd)
-                && std::any_of(transactions.begin(), transactions.end(), [](const auto& entry) {
-                    return entry.second.status == TransactionStatus::Active
-                        || entry.second.status == TransactionStatus::Aborting;
-                })) {
+                && activeTransactionCount != 0) {
                 throw WalError(WalErrorKind::CorruptRecord,
                                "Checkpoint record overlaps an active transaction");
             }
@@ -511,6 +509,7 @@ RecoveryStats RecoveryManager::recover() {
             transaction.lastLsn = record.lsn;
             transaction.undoNextLsn = record.lsn;
             transactions.emplace(record.transactionId, std::move(transaction));
+            ++activeTransactionCount;
             continue;
         }
         if (found == transactions.end()
@@ -599,6 +598,7 @@ RecoveryStats RecoveryManager::recover() {
         found->second.lastLsn = record.lsn;
         if (found->second.status == TransactionStatus::Active) found->second.undoNextLsn = record.lsn;
         if (found->second.hasDurableCommit || found->second.hasDurableAbort) {
+            --activeTransactionCount;
             found->second.undoNextLsn = INVALID_LSN;
             for (const auto* update : found->second.updates) {
                 activePageOwners.erase(pageUpdateIdentity(*update).pageId);
