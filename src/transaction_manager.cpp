@@ -210,7 +210,7 @@ void TransactionManager::failRead(SessionId session) {
     auto guard = lockSession(session);
     if (!guard.context_->explicitMode) guard.context_->lease.reset();
 }
-void TransactionManager::closeSession(SessionId session) {
+void TransactionManager::closeSession(SessionId session, SessionCloseReason reason) {
     auto context = findSession(session);
     if (!context) return;
     context->cancelRequested = true; // Cancel admission before waiting for its session latch.
@@ -219,7 +219,11 @@ void TransactionManager::closeSession(SessionId session) {
         if (failed_) throw std::runtime_error("Transaction cleanup failed; database requires reopen");
         const bool writer = context->explicitMode == AccessMode::ReadWrite;
         finishRollback(*context);
-        if (writer) { std::lock_guard statsLock(statsMutex_); ++stats_.disconnectRollbacks; }
+        if (writer) {
+            std::lock_guard statsLock(statsMutex_);
+            if (reason == SessionCloseReason::Shutdown) ++stats_.shutdownRollbacks;
+            else ++stats_.disconnectRollbacks;
+        }
     } else if (context->lease && context->lease->mode() == AccessMode::ReadWrite
                && recovery_ && recovery_->hasActiveStatement()) {
         // An externally requested shutdown can interrupt implicit completion.
@@ -242,10 +246,7 @@ void TransactionManager::shutdown() {
     std::vector<SessionId> sessions;
     { std::lock_guard lock(sessionsMutex_); for (const auto& entry : sessions_) sessions.push_back(entry.first); }
     for (auto session : sessions) {
-        if (accessMode(session) == AccessMode::ReadWrite) {
-            std::lock_guard lock(statsMutex_); ++stats_.shutdownRollbacks;
-        }
-        closeSession(session);
+        closeSession(session, SessionCloseReason::Shutdown);
     }
 }
 bool TransactionManager::hasActiveExplicitTransaction(SessionId session) const {

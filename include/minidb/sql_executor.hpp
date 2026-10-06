@@ -81,7 +81,9 @@ public:
 
     [[nodiscard]] QueryResult execute(std::string_view source, SessionId session = LOCAL_SESSION_ID);
     [[nodiscard]] QueryResult execute(const Statement& statement, SessionId session = LOCAL_SESSION_ID);
-    void closeSession(SessionId session) { transactions_.closeSession(session); }
+    void closeSession(SessionId session, SessionCloseReason reason = SessionCloseReason::Disconnect) {
+        transactions_.closeSession(session, reason);
+    }
     void shutdown() { transactions_.shutdown(); }
     [[nodiscard]] TransactionManager& transactionManager() noexcept { return transactions_; }
     [[nodiscard]] const TransactionManager& transactionManager() const noexcept { return transactions_; }

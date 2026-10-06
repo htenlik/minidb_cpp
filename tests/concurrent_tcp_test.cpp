@@ -186,6 +186,8 @@ void shutdown() {
             require(stats.activeReaders == 0 && !stats.writerActive && stats.waitingReaders == 0 && stats.waitingWriters == 0,
                     "Shutdown leaked active leases/waiters");
             require(server.tcpServer().concurrencyStats().activeSessions == 0, "Shutdown did not join session cleanup");
+            require(server.sqlEngine().transactionManager().stats().shutdownRollbacks == (writer ? 1U : 0U),
+                    "Shutdown rollback was miscounted as a peer disconnect");
         }
         DatabaseServer reopened(db.path().string(), configuration());
         require(selected(reopened.sqlEngine().execute("SELECT value FROM t WHERE id = 1")) == "original",

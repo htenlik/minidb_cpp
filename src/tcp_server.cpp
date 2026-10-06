@@ -268,7 +268,7 @@ void TcpServer::runConnection(int descriptor, SessionId session, std::stop_token
     }
     try {
         // The writer's exclusive lease remains held through durable rollback.
-        engine_.closeSession(session);
+        engine_.closeSession(session, stopping_ ? SessionCloseReason::Shutdown : SessionCloseReason::Disconnect);
     } catch (...) {
         failed_ = true;
         requestStop();

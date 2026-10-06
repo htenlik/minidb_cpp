@@ -15,6 +15,7 @@ class CheckpointManager;
 using SessionId = std::uint64_t;
 inline constexpr SessionId LOCAL_SESSION_ID = 0;
 enum class TransactionState { Idle, Active };
+enum class SessionCloseReason { Disconnect, Shutdown };
 
 struct ExplicitTransactionStats {
     std::uint64_t explicitTransactionsBegun = 0;
@@ -63,7 +64,7 @@ public:
     void beginRead(SessionId session);
     void completeRead(SessionId session);
     void failRead(SessionId session);
-    void closeSession(SessionId session);
+    void closeSession(SessionId session, SessionCloseReason reason = SessionCloseReason::Disconnect);
     void shutdown();
 
     [[nodiscard]] DatabaseAccessGate& accessGate() noexcept { return gate_; }
