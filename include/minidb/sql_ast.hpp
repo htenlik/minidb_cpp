@@ -160,7 +160,8 @@ struct DeleteStatement {
     SourceSpan tableNameSpan{};
 };
 
-struct BeginStatement {};
+enum class TransactionAccessMode { ReadWrite, ReadOnly };
+struct BeginStatement { TransactionAccessMode accessMode = TransactionAccessMode::ReadWrite; };
 struct CommitStatement {};
 struct RollbackStatement {};
 

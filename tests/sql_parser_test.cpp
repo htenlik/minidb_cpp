@@ -319,7 +319,7 @@ void testTransactionControlStatements() {
 
     for (const auto source : {
              "BEGIN TRANSACTION TRANSACTION", "BEGIN WORK", "BEGIN foo", "BEGIN 1",
-             "BEGIN ()", "BEGIN IMMEDIATE", "BEGIN READ ONLY", "BEGIN; COMMIT;",
+             "BEGIN ()", "BEGIN IMMEDIATE", "BEGIN READ SOMETHING", "BEGIN; COMMIT;",
              "BEGIN TRANSACTION; ROLLBACK;", "COMMIT TRANSACTION", "COMMIT WORK",
              "COMMIT 1", "COMMIT; garbage", "COMMIT;;", "ROLLBACK TRANSACTION",
              "ROLLBACK TO checkpoint", "ROLLBACK WORK", "ROLLBACK ()", "ROLLBACK;;",
@@ -372,6 +372,23 @@ void testLargeExpressionAndAstMove() {
                           "Large expression AST move/source span failed");
 }
 
+void testTransactionAccessMode() {
+    for (const auto source : {"BEGIN", "BEGIN TRANSACTION", "BEGIN READ WRITE;",
+                             "begin transaction read write"}) {
+        requireStatement<BeginStatement>(parse(source), "BEGIN access AST missing");
+        minidb::test::require(std::get<BeginStatement>(parse(source).node).accessMode
+            == minidb::sql::TransactionAccessMode::ReadWrite, "BEGIN did not default to READ WRITE");
+    }
+    for (const auto source : {"BEGIN READ ONLY", "begin transaction READ only;"}) {
+        minidb::test::require(std::get<BeginStatement>(parse(source).node).accessMode
+            == minidb::sql::TransactionAccessMode::ReadOnly, "READ ONLY access mode missing");
+    }
+    for (const auto source : {"BEGIN READ", "BEGIN ONLY", "BEGIN WRITE", "BEGIN READ ONLY READ WRITE",
+                             "COMMIT READ ONLY", "BEGIN READ ONLY TRANSACTION", "BEGIN ISOLATION LEVEL 1"}) {
+        requireParserError(source);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -382,6 +399,7 @@ int main() {
         testUpdateDeleteAndOptionalTerminator();
         testMalformedStatementFamilies();
         testTransactionControlStatements();
+        testTransactionAccessMode();
         testErrorLocationsAndNestingLimit();
         testLargeExpressionAndAstMove();
         std::cout << "sql_parser_test passed\n";
