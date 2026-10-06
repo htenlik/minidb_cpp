@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(minidb LANGUAGES CXX)
+find_package(Threads REQUIRED)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(minidb_core
+    src/database_access_gate.cpp
     src/buffer_pool_manager.cpp
     src/bplus_tree.cpp
     src/checkpoint_control.cpp
@@ -36,6 +38,7 @@ add_library(minidb_core
     src/wal.cpp
 )
 target_include_directories(minidb_core PUBLIC include)
+target_link_libraries(minidb_core PUBLIC Threads::Threads)
 
 add_library(minidb_sql
     src/sql_ast.cpp
@@ -107,6 +110,12 @@ target_link_libraries(minidb_client PRIVATE minidb_network)
 add_executable(minidb_bench src/benchmark_main.cpp)
 target_link_libraries(minidb_bench PRIVATE minidb_benchmark)
 enable_testing()
+add_executable(database_access_gate_test tests/database_access_gate_test.cpp)
+target_link_libraries(database_access_gate_test PRIVATE minidb_core)
+add_test(NAME database_access_gate_test COMMAND database_access_gate_test)
+add_executable(buffer_concurrency_test tests/buffer_concurrency_test.cpp)
+target_link_libraries(buffer_concurrency_test PRIVATE minidb_core)
+add_test(NAME buffer_concurrency_test COMMAND buffer_concurrency_test)
 add_executable(pager_test tests/pager_test.cpp)
 target_link_libraries(pager_test PRIVATE minidb_core)
 add_test(NAME pager_test COMMAND pager_test)

@@ -788,6 +788,7 @@ void RecoveryCoordinator::beginStatement() {
         nextTransactionId_++, diskManager_.pageCount(), INVALID_LSN, INVALID_LSN, {},
     });
     active_->peakRecoveryBytes = transactionRecoveryBytes();
+    activeSignal_ = true;
     ++stats_.transactionsBegun;
 }
 
@@ -1018,6 +1019,7 @@ void RecoveryCoordinator::commitStatement() {
         ++stats_.zeroWriteTransactions;
         ++stats_.transactionsCommitted;
         active_.reset();
+        activeSignal_ = false;
         return;
     }
     recoveryFailPoint("before_commit_append");
@@ -1027,6 +1029,7 @@ void RecoveryCoordinator::commitStatement() {
     ++stats_.commitFsyncs;
     recoveryFailPoint("after_commit_sync");
     active_.reset();
+    activeSignal_ = false;
     ++stats_.transactionsCommitted;
 }
 
@@ -1047,6 +1050,7 @@ void RecoveryCoordinator::rollbackStatement() {
         ++stats_.zeroWriteTransactions;
         ++stats_.transactionsRolledBack;
         active_.reset();
+        activeSignal_ = false;
         rollbackActive_ = false;
         return;
     }
@@ -1075,6 +1079,7 @@ void RecoveryCoordinator::rollbackStatement() {
     stats_.rollbackDatabaseWrites += lastRollbackStats_.undoPageWrites;
     diskManager_.reloadDatabaseHeader();
     active_.reset();
+    activeSignal_ = false;
     rollbackActive_ = false;
     ++stats_.transactionsRolledBack;
 }

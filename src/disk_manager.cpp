@@ -91,6 +91,7 @@ void DiskManager::requireExistingPhysicalPage(PageId pageId) const {
 }
 
 void DiskManager::readPage(PageId pageId, Page& output) {
+    std::lock_guard lock(ioLatch_);
     requireExistingDataPage(pageId);
     file_.clear();
     file_.seekg(
@@ -105,6 +106,7 @@ void DiskManager::readPage(PageId pageId, Page& output) {
 }
 
 void DiskManager::writePage(PageId pageId, const Page& page) {
+    std::lock_guard lock(ioLatch_);
     requireExistingDataPage(pageId);
     file_.clear();
     file_.seekp(
@@ -118,6 +120,7 @@ void DiskManager::writePage(PageId pageId, const Page& page) {
 }
 
 PageId DiskManager::appendPage() {
+    std::lock_guard lock(ioLatch_);
     if (pageCount_ == INVALID_PAGE_ID) {
         throw std::overflow_error("Database has exhausted the available page IDs.");
     }
@@ -135,11 +138,13 @@ PageId DiskManager::appendPage() {
 }
 
 void DiskManager::flush() {
+    std::lock_guard lock(ioLatch_);
     file_.flush();
     if (!file_) throw std::runtime_error("Failed to flush database file.");
 }
 
 void DiskManager::sync() {
+    std::lock_guard lock(ioLatch_);
     flush();
     const auto descriptor = ::open(path_.c_str(), O_RDWR);
     if (descriptor < 0) {
@@ -156,6 +161,7 @@ void DiskManager::sync() {
 }
 
 void DiskManager::readPhysicalPage(PageId pageId, Page& output) {
+    std::lock_guard lock(ioLatch_);
     requireExistingPhysicalPage(pageId);
     file_.clear();
     file_.seekg(
@@ -169,6 +175,7 @@ void DiskManager::readPhysicalPage(PageId pageId, Page& output) {
 }
 
 void DiskManager::writePhysicalPage(PageId pageId, const Page& page) {
+    std::lock_guard lock(ioLatch_);
     if (pageId == INVALID_PAGE_ID) {
         throw std::invalid_argument("Cannot physically write INVALID_PAGE_ID.");
     }
@@ -195,6 +202,7 @@ void DiskManager::reopenFile() {
 }
 
 void DiskManager::truncateToPageCount(std::uint64_t pageCount) {
+    std::lock_guard lock(ioLatch_);
     if (pageCount == 0 || pageCount > INVALID_PAGE_ID) {
         throw std::invalid_argument("Recovery page count is outside the supported range.");
     }
@@ -218,10 +226,12 @@ void DiskManager::truncateToPageCount(std::uint64_t pageCount) {
 }
 
 void DiskManager::reloadDatabaseHeader() {
+    std::lock_guard lock(ioLatch_);
     loadAndValidateDatabaseHeader();
 }
 
 void DiskManager::updateCatalogRootPageId(PageId pageId) {
+    std::lock_guard lock(ioLatch_);
     if (pageId != INVALID_PAGE_ID
         && (pageId == database_format::METADATA_PAGE_ID || pageId >= pageCount_)) {
         throw std::invalid_argument("Catalog root must identify an existing data page.");
@@ -233,6 +243,7 @@ void DiskManager::updateCatalogRootPageId(PageId pageId) {
 }
 
 void DiskManager::updateFreeListRootPageId(PageId pageId) {
+    std::lock_guard lock(ioLatch_);
     if (pageId != INVALID_PAGE_ID
         && (pageId == database_format::METADATA_PAGE_ID || pageId >= pageCount_)) {
         throw std::invalid_argument("Free-list root must identify an existing data page.");

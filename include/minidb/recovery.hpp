@@ -1,6 +1,7 @@
 #pragma once
 
 #include "minidb/page_recovery.hpp"
+#include <atomic>
 #include "minidb/checkpoint_types.hpp"
 #include "minidb/recovery_log.hpp"
 
@@ -166,7 +167,7 @@ public:
     void commitStatement();
     void rollbackStatement();
 
-    [[nodiscard]] bool hasActiveStatement() const noexcept { return active_.has_value(); }
+    [[nodiscard]] bool hasActiveStatement() const noexcept { return activeSignal_.load(); }
     [[nodiscard]] bool rollbackActive() const noexcept { return rollbackActive_; }
     [[nodiscard]] TransactionId activeTransactionId() const noexcept;
     [[nodiscard]] bool hasMaterializedWalBegin() const noexcept;
@@ -186,6 +187,7 @@ public:
     void resetStats() noexcept { stats_ = {}; }
 
     void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) override;
+    [[nodiscard]] bool needsPreparation() const noexcept override { return activeSignal_.load(); }
     [[nodiscard]] Lsn preparePageForWrite(
         PageId pageId,
         DiskManager::Page& after) override;
@@ -216,7 +218,8 @@ private:
     TransactionId nextTransactionId_ = 1;
     WalUpdateMode updateMode_ = WalUpdateMode::FullPage;
     std::optional<ActiveStatement> active_;
-    bool rollbackActive_ = false;
+    std::atomic<bool> activeSignal_{false};
+    std::atomic<bool> rollbackActive_{false};
     TransactionRuntimeStats stats_{};
     RecoveryStats lastRollbackStats_{};
 

@@ -49,7 +49,7 @@ public:
     [[nodiscard]] std::size_t residentPageCount() const noexcept { return cache_.size(); }
 
     [[nodiscard]] PageId pageCount() const noexcept { return diskManager_.pageCount(); }
-    [[nodiscard]] const database_format::DatabaseHeader& databaseHeader() const noexcept {
+    [[nodiscard]] database_format::DatabaseHeader databaseHeader() const noexcept {
         return diskManager_.databaseHeader();
     }
 

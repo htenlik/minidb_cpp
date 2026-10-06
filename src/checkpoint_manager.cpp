@@ -37,6 +37,13 @@ CheckpointId CheckpointManager::checkpoint() {
 }
 
 CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
+    if (recovery_.hasActiveStatement()) throw std::logic_error("Checkpoint requires no active writer transaction");
+    auto lease = gate_ ? gate_->acquireExclusive() : DatabaseAccessGate::Lease{};
+    return checkpointExclusive(mode);
+}
+
+CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
+    std::lock_guard lock(mutex_);
     const auto started = std::chrono::steady_clock::now();
     ++stats_.checkpointsStarted;
     try {
@@ -272,12 +279,15 @@ CheckpointId CheckpointManager::checkpoint(CheckpointMode mode) {
     }
 }
 
-bool CheckpointManager::onStatementCommitted() noexcept {
+bool CheckpointManager::onStatementCommitted(const DatabaseAccessGate::Lease* lease) noexcept {
+    std::lock_guard lock(mutex_);
     ++statementsSinceCheckpoint_;
-    return onTransactionCompleted();
+    return onTransactionCompleted(lease);
 }
 
-bool CheckpointManager::onTransactionCompleted() noexcept {
+bool CheckpointManager::onTransactionCompleted(const DatabaseAccessGate::Lease* lease) noexcept {
+    std::lock_guard lock(mutex_);
+    if (gate_ && (!lease || !lease->owns(*gate_) || lease->mode() != AccessMode::ReadWrite)) return false;
     const auto walGrowth = logManager_.lastValidOffset() - lastCheckpointWalSize_;
     const bool walTriggered = policy_.walBytes != 0 && walGrowth >= policy_.walBytes;
     const bool statementTriggered = policy_.statements != 0
@@ -285,7 +295,7 @@ bool CheckpointManager::onTransactionCompleted() noexcept {
     pending_ = pending_ || walTriggered || statementTriggered;
     if (!pending_ || recovery_.hasActiveStatement() || recovery_.rollbackActive()) return false;
     try {
-        static_cast<void>(checkpoint());
+        static_cast<void>(checkpointExclusive(policy_.mode));
         return true;
     } catch (...) {
         return false;

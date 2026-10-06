@@ -10,6 +10,9 @@ namespace minidb {
 class PageRecoveryHook {
 public:
     virtual ~PageRecoveryHook() = default;
+    // Thread-safe lifecycle signal. Idle reader eviction never enters mutable
+    // writer state; already-prepared committed frames retain their pageLSN.
+    [[nodiscard]] virtual bool needsPreparation() const noexcept { return true; }
     virtual void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) = 0;
     [[nodiscard]] virtual Lsn preparePageForWrite(
         PageId pageId,

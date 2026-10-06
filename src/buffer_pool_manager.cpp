@@ -14,19 +14,22 @@ BufferPoolManager::BufferPoolManager(
     std::size_t frameCount,
     std::size_t k,
     WalFlushProvider* walProvider,
-    PageRecoveryHook* recoveryHook)
+    PageRecoveryHook* recoveryHook,
+    bool waitForReadFrames)
     : diskManager_(diskManager),
       frames_(frameCount),
       replacer_(frameCount, k),
       walProvider_(walProvider),
-      recoveryHook_(recoveryHook) {
+      recoveryHook_(recoveryHook), waitForReadFrames_(waitForReadFrames) {
     if (frameCount == 0) throw std::invalid_argument("Buffer pool capacity must be positive");
     if (frameCount > std::numeric_limits<FrameId>::max()) {
         throw std::invalid_argument("Buffer pool capacity exceeds FrameId range");
     }
     pageTable_.reserve(frameCount);
+    frameLatches_.reserve(frameCount);
     for (FrameId frameId = 0; frameId < frameCount; ++frameId) {
         freeFrames_.push_back(frameId);
+        frameLatches_.push_back(std::make_unique<std::shared_mutex>());
     }
 }
 
@@ -60,7 +63,7 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
 }
 
 void BufferPoolManager::prepareFrameForWrite(BufferFrame& frame) {
-    if (recoveryHook_ == nullptr) return;
+    if (recoveryHook_ == nullptr || !recoveryHook_->needsPreparation()) return;
     const auto lsn = recoveryHook_->preparePageForWrite(frame.pageId, frame.data);
     if (isValidLsn(lsn)) {
         frame.pageLsn = lsn;
@@ -129,6 +132,7 @@ void BufferPoolManager::installPage(
 }
 
 std::optional<BasicPageGuard> BufferPoolManager::fetchPage(PageId pageId, bool writable) {
+    std::unique_lock lock(metadataLatch_);
     if (pageId == database_format::METADATA_PAGE_ID) {
         throw std::invalid_argument("Page 0 is reserved for database metadata");
     }
@@ -137,6 +141,11 @@ std::optional<BasicPageGuard> BufferPoolManager::fetchPage(PageId pageId, bool w
     }
 
     ++stats_.pageRequests;
+    while (!pageTable_.contains(pageId) && !availableFrame().has_value()
+           && !writable && waitForReadFrames_) {
+        ++stats_.frameAvailabilityWaits;
+        frameReleased_.wait(lock);
+    }
     if (const auto found = pageTable_.find(pageId); found != pageTable_.end()) {
         ++stats_.cacheHits;
         auto& frame = frames_[found->second];
@@ -146,14 +155,10 @@ std::optional<BasicPageGuard> BufferPoolManager::fetchPage(PageId pageId, bool w
         if (frame.pinCount == 0) replacer_.setEvictable(found->second, false);
         ++frame.pinCount;
         replacer_.recordAccess(found->second);
-        if (writable) {
-            if (recoveryHook_ != nullptr) {
-                recoveryHook_->notePageWriteIntent(pageId, frame.data);
-            }
-            frame.dirty = true;
-        }
         ++stats_.pinOperations;
-        return BasicPageGuard(*this, found->second, pageId);
+        const auto frameId = found->second;
+        lock.unlock();
+        return BasicPageGuard(*this, frameId, pageId, writable);
     }
 
     ++stats_.cacheMisses;
@@ -164,12 +169,10 @@ std::optional<BasicPageGuard> BufferPoolManager::fetchPage(PageId pageId, bool w
     DiskManager::Page page{};
     diskManager_.readPage(pageId, page);
     ++stats_.physicalPageReads;
-    if (writable && recoveryHook_ != nullptr) {
-        recoveryHook_->notePageWriteIntent(pageId, page);
-    }
-    installPage(*frameId, pageId, std::move(page), writable);
+    installPage(*frameId, pageId, std::move(page), false);
     if (dirtyVictim) ++stats_.dirtyEvictions;
-    return BasicPageGuard(*this, *frameId, pageId);
+    lock.unlock();
+    return BasicPageGuard(*this, *frameId, pageId, writable);
 }
 
 std::optional<ReadPageGuard> BufferPoolManager::fetchPageRead(PageId pageId) {
@@ -185,20 +188,22 @@ std::optional<WritePageGuard> BufferPoolManager::fetchPageWrite(PageId pageId) {
 }
 
 std::optional<WritePageGuard> BufferPoolManager::newPageWrite() {
+    std::unique_lock lock(metadataLatch_);
     const auto frameId = availableFrame();
     if (!frameId.has_value()) return std::nullopt;
     const bool dirtyVictim = frames_[*frameId].valid && frames_[*frameId].dirty;
     flushVictimIfDirty(*frameId);
     const auto pageId = diskManager_.appendPage();
     DiskManager::Page page{};
-    if (recoveryHook_ != nullptr) recoveryHook_->notePageWriteIntent(pageId, page);
     installPage(*frameId, pageId, std::move(page), true);
     if (dirtyVictim) ++stats_.dirtyEvictions;
     ++stats_.appendedPages;
-    return WritePageGuard(BasicPageGuard(*this, *frameId, pageId));
+    lock.unlock();
+    return WritePageGuard(BasicPageGuard(*this, *frameId, pageId, true));
 }
 
 bool BufferPoolManager::flushPage(PageId pageId) {
+    std::lock_guard lock(metadataLatch_);
     if (pageId == database_format::METADATA_PAGE_ID) {
         throw std::invalid_argument("Page 0 is reserved for database metadata");
     }
@@ -209,6 +214,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
     if (found == pageTable_.end()) return false;
     auto& frame = frames_[found->second];
     if (frame.dirty) {
+        if (frame.pinCount != 0) throw std::logic_error("Cannot flush a dirty pinned page; release guards first");
         prepareFrameForWrite(frame);
         ensureWalDurableBeforePageWrite(frame);
         recoveryFailPoint("after_page_update_wal_force");
@@ -222,6 +228,12 @@ bool BufferPoolManager::flushPage(PageId pageId) {
 }
 
 void BufferPoolManager::flushAll() {
+    std::lock_guard lock(metadataLatch_);
+    for (const auto& frame : frames_) {
+        if (frame.valid && frame.dirty && frame.pinCount != 0) {
+            throw std::logic_error("Cannot flush dirty pinned pages; release guards first");
+        }
+    }
     for (auto& frame : frames_) {
         if (frame.valid && frame.dirty) prepareFrameForWrite(frame);
     }
@@ -246,12 +258,17 @@ void BufferPoolManager::flushAll() {
 }
 
 std::optional<DiskManager::Page> BufferPoolManager::residentPageCopy(PageId pageId) const {
+    std::lock_guard lock(metadataLatch_);
     const auto found = pageTable_.find(pageId);
     if (found == pageTable_.end()) return std::nullopt;
+    if (frames_[found->second].pinCount != 0) {
+        throw std::logic_error("Resident byte snapshot requires an unpinned page");
+    }
     return frames_[found->second].data;
 }
 
 void BufferPoolManager::prepareResidentPageForCommit(PageId pageId) {
+    std::lock_guard lock(metadataLatch_);
     const auto found = pageTable_.find(pageId);
     if (found == pageTable_.end()) return;
     auto& frame = frames_[found->second];
@@ -262,12 +279,14 @@ void BufferPoolManager::prepareResidentPageForCommit(PageId pageId) {
 }
 
 std::uint64_t BufferPoolManager::totalPinCount() const noexcept {
+    std::lock_guard lock(metadataLatch_);
     std::uint64_t total = 0;
     for (const auto& frame : frames_) total += frame.valid ? frame.pinCount : 0;
     return total;
 }
 
 void BufferPoolManager::discardPageForRecovery(PageId pageId) {
+    std::lock_guard lock(metadataLatch_);
     const auto found = pageTable_.find(pageId);
     if (found == pageTable_.end()) return;
     const auto frameId = found->second;
@@ -284,6 +303,7 @@ void BufferPoolManager::discardPageForRecovery(PageId pageId) {
 }
 
 void BufferPoolManager::discardPagesAtOrAboveForRecovery(PageId firstPageId) {
+    std::lock_guard lock(metadataLatch_);
     std::vector<PageId> pages;
     for (const auto& [pageId, frameId] : pageTable_) {
         static_cast<void>(frameId);
@@ -293,13 +313,17 @@ void BufferPoolManager::discardPagesAtOrAboveForRecovery(PageId firstPageId) {
 }
 
 void BufferPoolManager::releasePin(FrameId frameId) {
+    std::lock_guard lock(metadataLatch_);
     auto& frame = frames_.at(frameId);
     if (!frame.valid || frame.pinCount == 0) {
         throw std::logic_error("Buffer frame pin count underflow");
     }
     --frame.pinCount;
     ++stats_.unpinOperations;
-    if (frame.pinCount == 0) replacer_.setEvictable(frameId, true);
+    if (frame.pinCount == 0) {
+        replacer_.setEvictable(frameId, true);
+        frameReleased_.notify_all();
+    }
 }
 
 BufferFrame& BufferPoolManager::requireGuardFrame(FrameId frameId, PageId pageId) {
@@ -321,18 +345,21 @@ const BufferFrame& BufferPoolManager::requireGuardFrame(FrameId frameId, PageId 
 std::span<const std::byte, database_format::PAGE_SIZE> BufferPoolManager::readData(
     FrameId frameId,
     PageId pageId) const {
+    std::lock_guard lock(metadataLatch_);
     return requireGuardFrame(frameId, pageId).data;
 }
 
 std::span<std::byte, database_format::PAGE_SIZE> BufferPoolManager::mutableData(
     FrameId frameId,
     PageId pageId) {
+    std::lock_guard lock(metadataLatch_);
     auto& frame = requireGuardFrame(frameId, pageId);
     frame.dirty = true;
     return frame.data;
 }
 
 BufferPoolStats BufferPoolManager::stats() const noexcept {
+    std::lock_guard lock(metadataLatch_);
     auto result = stats_;
     result.residentPages = pageTable_.size();
     result.evictableFrames = replacer_.size();
@@ -345,36 +372,43 @@ BufferPoolStats BufferPoolManager::stats() const noexcept {
 }
 
 bool BufferPoolManager::isResident(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
     return pageTable_.contains(pageId);
 }
 
 std::optional<FrameId> BufferPoolManager::frameIdForPage(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
     const auto found = pageTable_.find(pageId);
     return found == pageTable_.end() ? std::nullopt : std::optional<FrameId>(found->second);
 }
 
 std::optional<std::uint32_t> BufferPoolManager::pinCount(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
     const auto frameId = frameIdForPage(pageId);
     return frameId.has_value() ? std::optional<std::uint32_t>(frames_[*frameId].pinCount)
                                : std::nullopt;
 }
 
 std::optional<bool> BufferPoolManager::isDirty(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
     const auto frameId = frameIdForPage(pageId);
     return frameId.has_value() ? std::optional<bool>(frames_[*frameId].dirty) : std::nullopt;
 }
 
 std::optional<Lsn> BufferPoolManager::pageLsn(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
     const auto frameId = frameIdForPage(pageId);
     return frameId.has_value() ? std::optional<Lsn>(frames_[*frameId].pageLsn) : std::nullopt;
 }
 
 std::optional<Lsn> BufferPoolManager::recLsn(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
     const auto frameId = frameIdForPage(pageId);
     return frameId.has_value() ? std::optional<Lsn>(frames_[*frameId].recLsn) : std::nullopt;
 }
 
 std::vector<DirtyPageEntry> BufferPoolManager::dirtyPageTableSnapshot() const {
+    std::lock_guard lock(metadataLatch_);
     std::vector<DirtyPageEntry> result;
     result.reserve(pageTable_.size());
     for (const auto& frame : frames_) {
@@ -391,10 +425,12 @@ std::vector<DirtyPageEntry> BufferPoolManager::dirtyPageTableSnapshot() const {
 }
 
 Lsn BufferPoolManager::guardPageLsn(FrameId frameId, PageId pageId) const {
+    std::lock_guard lock(metadataLatch_);
     return requireGuardFrame(frameId, pageId).pageLsn;
 }
 
 void BufferPoolManager::setPageLsn(FrameId frameId, PageId pageId, Lsn pageLsn) {
+    std::lock_guard lock(metadataLatch_);
     auto& frame = requireGuardFrame(frameId, pageId);
     if (!isValidLsn(pageLsn)) {
         throw std::invalid_argument("WritePageGuard cannot assign INVALID_LSN");
@@ -410,6 +446,7 @@ void BufferPoolManager::setPageLsn(FrameId frameId, PageId pageId, Lsn pageLsn) 
 }
 
 void BufferPoolManager::validate() const {
+    std::lock_guard lock(metadataLatch_);
     replacer_.validate();
     if (pageTable_.size() > frames_.size()) {
         throw std::logic_error("Buffer pool exceeds configured capacity");
@@ -472,6 +509,26 @@ void BufferPoolManager::validate() const {
         || snapshot.capacity != frames_.size()) {
         throw std::logic_error("Buffer statistics gauges are inconsistent");
     }
+}
+
+void BufferPoolManager::noteGuardWriteIntent(FrameId frameId, PageId pageId) {
+    std::lock_guard lock(metadataLatch_);
+    auto& frame = requireGuardFrame(frameId, pageId);
+    if (recoveryHook_ != nullptr) recoveryHook_->notePageWriteIntent(pageId, frame.data);
+    frame.dirty = true;
+}
+
+void BufferPoolManager::resetStats() noexcept {
+    std::lock_guard lock(metadataLatch_);
+    stats_ = {};
+}
+std::size_t BufferPoolManager::residentPageCount() const noexcept {
+    std::lock_guard lock(metadataLatch_);
+    return pageTable_.size();
+}
+void BufferPoolManager::validateReplacer() const {
+    std::lock_guard lock(metadataLatch_);
+    replacer_.validate();
 }
 
 } // namespace minidb

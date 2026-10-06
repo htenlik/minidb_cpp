@@ -6,6 +6,11 @@
 
 #include <cstddef>
 #include <span>
+#include <mutex>
+#include <memory>
+#include <shared_mutex>
+#include <variant>
+#include <thread>
 #include <utility>
 
 namespace minidb {
@@ -33,13 +38,16 @@ private:
     friend class BufferPoolManager;
     friend class WritePageGuard;
 
-    BasicPageGuard(BufferPoolManager& manager, FrameId frameId, PageId pageId) noexcept;
+    BasicPageGuard(BufferPoolManager& manager, FrameId frameId, PageId pageId, bool writable);
     [[nodiscard]] std::span<std::byte, database_format::PAGE_SIZE> mutableData();
     void setPageLsn(Lsn pageLsn);
 
     BufferPoolManager* manager_ = nullptr;
     FrameId frameId_ = INVALID_FRAME_ID;
     PageId pageId_ = INVALID_PAGE_ID;
+    std::thread::id ownerThread_{};
+    std::variant<std::monostate, std::shared_ptr<std::shared_lock<std::shared_mutex>>,
+                 std::unique_lock<std::shared_mutex>> latch_;
 };
 
 class ReadPageGuard {

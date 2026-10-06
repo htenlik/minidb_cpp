@@ -7,6 +7,7 @@
 #include <fstream>
 #include <string>
 #include <cstdint>
+#include <mutex>
 
 namespace minidb {
 
@@ -39,14 +40,19 @@ public:
     void updateCatalogRootPageId(PageId pageId);
     void updateFreeListRootPageId(PageId pageId);
 
-    [[nodiscard]] PageId pageCount() const noexcept { return pageCount_; }
+    [[nodiscard]] PageId pageCount() const noexcept {
+        std::lock_guard lock(ioLatch_);
+        return pageCount_;
+    }
     [[nodiscard]] const std::string& path() const noexcept { return path_; }
-    [[nodiscard]] const database_format::DatabaseHeader& databaseHeader() const noexcept {
+    [[nodiscard]] database_format::DatabaseHeader databaseHeader() const noexcept {
+        std::lock_guard lock(ioLatch_);
         return databaseHeader_;
     }
 
 private:
     std::string path_;
+    mutable std::recursive_mutex ioLatch_;
     std::fstream file_;
     PageId pageCount_ = 0;
     database_format::DatabaseHeader databaseHeader_{};
