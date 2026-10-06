@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -23,6 +24,8 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <latch>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -1510,6 +1513,159 @@ BenchmarkResult runRestartableUndoBenchmark(const BenchmarkConfig& config) {
     return result;
 }
 
+// Own thread lifetimes explicitly so failures cannot leave a listener or a client
+// referring to destroyed storage/sample buffers.
+struct ConcurrentBenchmarkRun {
+    net::DatabaseServer& server;
+    std::latch connected;
+    std::latch start{1};
+    bool started = false;
+    std::mutex errorMutex;
+    std::exception_ptr error;
+    std::vector<std::vector<std::uint64_t>> samples;
+    std::vector<std::uint64_t> beginNs;
+    std::vector<std::uint64_t> completedNs;
+    std::vector<std::uint64_t> rowsExamined;
+    std::vector<std::uint64_t> indexLookups;
+    std::vector<std::jthread> clients;
+    std::jthread listener;
+    ConcurrentBenchmarkRun(net::DatabaseServer& owner, std::size_t threads)
+        : server(owner), connected(static_cast<std::ptrdiff_t>(threads)), samples(threads),
+          beginNs(threads), completedNs(threads), rowsExamined(threads), indexLookups(threads), listener([this] {
+            try { server.serve(); } catch (...) { recordError(); }
+          }) {}
+    ~ConcurrentBenchmarkRun() {
+        release();
+        try { server.close(); } catch (...) {}
+        for (auto& client : clients) if (client.joinable()) client.join();
+        if (listener.joinable()) listener.join();
+    }
+    void release() { if (!started) { started = true; start.count_down(); } }
+    void recordError() { std::lock_guard lock(errorMutex); if (!error) error = std::current_exception(); }
+    void rethrow() { std::lock_guard lock(errorMutex); if (error) std::rethrow_exception(error); }
+};
+
+BenchmarkResult runConcurrencyBenchmark(const BenchmarkConfig& config, std::string_view name) {
+    if (config.clientThreads == 0 || config.clientThreads > 64 || config.rows == 0
+        || config.operations == 0 || config.writerHoldMs > 1000) {
+        throw std::invalid_argument("Invalid concurrency benchmark counts");
+    }
+    removeDatabase(config);
+    BenchmarkResult result;
+    result.benchmark = name; result.storageBackend = "buffer_pool";
+    result.configuration = config; result.seed = config.seed; result.environment = currentEnvironment();
+    result.configuration.warmupOperations = 0; result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.checkpointWalBytes = result.configuration.checkpointStatements = 0;
+    result.configuration.checkpointMode = CheckpointMode::Sharp;
+    result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    const bool blocked = name == "concurrency_writer_exclusion";
+    const bool readOnly = name == "concurrency_read_only";
+    const bool serial = name == "concurrency_serial_read";
+    const auto threads = static_cast<std::size_t>(config.clientThreads);
+    const auto operations = blocked ? config.clientThreads : config.operations;
+    result.configuration.operations = operations;
+    {
+        net::ServerConfig settings{"127.0.0.1", 0, 32,
+            static_cast<std::size_t>(config.bufferFrames), static_cast<std::size_t>(config.lruK)};
+        settings.checkpointWalBytes = 0; settings.walUpdateMode = config.walUpdateMode;
+        settings.walSegmentBytes = config.walSegmentBytes; settings.maxConnections = std::max<std::size_t>(16, threads + 1);
+        net::DatabaseServer server(config.databasePath, settings);
+        auto& engine = server.sqlEngine();
+        static_cast<void>(engine.execute(
+            "CREATE TABLE readings (id UINT32 PRIMARY KEY, value UINT32, payload VARCHAR(128))"));
+        static_cast<void>(engine.execute("BEGIN"));
+        for (std::uint64_t key = 0; key < config.rows; ++key) {
+            static_cast<void>(engine.execute("INSERT INTO readings VALUES (" + std::to_string(key)
+                + ", " + std::to_string(key * 17) + ", '" + std::string(96, 'p') + "')"));
+        }
+        static_cast<void>(engine.execute("COMMIT"));
+        static_cast<void>(server.checkpointManager().checkpoint());
+        result.storageBefore = storageMetrics(server.diskManager(), server.bufferPool(), server.pageAllocator());
+        server.start();
+        ConcurrentBenchmarkRun run(server, threads);
+        for (std::size_t worker = 0; worker < threads; ++worker) {
+            run.clients.emplace_back([&, worker] {
+                bool connected = false;
+                try {
+                    net::MiniDbClient client("127.0.0.1", server.port());
+                    client.connect(); client.handshake();
+                    connected = true; run.connected.count_down(); run.start.wait();
+                    if (readOnly || serial) {
+                        const auto began = Clock::now();
+                        static_cast<void>(client.execute(readOnly ? "BEGIN READ ONLY" : "BEGIN READ WRITE"));
+                        run.beginNs[worker] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            Clock::now() - began).count());
+                    }
+                    for (std::uint64_t operation = worker; operation < operations; operation += threads) {
+                        const auto key = blocked ? 0 : (config.seed + operation * 7919) % config.rows;
+                        const auto source = name == "concurrency_heap_read"
+                            ? "SELECT id, value FROM readings WHERE value = " + std::to_string(key * 17)
+                            : "SELECT id, value FROM readings WHERE id = " + std::to_string(key);
+                        sql::QueryResult query;
+                        measure(run.samples[worker], [&] { query = client.execute(source); });
+                        const auto& rows = selectResult(query).rows;
+                        run.rowsExamined[worker] += selectResult(query).stats.rowsExamined;
+                        run.indexLookups[worker] += selectResult(query).stats.indexLookups;
+                        if (rows.size() != 1 || std::get<std::uint32_t>(rows[0][0]) != key
+                            || std::get<std::uint32_t>(rows[0][1]) != (blocked ? 999999U : key * 17)) {
+                            throw std::runtime_error("Concurrent benchmark returned incorrect key/value");
+                        }
+                    }
+                    if (readOnly || serial) static_cast<void>(client.execute("COMMIT"));
+                    run.completedNs[worker] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        Clock::now().time_since_epoch()).count());
+                    client.close();
+                } catch (...) { if (!connected) run.connected.count_down(); run.recordError(); }
+            });
+        }
+        run.connected.wait(); run.rethrow();
+        server.bufferPool().resetStats(); engine.transactionManager().accessGate().resetStats();
+        net::MiniDbClient writer("127.0.0.1", server.port());
+        auto writerStarted = Clock::now();
+        if (blocked) {
+            writer.connect(); writer.handshake();
+            writerStarted = Clock::now();
+            static_cast<void>(writer.execute("BEGIN"));
+            static_cast<void>(writer.execute("UPDATE readings SET value = 999999 WHERE id = 0"));
+        }
+        const auto started = Clock::now(); run.release();
+        if (blocked) {
+            const auto deadline = Clock::now() + std::chrono::seconds(10);
+            while (engine.transactionManager().accessGate().stats().waitingReaders != threads) {
+                run.rethrow();
+                if (Clock::now() > deadline) throw std::runtime_error("Reader clients did not wait for writer");
+                std::this_thread::yield();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(config.writerHoldMs));
+            static_cast<void>(writer.execute("COMMIT"));
+            result.concurrency.writerTransactionNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                Clock::now() - writerStarted).count());
+            writer.close();
+        }
+        for (auto& client : run.clients) client.join();
+        const auto wallNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count());
+        server.close(); if (run.listener.joinable()) run.listener.join(); run.rethrow();
+        std::vector<std::uint64_t> samples;
+        for (const auto& perThread : run.samples) samples.insert(samples.end(), perThread.begin(), perThread.end());
+        result.timing = summarizeTimings(samples, wallNs);
+        result.averageRowsExamined = static_cast<double>(totalLatency(run.rowsExamined)) / static_cast<double>(operations);
+        result.averageIndexLookups = static_cast<double>(totalLatency(run.indexLookups)) / static_cast<double>(operations);
+        result.concurrency.gate = engine.transactionManager().accessGate().stats();
+        result.concurrency.server = server.tcpServer().concurrencyStats();
+        result.concurrency.beginP95Ns = nearestRankPercentile(run.beginNs, 95);
+        if (blocked) result.concurrency.completionSpreadNs = *std::max_element(run.completedNs.begin(), run.completedNs.end())
+            - *std::min_element(run.completedNs.begin(), run.completedNs.end());
+        result.buffer = server.bufferPool().stats();
+        server.catalog().validate(); server.pageAllocator().validate();
+        result.storageAfter = storageMetrics(server.diskManager(), server.bufferPool(), server.pageAllocator());
+        result.validationPassed = samples.size() == operations && result.concurrency.server.activeSessions == 0
+            && result.concurrency.gate.activeReaders == 0 && !result.concurrency.gate.writerActive;
+        if (blocked) result.validationPassed = result.validationPassed && result.concurrency.gate.readerWaitCount == threads;
+    }
+    cleanupDatabase(config);
+    return result;
+}
+
 BenchmarkResult runExplicitTransactionBenchmark(const BenchmarkConfig& config, std::string_view name) {
     removeDatabase(config);
     net::ServerConfig settings{"127.0.0.1", 0, 8,
@@ -1953,6 +2109,7 @@ BenchmarkResult runOne(const BenchmarkConfig& config, std::string name) {
     if (name == "wal_reclamation") return runWalReclamation(config);
     if (name.starts_with("wal_")) return runWal(config, name);
     if (name.starts_with("transaction_")) return runExplicitTransactionBenchmark(config, name);
+    if (name.starts_with("concurrency_")) return runConcurrencyBenchmark(config, name);
     if (name.starts_with("txn_")) return runTransactional(config, name);
     if (name == "recovery_full_scan" || name == "recovery_loser") {
         return runRecoveryBenchmark(config, name);

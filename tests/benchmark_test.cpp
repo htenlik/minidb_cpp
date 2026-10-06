@@ -128,6 +128,17 @@ void testConfigurationParsing() {
         "--benchmark", "txn_insert", "--wal-update-mode", "adaptive"}).config;
     minidb::test::require(adaptive.walUpdateMode == minidb::WalUpdateMode::Adaptive,
                           "adaptive WAL update mode was not parsed");
+    const auto concurrency = parseArguments(std::vector<std::string_view>{
+        "--benchmark", "concurrency_pk_read", "--client-threads", "8", "--writer-hold-ms", "25"}).config;
+    minidb::test::require(concurrency.clientThreads == 8 && concurrency.writerHoldMs == 25,
+        "Concurrency controls were not parsed");
+    for (const auto count : {"0", "65"}) reject([&] {
+        static_cast<void>(parseArguments(std::vector<std::string_view>{
+            "--benchmark", "concurrency_pk_read", "--client-threads", count}));
+    }, "Unbounded/zero client-thread configuration was accepted");
+    reject([] { static_cast<void>(parseArguments(std::vector<std::string_view>{
+        "--benchmark", "concurrency_writer_exclusion", "--writer-hold-ms", "1001"})); },
+        "Unbounded writer-hold configuration was accepted");
 }
 
 void testJson() {
