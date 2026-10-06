@@ -20,7 +20,7 @@ void retention() {
     recovery.beginMutation(old);
     { auto page = pool.fetchPageWrite(oldPage); page->data()[80] = std::byte{1}; }
     recovery.prepareTransaction(old);
-    const auto oldBegin = recovery.lastLsn(old);
+    const auto oldBegin = recovery.checkpointTransactions().front().beginLsn;
     for (std::size_t checkpoint = 0; checkpoint < 10; ++checkpoint) {
         for (std::size_t i = 0; i < 100; ++i) {
             const auto id = recovery.beginTransaction();
@@ -31,7 +31,7 @@ void retention() {
         }
         pool.flushAll();
         static_cast<void>(checkpoints.checkpoint(CheckpointMode::Fuzzy, DatabaseAccessGate::Lease{}));
-        test::require(checkpoints.stats().retentionFloorLsn <= oldBegin, "Lost active history");
+        test::require(checkpoints.stats().retentionFloorLsn == oldBegin, "Lost active BEGIN history");
     }
     const auto before = log.stats();
     const auto beforeFloor = checkpoints.stats().retentionFloorLsn;

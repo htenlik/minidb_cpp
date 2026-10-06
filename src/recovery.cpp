@@ -113,20 +113,27 @@ void undoTransactions(
     RecoveryStats& stats,
     bool liveRollback = false) {
     const auto undoStart = std::chrono::steady_clock::now();
-    using Work = std::pair<Lsn, std::size_t>;
+    struct Work {
+        Lsn target;
+        TransactionId transactionId;
+        std::size_t index;
+        bool operator<(const Work& other) const noexcept {
+            return target < other.target
+                || (target == other.target && transactionId < other.transactionId);
+        }
+    };
     std::priority_queue<Work> work;
     for (std::size_t i = 0; i < losers.size(); ++i) {
         losers[i]->status = TransactionStatus::Aborting;
         losers[i]->undoNextLsn = losers[i]->lastLsn;
-        work.emplace(losers[i]->lastLsn, i);
+        work.push({losers[i]->lastLsn, losers[i]->transactionId, i});
     }
     stats.undoQueuePeak = work.size();
     while (!work.empty()) {
-        const auto [position, index] = work.top();
+        const auto [position, transactionId, index] = work.top();
         work.pop();
         ++stats.undoQueuePops;
         auto& transaction = *losers[index];
-        const auto transactionId = transaction.transactionId;
         auto& transactionLastLsn = transaction.lastLsn;
         auto& nextUndoLsn = transaction.undoNextLsn;
         const auto startPageCount = transaction.startPageCount;
@@ -173,7 +180,7 @@ void undoTransactions(
             nextUndoLsn = decodeCompensationLogPayload(record.payload).undoNextLsn;
             ++stats.undoClrsEncountered;
             ++stats.undoRecordsSkippedByClr;
-            work.emplace(nextUndoLsn, index);
+            work.push({nextUndoLsn, transactionId, index});
             continue;
         }
         if (!isPageUpdateRecord(record.type)) {
@@ -185,7 +192,7 @@ void undoTransactions(
         nextUndoLsn = record.prevLsn;
         // Appended pages are removed by the idempotent final truncation.
         if (!identity.beforePageExisted) {
-            work.emplace(nextUndoLsn, index);
+            work.push({nextUndoLsn, transactionId, index});
             continue;
         }
 
@@ -222,7 +229,7 @@ void undoTransactions(
         if (crashAfter != nullptr && stats.clrsAppended == std::strtoull(crashAfter, nullptr, 10)) {
             ::_exit(86);
         }
-        work.emplace(nextUndoLsn, index);
+        work.push({nextUndoLsn, transactionId, index});
     }
     stats.undoNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(

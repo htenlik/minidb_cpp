@@ -48,6 +48,8 @@ struct MultiHistory {
         for (std::size_t i = 0; i < original.size(); ++i) {
             const auto page = disk.appendPage();
             SlottedPageView::initialize(original[i], page, page + 1, metadata);
+            SlottedPageView view(original[i], page, page + 1);
+            static_cast<void>(view.insert(TupleBytes(128))); // offset 80 is live opaque payload
             final[i] = original[i];
             disk.writePage(page, original[i]);
         }
@@ -148,6 +150,8 @@ struct MultiHistory {
                         + " tx=" + std::to_string(i + 1));
             DiskManager::Page page{};
             disk.readPhysicalPage(static_cast<PageId>(i + 2), page);
+            ConstSlottedPageView(page, static_cast<PageId>(i + 2),
+                                static_cast<PageId>(disk.pageCount())).validate();
             const auto lsn = readPersistentPageLsn(page);
             require(isValidLsn(lsn), "Missing recovered PageLSN");
             const auto record = log.readRecordAt(lsn);

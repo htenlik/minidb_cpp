@@ -99,7 +99,7 @@ overflow is rejected, never wrapped into ID zero.
 
 ## Reverse-LSN UNDO
 
-The priority queue holds one `(targetLSN, transaction-entry index)` per loser. It
+The priority queue holds one `(targetLSN, TransactionId, transaction-entry index)` per loser. It
 selects the globally largest outstanding original/CLR target; unique LSNs make
 ordering deterministic. Each transaction owns its CLR `prevLSN`, current undo target
 and completion state. A CLR jumps to its `undoNextLSN`; an existing-page update emits
