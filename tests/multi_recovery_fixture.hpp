@@ -28,6 +28,7 @@ struct MultiHistory {
     std::vector<RecoveryTransactionStatus> statuses;
     bool segmented;
     std::uint64_t seed;
+    std::size_t operationIndex = 0;
 
     explicit MultiHistory(std::size_t transactions, std::uint64_t rngSeed, bool segments = true)
         : original(transactions), final(transactions), begins(transactions), lasts(transactions),
@@ -58,6 +59,7 @@ struct MultiHistory {
         }
         std::mt19937_64 random(seed);
         for (std::size_t step = 0; step < updateCount; ++step) {
+            operationIndex = step;
             const auto i = step < original.size() ? step : random() % original.size();
             byte_codec::writeUint64(final[i], 80, random());
             PageDeltaUpdateV2LogPayload payload;
@@ -77,6 +79,7 @@ struct MultiHistory {
                 disk.writePhysicalPage(static_cast<PageId>(i + 2), stolen);
             }
         }
+        operationIndex = updateCount; // recovery/model comparisons are after this boundary
         if (checkpoint) {
             const auto begin = log.append({LogRecordType::FuzzyCheckpointBegin, 0, INVALID_LSN,
                                            encodeFuzzyCheckpointBeginLogPayload({1, INVALID_LSN})});
@@ -117,12 +120,32 @@ struct MultiHistory {
     RecoveryStats recoverAndCheck(bool useCheckpoint = false) {
         DiskManager disk(path());
         auto log = openLog(LogOpenMode::DeferredRecovery);
+        const auto input = log.scan();
+        std::vector<Lsn> expectedLast(original.size(), INVALID_LSN);
+        std::vector<std::uint64_t> expectedClrs(original.size());
+        std::vector<Lsn> expectedUndo(original.size(), INVALID_LSN);
+        for (const auto& record : input.records) {
+            if (record.transactionId == 0) continue;
+            const auto i = static_cast<std::size_t>(record.transactionId - 1);
+            expectedLast.at(i) = record.lsn;
+            expectedUndo.at(i) = record.type == LogRecordType::Compensation
+                ? decodeCompensationLogPayload(record.payload).undoNextLsn
+                : record.type == LogRecordType::Commit || record.type == LogRecordType::Abort
+                    ? INVALID_LSN : record.lsn;
+            if (record.type == LogRecordType::Compensation) ++expectedClrs.at(i);
+        }
         CheckpointControl control(path() + ".ckpt");
         RecoveryManager manager(disk, log, useCheckpoint ? &control : nullptr);
         const auto stats = manager.recover();
         require(stats.analysisTransactions == original.size(), "ATT size mismatch seed=" + std::to_string(seed));
         require(stats.nextTransactionId == original.size() + 1, "Incorrect recovered next transaction ID");
         for (std::size_t i = 0; i < original.size(); ++i) {
+            const auto& analyzed = manager.analysisTransactions()[i];
+            require(analyzed.beginLsn == begins[i] && analyzed.lastLsn == expectedLast[i]
+                    && analyzed.undoNextLsn == expectedUndo[i] && analyzed.clrCount == expectedClrs[i]
+                    && analyzed.startPageCount == original.size() + 2,
+                    "Analysis chain snapshot mismatch seed=" + std::to_string(seed)
+                        + " tx=" + std::to_string(i + 1));
             DiskManager::Page page{};
             disk.readPhysicalPage(static_cast<PageId>(i + 2), page);
             const auto lsn = readPersistentPageLsn(page);
@@ -139,6 +162,13 @@ struct MultiHistory {
                     "Incorrect terminal transaction status");
             require(log.readRecordAt(entry.lastLsn).type == (entry.hasDurableCommit
                     ? LogRecordType::Commit : LogRecordType::Abort), "Incorrect terminal lastLSN");
+        }
+        Lsn previousTarget = std::numeric_limits<Lsn>::max();
+        for (const auto& record : log.scan().records) {
+            if (record.lsn < input.validBytes || record.type != LogRecordType::Compensation) continue;
+            const auto target = decodeCompensationLogPayload(record.payload).compensatedUpdateLsn;
+            require(target < previousTarget, "Multi-loser UNDO violated global reverse-LSN order");
+            previousTarget = target;
         }
         const auto again = RecoveryManager(disk, log, useCheckpoint ? &control : nullptr).recover();
         require(again.loserTransactions == 0 && again.clrsAppended == 0, "Recovery is not idempotent");

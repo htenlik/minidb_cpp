@@ -12,11 +12,17 @@ void model() {
     for (const auto seed : {0x12B201ULL, 0xC0FFEEULL, 0xA11CEULL, 0xDE1AULL}) {
         for (std::size_t history = 0; history < 8; ++history) {
             test::MultiHistory fixture(16, seed + history, history % 2 == 0);
-            fixture.create(1600, true, history % 2 == 0);
-            const auto stats = fixture.recoverAndCheck(history % 2 == 0);
-            require(stats.analysisWinners == 8 && stats.analysisAborted == 4
-                    && stats.analysisLosers == 4 && stats.transactionsCompletedDuringUndo == 4,
-                    "Interleaved classification mismatch");
+            try {
+                fixture.create(1600, true, history % 2 == 0);
+                const auto stats = fixture.recoverAndCheck(history % 2 == 0);
+                require(stats.analysisWinners == 8 && stats.analysisAborted == 4
+                        && stats.analysisLosers == 4 && stats.transactionsCompletedDuringUndo == 4,
+                        "Interleaved classification mismatch");
+            } catch (const std::exception& error) {
+                throw std::runtime_error("Model seed=" + std::to_string(fixture.seed)
+                    + " history=" + std::to_string(history)
+                    + " operation=" + std::to_string(fixture.operationIndex) + ": " + error.what());
+            }
             operations += 1600;
         }
     }
@@ -226,6 +232,57 @@ void partialLosersAfterDurableAbort() {
     }
 }
 
+void unsupportedPhysicalHistories() {
+    for (const bool overlappingAllocation : {false, true}) {
+        test::TemporaryDatabase db("multi_physical_boundary");
+        DiskManager disk(db.path().string());
+        static_cast<void>(disk.appendPage());
+        LogManager log(walPathForDatabase(db.path().string()));
+        DiskManager::Page before{}, after{};
+        after[80] = std::byte{1};
+        const auto t1 = log.append({LogRecordType::Begin, 1, INVALID_LSN, encodeBeginLogPayload({2})});
+        static_cast<void>(log.append({LogRecordType::PageUpdate, 1, t1,
+            encodePageUpdateLogPayload({1, true, before, after})}));
+        if (overlappingAllocation) static_cast<void>(disk.appendPage());
+        const auto t2 = log.append({LogRecordType::Begin, 2, INVALID_LSN,
+                                   encodeBeginLogPayload({disk.pageCount()})});
+        static_cast<void>(log.append({LogRecordType::PageUpdate, 2, t2,
+            encodePageUpdateLogPayload({overlappingAllocation ? PageId{2} : PageId{1}, true, before, after})}));
+        log.flushAll();
+        const auto walEnd = log.lastValidOffset();
+        test::requireThrows<WalError>([&] { static_cast<void>(RecoveryManager(disk, log).recover()); },
+                                     "Unsupported conflicting/allocation history accepted");
+        require(log.lastValidOffset() == walEnd, "Rejected history appended compensation");
+    }
+}
+
+void historicalWinnerAllocation() {
+    test::TemporaryDatabase db("multi_prior_allocation");
+    DiskManager disk(db.path().string());
+    LogManager log(walPathForDatabase(db.path().string()));
+    DiskManager::Page before{}, after{};
+    after[80] = std::byte{42};
+    const auto first = log.append({LogRecordType::Begin, 1, INVALID_LSN, encodeBeginLogPayload({1})});
+    const auto winnerPage = disk.appendPage();
+    const auto update = log.append({LogRecordType::PageUpdate, 1, first,
+                                  encodePageUpdateLogPayload({winnerPage, false, before, after})});
+    static_cast<void>(log.append({LogRecordType::Commit, 1, update, {}}));
+    const auto p2 = disk.appendPage(), p3 = disk.appendPage();
+    for (TransactionId id = 2; id <= 3; ++id) {
+        const auto begin = log.append({LogRecordType::Begin, id, INVALID_LSN,
+                                      encodeBeginLogPayload({disk.pageCount()})});
+        static_cast<void>(log.append({LogRecordType::PageUpdate, id, begin,
+            encodePageUpdateLogPayload({id == 2 ? p2 : p3, true, before, after})}));
+    }
+    log.flushAll();
+    const auto stats = RecoveryManager(disk, log).recover();
+    require(stats.analysisWinners == 1 && stats.analysisLosers == 2 && stats.pagesTruncated == 0,
+            "Prior completed allocation was mistaken for overlapping loser allocation");
+    DiskManager::Page page{};
+    disk.readPage(winnerPage, page);
+    require(page[80] == std::byte{42}, "Prior allocating winner was lost");
+}
+
 void sqlLiveAtt() {
     for (const auto terminal : {0, 1, 2}) {
         for (const bool loseControl : {false, true}) {
@@ -278,6 +335,8 @@ void sqlLiveAtt() {
 int main() {
     try {
         loserCountsAndRestart(); corruptChains(); corruptAttAndIds(); partialLosersAfterDurableAbort();
+        unsupportedPhysicalHistories();
+        historicalWinnerAllocation();
         keyedRuntimeAndRetention(); sqlLiveAtt(); model();
         std::cout << "multi_transaction_recovery_test passed\n";
         return 0;

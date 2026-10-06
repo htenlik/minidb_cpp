@@ -645,7 +645,10 @@ RecoveryStats RecoveryManager::recover() {
             ->startPageCount;
         for (const auto& [id, transaction] : transactions) {
             static_cast<void>(id);
-            if (losers.size() > 1 && transaction.startPageCount != diskManager_.pageCount()) {
+            const bool unfinished = transaction.status == TransactionStatus::Active
+                || transaction.status == TransactionStatus::Aborting;
+            if (losers.size() > 1 && unfinished
+                && transaction.startPageCount != diskManager_.pageCount()) {
                 throw WalError(WalErrorKind::CorruptRecord, "Interleaved allocation history is unsupported");
             }
             if (transaction.hasDurableCommit) {
@@ -911,7 +914,7 @@ std::uint64_t RecoveryCoordinator::originalBeforeImageBytes(TransactionId id) co
     const auto found = contexts_.find(id);
     const auto* context = id == INVALID_TRANSACTION_ID ? active_
         : found == contexts_.end() ? nullptr : &found->second;
-    if (!(context != nullptr)) return 0;
+    if (context == nullptr) return 0;
     return static_cast<std::uint64_t>(std::count_if(
         context->pages.begin(), context->pages.end(),
         [](const auto& page) { return page.second.beforeExisted; }))
@@ -923,7 +926,7 @@ std::uint64_t RecoveryCoordinator::transactionRecoveryBytes(TransactionId id) co
     const auto found = contexts_.find(id);
     const auto* context = id == INVALID_TRANSACTION_ID ? active_
         : found == contexts_.end() ? nullptr : &found->second;
-    if (!(context != nullptr)) return 0;
+    if (context == nullptr) return 0;
     return sizeof(RecoveryTransactionContext)
         + context->pages.size() * sizeof(decltype(context->pages)::value_type);
 }
@@ -1024,7 +1027,7 @@ void RecoveryCoordinator::notePageWriteIntent(
     PageId pageId,
     const DiskManager::Page& before) {
     std::lock_guard lock(contextsMutex_);
-    if (!(active_ != nullptr)) {
+    if (active_ == nullptr) {
         throw std::logic_error("Page mutation requires an active statement transaction");
     }
     if (pageId == INVALID_PAGE_ID) throw std::invalid_argument("Write intent has invalid PageId");
@@ -1292,7 +1295,7 @@ void RecoveryCoordinator::commitStatement() {
 }
 
 void RecoveryCoordinator::rollbackStatement() {
-    if (!(active_ != nullptr)) throw std::logic_error("No statement transaction is active");
+    if (active_ == nullptr) throw std::logic_error("No statement transaction is active");
     // Log the final resident states before invalidation. In particular, the
     // transaction may have failed midway through its most recent SQL statement.
     prepareStatement();
