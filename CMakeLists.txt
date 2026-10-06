@@ -75,6 +75,10 @@ add_library(minidb_network
 )
 target_include_directories(minidb_network PUBLIC include)
 target_link_libraries(minidb_network PUBLIC minidb_wire)
+add_executable(concurrent_sessions_test tests/concurrent_sessions_test.cpp)
+target_link_libraries(concurrent_sessions_test PRIVATE minidb_network)
+add_executable(concurrent_tcp_test tests/concurrent_tcp_test.cpp)
+target_link_libraries(concurrent_tcp_test PRIVATE minidb_network)
 
 execute_process(
     COMMAND git rev-parse --short=12 HEAD
@@ -110,6 +114,9 @@ target_link_libraries(minidb_client PRIVATE minidb_network)
 add_executable(minidb_bench src/benchmark_main.cpp)
 target_link_libraries(minidb_bench PRIVATE minidb_benchmark)
 enable_testing()
+add_test(NAME concurrent_sessions_test COMMAND concurrent_sessions_test)
+add_test(NAME concurrent_tcp_test COMMAND concurrent_tcp_test)
+set_tests_properties(concurrent_sessions_test concurrent_tcp_test PROPERTIES TIMEOUT 180)
 add_executable(database_access_gate_test tests/database_access_gate_test.cpp)
 target_link_libraries(database_access_gate_test PRIVATE minidb_core)
 add_test(NAME database_access_gate_test COMMAND database_access_gate_test)

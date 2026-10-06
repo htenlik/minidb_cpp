@@ -4,12 +4,14 @@
 #include "minidb/sql_semantics.hpp"
 
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <limits>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <optional>
+#include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
@@ -103,72 +105,150 @@ TcpServer::TcpServer(
     static_cast<void>(bufferPool);
     static_cast<void>(diskManager);
     if (config_.host.empty() || config_.backlog <= 0
-        || config_.bufferFrames == 0 || config_.lruK == 0) {
+        || config_.bufferFrames == 0 || config_.lruK == 0 || config_.maxConnections == 0) {
         throw std::invalid_argument(
             "server host must be nonempty and backlog/buffer settings must be positive");
     }
 }
 
+TcpServer::~TcpServer() { close(); }
+
 void TcpServer::start() {
+    std::lock_guard lock(lifecycleMutex_);
     if (failed_) {
         throw std::runtime_error("TCP server requires restart after transaction cleanup failure");
     }
     if (listener_) {
         throw std::logic_error("TCP server is already listening");
     }
-    listener_ = createListener(config_, boundPort_);
+    if (stopping_) throw std::logic_error("TCP server cannot restart after shutdown");
+    std::uint16_t port = 0;
+    listener_ = createListener(config_, port);
+    boundPort_ = port;
 }
 
 void TcpServer::serve(std::size_t connectionLimit) {
-    if (!listener_) {
-        start();
-    }
-    std::size_t served = 0;
-    while (connectionLimit == 0 || served < connectionLimit) {
-        int descriptor;
-        do {
-            descriptor = ::accept(listener_.get(), nullptr, nullptr);
-        } while (descriptor < 0 && errno == EINTR);
-        if (descriptor < 0) {
-            throw NetworkError(systemError("accept"));
+    std::unique_lock serving(serveMutex_);
+    if (port() == 0) start();
+    try {
+        std::size_t served = 0;
+        while (!stopping_ && (connectionLimit == 0 || served < connectionLimit)) {
+            reapWorkers();
+            int listener;
+            { std::lock_guard lock(lifecycleMutex_); listener = listener_.get(); }
+            pollfd readiness{listener, POLLIN, 0};
+            const auto ready = ::poll(&readiness, 1, 100);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0) throw NetworkError(systemError("poll listener"));
+            if (ready == 0 || stopping_) continue;
+            const auto descriptor = ::accept(listener, nullptr, nullptr);
+            if (descriptor < 0 && (errno == EINTR || stopping_)) continue;
+            if (descriptor < 0) throw NetworkError(systemError("accept"));
+            Socket connection(descriptor);
+            ++served;
+            configureSocketForSafeWrites(descriptor);
+            const auto session = registerConnection(descriptor);
+            if (!session) {
+                sendProtocolFailure(descriptor, 0, "maximum concurrent sessions reached or server shutting down");
+                continue;
+            }
+            try {
+                auto worker = std::make_unique<Worker>(connection.release());
+                auto* state = worker.get();
+                std::lock_guard lock(lifecycleMutex_);
+                workers_.push_back(std::move(worker));
+                try {
+                    state->thread = std::jthread([this, state, id = *session](std::stop_token stop) {
+                        try { runConnection(state->connection.get(), id, stop); }
+                        catch (const NetworkError&) {}
+                        catch (const ProtocolError& error) {
+                            sendProtocolFailure(state->connection.get(), error.requestId().value_or(0), error.what());
+                        } catch (...) {
+                            { std::lock_guard failure(lifecycleMutex_); if (!fatalError_) fatalError_ = std::current_exception(); }
+                            failed_ = true;
+                            requestStop();
+                        }
+                        state->done = true;
+                    });
+                } catch (...) { workers_.pop_back(); throw; }
+            } catch (...) { unregisterConnection(descriptor); throw; }
         }
-        Socket connection(descriptor);
-        try {
-            configureSocketForSafeWrites(connection.get());
-            serveConnection(connection.get());
-        } catch (const NetworkError&) {
-            // A broken client affects only its own connection.
-        } catch (const ProtocolError& error) {
-            sendProtocolFailure(
-                connection.get(), error.requestId().value_or(0), error.what());
-        }
-        ++served;
+        joinWorkers();
+        std::exception_ptr error;
+        { std::lock_guard lock(lifecycleMutex_); error = fatalError_; }
+        if (error) std::rethrow_exception(error);
+    } catch (...) {
+        requestStop(); joinWorkers(); throw;
     }
 }
 
 void TcpServer::serveConnection(int descriptor) {
+    const auto session = registerConnection(descriptor);
+    if (!session) {
+        sendProtocolFailure(descriptor, 0, "maximum concurrent sessions reached or server shutting down");
+        return;
+    }
+    runConnection(descriptor, *session);
+}
+
+std::optional<SessionId> TcpServer::registerConnection(int descriptor) {
+    std::lock_guard lock(lifecycleMutex_);
     if (failed_) {
         throw std::runtime_error("TCP server requires restart after transaction cleanup failure");
+    }
+    if (stopping_ || stats_.activeSessions >= config_.maxConnections) {
+        ++stats_.connectionRejects;
+        return std::nullopt;
     }
     if (nextSessionId_ == std::numeric_limits<SessionId>::max()) {
         throw std::overflow_error("TCP session identifier range exhausted");
     }
     const auto session = nextSessionId_++;
+    connections_.insert(descriptor);
+    ++stats_.activeSessions;
+    ++stats_.sessionsAccepted;
+    stats_.peakActiveSessions = std::max(stats_.peakActiveSessions, stats_.activeSessions);
+    return session;
+}
+
+void TcpServer::unregisterConnection(int descriptor) noexcept {
+    std::lock_guard lock(lifecycleMutex_);
+    if (connections_.erase(descriptor) != 0) --stats_.activeSessions;
+}
+
+void TcpServer::runConnection(int descriptor, SessionId session, std::stop_token stop) {
     std::exception_ptr connectionError;
+    bool observedDisconnect = false;
     try {
+        engine_.transactionManager().setCancellationProbe(session, [&, descriptor, stop] {
+            if (stopping_ || stop.stop_requested()) return true;
+            pollfd peer{descriptor, POLLIN, 0};
+            const auto ready = ::poll(&peer, 1, 0);
+            bool disconnected = ready > 0 && (peer.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0;
+            if (ready > 0 && (peer.revents & POLLIN) != 0) {
+                char byte;
+                const auto count = ::recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+                disconnected = disconnected || count == 0
+                    || (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+            }
+            if (disconnected && !observedDisconnect) { observedDisconnect = true; ++disconnectWhileWaiting_; }
+            return disconnected;
+        });
         serveSession(descriptor, session);
     } catch (...) {
         connectionError = std::current_exception();
     }
     try {
-        // Complete durable rollback before this serial server may accept new work.
+        // The writer's exclusive lease remains held through durable rollback.
         engine_.closeSession(session);
     } catch (...) {
         failed_ = true;
-        close();
+        requestStop();
+        unregisterConnection(descriptor);
         std::throw_with_nested(std::runtime_error(
             "TCP session transaction cleanup failed; server requires restart"));
     }
+    unregisterConnection(descriptor);
     if (connectionError) std::rethrow_exception(connectionError);
 }
 
@@ -226,8 +306,43 @@ void TcpServer::serveSession(int descriptor, SessionId session) {
 }
 
 void TcpServer::close() noexcept {
-    listener_.reset();
-    boundPort_ = 0;
+    requestStop();
+    std::lock_guard serving(serveMutex_);
+    joinWorkers();
+    std::lock_guard lock(lifecycleMutex_);
+    listener_.reset(); boundPort_ = 0;
+}
+
+void TcpServer::requestStop() noexcept {
+    stopping_ = true;
+    engine_.transactionManager().accessGate().shutdown();
+    std::lock_guard lock(lifecycleMutex_);
+    if (listener_) static_cast<void>(::shutdown(listener_.get(), SHUT_RDWR));
+    for (auto descriptor : connections_) static_cast<void>(::shutdown(descriptor, SHUT_RDWR));
+    for (auto& worker : workers_) worker->thread.request_stop();
+}
+
+void TcpServer::reapWorkers() {
+    std::vector<std::unique_ptr<Worker>> finished;
+    {
+        std::lock_guard lock(lifecycleMutex_);
+        for (auto iterator = workers_.begin(); iterator != workers_.end();) {
+            if ((*iterator)->done) { finished.push_back(std::move(*iterator)); iterator = workers_.erase(iterator); }
+            else ++iterator;
+        }
+    }
+    // Join without the lifecycle mutex: cleanup may need to unregister a socket.
+}
+void TcpServer::joinWorkers() {
+    std::vector<std::unique_ptr<Worker>> workers;
+    { std::lock_guard lock(lifecycleMutex_); workers.swap(workers_); }
+    for (auto& worker : workers) if (worker->thread.joinable()) worker->thread.join();
+}
+ServerConcurrencyStats TcpServer::concurrencyStats() const {
+    std::lock_guard lock(lifecycleMutex_);
+    auto result = stats_;
+    result.disconnectWhileWaiting = disconnectWhileWaiting_.load();
+    return result;
 }
 
 void TcpServer::sendProtocolFailure(

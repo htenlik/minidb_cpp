@@ -57,6 +57,7 @@ void usage() {
     std::cerr
         << "usage: minidb_server DATABASE [--host ADDRESS] [--port PORT] "
            "[--buffer-frames N] [--lru-k N] [--checkpoint-wal-bytes N] "
+           "[--max-connections N] "
            "[--checkpoint-statements N] [--wal-segment-bytes N] "
            "[--checkpoint-mode sharp|fuzzy] "
            "[--wal-update-mode full-page|byte-range|adaptive]\n";
@@ -82,6 +83,8 @@ int main(int argc, char** argv) {
                 config.bufferFrames = parsePositiveSize(argv[++index], "--buffer-frames");
             } else if (argument == "--lru-k" && index + 1 < argc) {
                 config.lruK = parsePositiveSize(argv[++index], "--lru-k");
+            } else if (argument == "--max-connections" && index + 1 < argc) {
+                config.maxConnections = parsePositiveSize(argv[++index], "--max-connections");
             } else if (argument == "--checkpoint-wal-bytes" && index + 1 < argc) {
                 config.checkpointWalBytes = parseNonnegativeUint64(
                     argv[++index], "--checkpoint-wal-bytes");
