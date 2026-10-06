@@ -94,14 +94,17 @@ unimplemented ALTER, DROP, or other DDL.
 Manual sharp/fuzzy checkpoints reject an active writer, and otherwise obtain exclusive
 access, waiting behind read-only scopes. Calling from a thread retaining its own shared
 lease is a prohibited upgrade. Automatic triggers run only at writer boundaries.
-Automatic WAL-byte and successful-mutation-statement thresholds set `pending()` while
+Sharp WAL-byte and successful-mutation-statement thresholds set `pending()` while
 an explicit writer is active. COMMIT, ROLLBACK, error rollback, and disconnect evaluate that pending request
-at the next safe boundary. Failed automatic checkpoints remain pending for retry.
+at the next safe boundary. Fuzzy triggers may publish live ATT after a successful
+statement without ending the transaction. Failed automatic checkpoints remain pending for retry.
 Statements later rolled back still count toward this work-based threshold.
 
-No production checkpoint overlaps an active transaction; its ATT remains empty. WAL
-reclamation therefore cannot remove an active chain's BEGIN or remaining UNDO targets.
-Normal checkpoint/reclamation resumes after durable COMMIT or ABORT.
+The session-owned administrative `transactionManager().checkpoint(session, Fuzzy)`
+uses the writer's existing exclusive lease at a prepared between-statements boundary.
+No SQL checkpoint syntax was added. Sharp checkpoints still prohibit active writers.
+Live ATT pins every required BEGIN/UNDO chain during fuzzy reclamation; completion
+allows the floor to advance. See [multi-transaction-recovery.md](multi-transaction-recovery.md).
 
 ## Diagnostics and memory
 

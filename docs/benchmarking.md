@@ -432,6 +432,29 @@ or linear-scaling claims. See [concurrency-baseline.md](concurrency-baseline.md)
 
 ## Controlled pre/post and replacement-policy comparisons
 
+### Multi-transaction recovery substrate
+
+Build/run `multi_recovery_benchmark` (also a CTest smoke target). It uses real WAL
+codecs and disjoint preallocated pages, not concurrent SQL writers. Analysis samples
+use 1/10/100/1000 mixed transactions; UNDO samples use 128 total updates distributed
+over 1/2/4/8/16 losers. An eight-loser subprocess is interrupted after 32/64/96 durable
+compensations and restarted. The retention experiment holds an old active transaction
+over ten fuzzy checkpoints and 1000 newer synthetic commits, then releases it.
+
+One AppleClang Release run reported analysis 0.064/0.270/2.386/24.001 ms with
+3/30/300/3000 analyzed records and accounted LSN-index bytes 72/728/7256/72008.
+Equal-work UNDO took 21.408/20.930/22.585/21.246/22.653 ms; each appended 128 CLRs,
+535552 CLR WAL bytes and wrote 128 pages. Queue pops were 129/130/132/136/144.
+Restart at 25/50/75% appended only the remaining 96/64/32 CLRs and took
+18.271/17.607/12.879 ms. ATT retained floor 64 across the active lifetime; after
+completion the floor advanced to 192660, retained segments fell 31 -> 3 and physical
+WAL bytes 194596 -> 1812. These are single-machine observations, not scalability
+claims or timing assertions. The executable prints fresh measurements on every run.
+Index accounting excludes allocator overhead and decoded record payloads.
+See [multi-transaction-recovery.md](multi-transaction-recovery.md).
+
+### Earlier implementation comparisons
+
 Capture machine-specific JSON under ignored `benchmarks/results/`. A 10B comparison
 uses the same Release compiler/build, database sizes, operation counts, workload
 definitions, seed, cache mode, and machine for the pre-migration commit and migrated

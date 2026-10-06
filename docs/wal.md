@@ -189,14 +189,18 @@ A batch size of 1, 10, or 100 is a synchronous experiment, not group commit.
 ## Current boundary
 
 MiniDB++ guarantees statement atomicity across tested process crashes: durable-COMMIT
-winners are REDOed and a tail loser is undone. Sharp checkpoints bound normal recovery
-to their tail; fuzzy checkpoints retain history back to the oldest required recLSN.
+winners are REDOed and losers are undone independently. Sharp checkpoints bound normal recovery
+to their tail; fuzzy checkpoints retain history back to the oldest required recLSN
+or active transaction BEGIN.
 Segmented WAL deletes only whole segments behind the corresponding floor. Logical WAL
 generation continues to rise while physical retention depends on dirty-page lifetime.
 Explicit transactions reuse these same BEGIN/update/COMMIT/CLR/ABORT formats and one
 `prevLSN` chain across statements; see [transactions.md](transactions.md).
-There is no archive/PITR, transaction-overlapping checkpoint, multiple-writer recovery,
-group commit, or torn-page protection.
+Recovery can analyze interleaved chains and resume multiple synthetic losers; live
+fuzzy ATT is supported between statements. Production SQL still permits only one
+writer: overlapping allocation rollback and physical write conflicts are not solved.
+There is no archive/PITR, group commit, or torn-page protection. See
+[multi-transaction-recovery.md](multi-transaction-recovery.md).
 
 ## Reference
 

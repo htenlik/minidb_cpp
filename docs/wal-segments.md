@@ -154,18 +154,21 @@ must not be quoted as 16-MiB production performance.
 With periodic sharp checkpoints, physical WAL is broadly bounded by the retained
 checkpoint segment(s), one extra predecessor, post-checkpoint tail, and active segment.
 A single large statement can exceed the checkpoint target because checkpoints never
-run inside an active transaction. There is no archive/PITR mode: reclaimed files are
+run inside a mutating statement (sharp checkpoints additionally wait for transaction
+completion). There is no archive/PITR mode: reclaimed files are
 gone. Replication or archival would require another retention constraint.
 
 The protocol guarantees clean flush/reopen persistence and tested process-crash
 boundaries, not arbitrary power-loss atomicity across database, WAL, control, and
 directory operations. Persistent PageLSN values remain global logical LSNs across
 segment reclamation and enable selective REDO of retained records. There is still no
-transaction-overlapping checkpoint, physiological/logical logging, concurrent
-transaction, locking, MVCC, background writer, group commit, or WAL archive.
+mid-statement checkpoint, physiological/logical logging, concurrent production
+writer, fine-grained locking, MVCC, background writer, group commit, or WAL archive.
 
 Recovery-written CLRs keep the loser's ordinary transaction chain alive through their
-`prevLSN` and `undoNextLSN` references. Checkpoint/reclamation cannot run while the
-single active statement or startup recovery is in progress, so it cannot delete BEGIN,
-remaining update targets, or CLR progress prematurely. After durable ABORT, the next
+`prevLSN` and `undoNextLSN` references. Checkpoint/reclamation cannot run during
+statement mutation or UNDO. Between statements, live fuzzy ATT includes every active
+BEGIN in the retention floor, so it cannot delete remaining update targets or CLR
+progress prematurely. After durable ABORT, the next
 sharp or fuzzy checkpoint uses its normal floor and may reclaim the obsolete chain.
+See [multi-transaction-recovery.md](multi-transaction-recovery.md).

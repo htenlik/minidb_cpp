@@ -132,14 +132,16 @@ checkpoint-ID continuity but do not become authoritative without control publica
 
 The internal API is `CheckpointManager::checkpoint(mode)`. There is no `CHECKPOINT` SQL
 statement. Automatic policy is evaluated after successful mutation statements and
-transaction completion. While an explicit transaction is active, a threshold trigger
+transaction completion. While an explicit transaction is active, a sharp threshold trigger
 sets `pending()` without publishing a checkpoint. COMMIT, ROLLBACK, error rollback,
 and disconnect retry the pending request at the next safe boundary. Manual sharp and
-fuzzy checkpoints reject active writers and otherwise obtain exclusive database access,
+fuzzy checkpoints through the ordinary manual API reject active writers and otherwise obtain exclusive database access,
 waiting behind READ ONLY transactions. Automatic publication runs under the completing
 writer's still-owned exclusive lease. Writer preference prevents new readers bypassing
-a queued checkpoint. Production
-fuzzy ATT snapshots therefore remain empty, and reclamation cannot discard active UNDO.
+a queued checkpoint. Fuzzy triggers and the session-owned administrative checkpoint API
+may publish live ATT at a prepared between-statements boundary using that same lease.
+The retention floor then includes every active BEGIN; no checkpoint overlaps physical
+statement mutation or UNDO. See [multi-transaction-recovery.md](multi-transaction-recovery.md).
 `--checkpoint-wal-bytes N` uses post-checkpoint WAL growth (default 64 MiB), while
 `--checkpoint-statements N` counts successful mutation statements, including those
 inside an explicit scope later rolled back; zero disables either threshold.
