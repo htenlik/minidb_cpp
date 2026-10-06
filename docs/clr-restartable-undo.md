@@ -7,7 +7,7 @@ continues at `undoNextLSN`; this makes completed recovery work durable across re
 recovery crashes.
 
 This is deliberately narrower than ARIES. MiniDB++ permits one serial implicit or
-explicit transaction, uses physical page logging, and has no locks or physiological
+explicit writer transaction, uses physical page logging, and has no fine-grained locks or physiological
 operations. Live and startup rollback share the same CLR traversal; explicit scope and
 session behavior are documented in [transactions.md](transactions.md).
 

@@ -1,6 +1,6 @@
 # Bounded buffer pool and LRU-K
 
-The single-threaded fixed-capacity BufferPoolManager and guards are the active backend
+The synchronized fixed-capacity BufferPoolManager and latched guards are the active backend
 for PageAllocator, TupleStore,
 PersistentBPlusTree, Catalog, Table, SQL, and TCP. The legacy Pager remains an explicitly
 historical, unbounded v0.1.x cache used by fixed RecordStore regressions and low-level
@@ -56,8 +56,8 @@ explicit and idempotent, and destruction releases a still-owned pin exactly once
 Moved-from guards are inert. The BufferPoolManager and DiskManager must outlive guards.
 
 Acquiring a WritePageGuard marks its frame dirty immediately. Calling mutable `data()`
-also marks it dirty, which matters when a pinned writer modifies a page after an
-intervening flush. Read guards never dirty a page.
+also marks it dirty. Dirty pages must be unpinned before flushing. Read guards never
+dirty a page.
 
 ## Pin lifecycle and acquisition
 
@@ -179,9 +179,9 @@ policy, concurrency control, or adaptive K.
 - Dirty eviction writes exactly 4096 bytes before page-table/replacer removal and reuse.
 - `flushPage(pageId)` returns false for an existing nonresident page and never loads it.
   A dirty resident is written and cleaned; a clean resident performs no physical write.
-  Pin state is unchanged.
-- `flushAll()` writes every dirty resident, including pinned pages, but never evicts or
-  unpins them.
+  Pin state is unchanged; dirty pinned pages raise a controlled error.
+- Dirty flushes require unpinned pages; release content guards first. `flushAll()`
+  checks this before writing any dirty frame, and never evicts or unpins pages.
 - The destructor attempts `flushAll()` and suppresses errors because destructors cannot
   reliably report them. Explicit `flushAll()` is the error-reporting persistence API.
 
@@ -242,10 +242,19 @@ their unbounded and bounded memory configurations are not apples-to-apples engin
   --pages 10000 --operations 50000 --working-set 32 --buffer-frames 64 --lru-k 2
 ```
 
-The BufferPoolManager and migrated engine remain single-threaded. No mutex, latch, wait
-queue, or blocking pin protocol exists. Guards express access mode and lifetime, not
-synchronization. Production storage mutations assign PageLSNs through the recovery
-coordinator rather than through storage-format code.
+The metadata latch protects frame identity, pins, dirty/recLSN state, statistics, and
+LRU-K. Frame shared_mutexes protect bytes. Fetch pins first, releases metadata, then
+acquires content access; drop unlocks contents before unpinning. Repeated read guards
+on one frame/thread share a content lock and keep separate pins. Guards must be released
+on their acquiring thread; upgrades and recursive writes are rejected.
+
+Miss I/O is serialized under metadata, preventing duplicate resident copies. Production
+read fetches wait for transient frame pressure; standalone pools retain optional
+NoFrameAvailable by default. New `frameAvailabilityWaits` counts actual wait calls and
+`contentLatchWaits` counts failed content try-locks. Statistics are snapshots under the
+metadata latch. See [concurrency-baseline.md](concurrency-baseline.md) for latch order,
+query ownership, and the read model. Production mutations still assign PageLSNs through
+recovery rather than storage-format code.
 
 ## Reference
 

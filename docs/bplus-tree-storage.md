@@ -231,6 +231,7 @@ The educational fixed RecordStore still uses legacy Pager's append-only allocati
 primitive. Catalog stores stable index metadata identities. The B+ tree contains no WAL
 codec and has no concurrency control. In the active engine, BufferPoolManager and
 RecoveryCoordinator capture guarded split, merge, root, and allocator changes as part
-of one implicit WAL-backed statement recovery unit. Direct standalone tree use without
+of an implicit or explicit WAL recovery unit. Concurrent read-only traversal uses normal
+page read guards; the database gate excludes structural writers. Direct standalone tree use without
 that outer coordinator guarantees persistence only after a successful flush or clean
 close and is not crash-atomic.

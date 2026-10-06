@@ -118,6 +118,10 @@ and no RID. These additive IDs do not change v1 framing or payload offsets; clie
 that reject unknown command IDs must be updated to consume transaction responses.
 Unknown flag bits are rejected.
 
+BEGIN READ ONLY/READ WRITE reuse command ID 5. Concurrency adds no command enum values,
+wire framing fields, or payload-layout changes. The prior explicit-transaction extension
+added response kinds 5/6/7 while keeping that framing/layout unchanged.
+
 ### `SELECT_RESULT`
 
 | Offset | Width | Field |

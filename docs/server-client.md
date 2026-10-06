@@ -1,10 +1,9 @@
 # MiniDB++ TCP server and client
 
-Milestone 8 exposes the existing SQL engine through a small POSIX TCP layer. Production
-database execution remains deliberately single-threaded: the server accepts one client,
-serves all of that connection's requests serially, closes it, and only then accepts the
-next client. Tests may run this loop in a background thread, but no two threads call the
-storage engine concurrently.
+MiniDB++ exposes its SQL engine through a POSIX TCP layer with bounded, joinable client
+workers. Connections run concurrently; requests within each connection remain sequential.
+Read-only database access may overlap. One database-wide exclusive writer excludes all
+other database operations. See [concurrency-baseline.md](concurrency-baseline.md).
 
 ## Ownership and startup
 
@@ -31,13 +30,17 @@ collision-free tests, and `TcpServer::port()` reports the selected port.
 ./build/minidb_server demo.db
 ./build/minidb_server demo.db --host 127.0.0.1 --port 7432 \
     --buffer-frames 128 --lru-k 2 --checkpoint-wal-bytes 67108864 \
-    --checkpoint-statements 0 --wal-segment-bytes 16777216
+    --checkpoint-statements 0 --wal-segment-bytes 16777216 --max-connections 16
 ```
 
 `--buffer-frames` and `--lru-k` must both be positive. Defaults are 128 frames and
 K=2. The complete supported workflow is regression-tested with three frames and also
 passes the current two-frame stress workflow; one frame remains useful for individual
 page operations but is not the guaranteed full-engine configuration.
+`--max-connections` must be positive and defaults to 16. Excess connections receive an
+ERROR_RESPONSE during handshake and close; idle connections count toward the cap.
+Released capacity is reusable. Workers are never detached, and completed workers are
+reaped. Concurrent reads wait for transient frame pressure in the production pool.
 `--checkpoint-wal-bytes` is the approximate WAL growth after the last completed sharp
 checkpoint (default 64 MiB), and `--checkpoint-statements` is an optional successful
 mutating-statement count. Zero disables either trigger. Policy runs only after COMMIT;
@@ -96,15 +99,23 @@ The final query reports `PrimaryKeyLookup` and one index lookup.
 ## Persistence and reconnects
 
 By default each mutating statement is one implicit transaction. `BEGIN [TRANSACTION]`
-opens a serial explicit transaction owned by that connection; subsequent requests share
+defaults to an exclusive READ WRITE transaction owned by that connection; subsequent requests share
 its transaction ID and WAL chain until `COMMIT` or `ROLLBACK`. Intermediate statement
 success is not a durable commit. COMMIT forces WAL, not database pages; ROLLBACK uses
 restartable CLR UNDO and forces ABORT before returning. `SELECT` reads the connection's
 own changes without globally flushing. A mutation execution error rolls back the whole
 scope; parser and SELECT errors leave it active.
 
-EOF and protocol failures roll back the connection's active scope before serving the
-next client. Graceful `DatabaseServer::close()` rolls back; it never commits implicitly.
+`BEGIN [TRANSACTION] READ ONLY` retains shared access and permits other readers.
+Mutations in that scope are rejected while leaving it active; no lock upgrade occurs.
+READ WRITE transactions, including those currently only reading, exclude other sessions.
+Results are fully materialized before an autocommit SELECT releases its shared lease;
+TCP encoding never lazily reads storage afterward.
+
+EOF and protocol failures release a read-only scope or roll back the writer before
+releasing its exclusive lease. Disconnected gate waiters are cancelled. Graceful
+`DatabaseServer::close()` stops admission, wakes socket/gate waits, joins cleanup, and
+rolls back; it never commits implicitly.
 If cleanup fails, the server stops accepting work and requires reopen/recovery. A hard
 crash leaves startup recovery to undo the loser. A crash after COMMIT fsync but before
 the response can leave a committed transaction without an acknowledgement. See

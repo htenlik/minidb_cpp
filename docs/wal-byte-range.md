@@ -208,11 +208,11 @@ remain separately available.
 
 ## Durability and research boundary
 
-Persistent PageLSN is now layered over both physical encodings. It does not add fuzzy
-checkpoints, dirty-page or transaction tables, compensation log records,
-logical/operation logging, concurrency, locks, or MVCC. Operations spanning several
-pages and WAL records are protected by the
-existing single-statement recovery model, not a general transaction system.
+Persistent PageLSN is layered over both physical encodings. Separate layers provide
+sharp/fuzzy checkpoints, DPT metadata, CLR UNDO, and explicit transactions. Byte-range
+encoding itself provides none of that policy. Concurrent readers share database access;
+one exclusive writer still owns physical recovery. There are no concurrent writer
+chains, physiological operation logging, fine-grained locks, or MVCC.
 
 ARIES is related recovery literature, but ARIES includes physiological logging,
 persistent pageLSNs, repeating-history recovery, compensation records, and richer

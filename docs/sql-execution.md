@@ -163,7 +163,7 @@ reopen.
 
 This is a specific access-path rule, not a planner or optimizer. `SqlEngine` owns a
 `TransactionManager` that maintains autocommit or an explicit session-owned scope.
-`BEGIN [TRANSACTION]`, `COMMIT`, and `ROLLBACK` have separate AST alternatives and
+`BEGIN [TRANSACTION] [READ ONLY|READ WRITE]`, `COMMIT`, and `ROLLBACK` have separate AST alternatives and
 command results. One recovery context spans every statement in an explicit scope;
 only its final COMMIT is durable success. Mutation errors roll back the entire scope
 through CLRs; read/parse errors preserve it. See [transactions.md](transactions.md).
@@ -172,4 +172,6 @@ only their local validation and compensation behavior.
 
 Unsupported features include JOIN, aggregation,
 GROUP BY, ORDER BY, LIMIT, aliases, subqueries, schema changes, secondary indexes,
-savepoints, concurrent transactions, and query planning.
+savepoints, multiple writers, and query planning. SqlEngine serializes only requests
+within the same SessionId; independent read sessions execute concurrently under shared
+database leases. Parser/binder/result state is per request.
