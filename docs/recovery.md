@@ -1,10 +1,11 @@
-# Crash recovery and serial transactions
+# Crash recovery and transaction chains
 
 Each mutating statement is an implicit atomic recovery unit unless grouped by SQL
 `BEGIN`/`COMMIT`/`ROLLBACK`. An explicit scope is one recovery unit spanning all its
 statements. Concurrent readers produce no WAL transaction context. All write-capable
 execution is serialized through an exclusive database lease, preserving at most one
-WAL-producing transaction/loser. See [transactions.md](transactions.md) and
+production WAL-producing transaction. Recovery can additionally handle synthetic
+interleaved transactions and multiple losers on disjoint preallocated pages. See [transactions.md](transactions.md) and
 [concurrency-baseline.md](concurrency-baseline.md).
 
 The default implementation uses physical full-page logging: every changed database page
@@ -110,7 +111,7 @@ DiskManager transaction-agnostic. Catalog and free-list root changes cannot bypa
 ## In-process rollback
 
 After all guards release, rollback prepares and forces the transaction's outstanding
-WAL, discards touched buffers, and invokes the same `undoTransaction` CLR traversal as
+WAL, discards touched buffers, and invokes the same `undoTransactions` CLR scheduler as
 startup recovery. Each compensated page follows WAL-before-data ordering, and ABORT is
 forced only after compensation and truncation are durable. Live delta rollback uses
 the retained original image as its base to preserve earlier NO-FORCE winner contents.
@@ -138,7 +139,9 @@ it begins at the oldest retained logical position (byte 64 for unreclaimed WAL).
 incomplete final record is truncated to the last valid record boundary. Interior
 magic/version/length/checksum corruption is fatal and is never treated as a tail.
 Analysis validates one BEGIN, exact same-transaction `prevLSN` chains, terminal-record
-ordering, and the single-WAL-writer transaction model.
+ordering independently for interleaved TransactionIds. Analysis exposes a value-only
+transaction table with ACTIVE/COMMITTED/ABORTING/ABORTED state. Production SQL still
+has one writer; synthetic multi-loser histories require disjoint preallocated pages.
 
 - A winner has durable COMMIT. Its full after-images or delta after-ranges are considered
   in ascending LSN order. PageLSN-aware records are skipped when the current persistent
@@ -146,18 +149,20 @@ ordering, and the single-WAL-writer transaction model.
   record LSN. Legacy update records always replay.
 - A transaction with durable ABORT requires no UNDO. Its CLRs remain REDO candidates;
   persistent PageLSN skips already-durable compensations.
-- A loser has BEGIN/PAGE_UPDATE records but no terminal record and must be the final
-  active transaction. Existing-page original images or delta before-ranges are applied,
+- A loser has BEGIN/PAGE_UPDATE/CLR records but no terminal record. Multiple losers
+  use a global reverse-LSN priority queue. Existing-page original images or delta before-ranges are applied,
   each original existing-page update is physically compensated by a forced type-5 CLR.
   The compensated page receives the CLR LSN, while appended pages are truncated using
   BEGIN's page count.
 
-Recovery runs REDO winners and durable CLRs, then follows the tail loser's WAL chain.
+Recovery runs REDO winners and durable CLRs, then follows every loser's WAL chain.
 An original update appends/forces a physical CLR before its compensated page is written;
 a CLR is REDO-able but never undone and redirects traversal through `undoNextLSN`.
-After all work and idempotent appended-page truncation, recovery appends/fsyncs ABORT.
+After each loser's work and safe idempotent appended-page truncation, recovery appends/fsyncs its ABORT.
 See [clr-restartable-undo.md](clr-restartable-undo.md). Recovery does no tuple, tree,
-catalog, or SQL interpretation.
+catalog, or SQL interpretation. Nonempty fuzzy ATT is checked against retained chains
+before forward analysis. See [multi-transaction-recovery.md](multi-transaction-recovery.md)
+for retention, LSN-index accounting and the allocation limitation.
 
 ## Failpoints, metrics, and limitations
 
@@ -183,13 +188,14 @@ CLR-specific counters separate user-update REDO apply/PageLSN skip from CLR appl
 and report analyzed CLRs, original UNDO records visited/compensated, CLRs encountered or
 appended, CLR-directed skips, restart detection, compensation writes, and encoded CLR
 WAL bytes. `loserLastLsn`, the most recent `undoNextLSN`, and durable-ABORT observation
-support diagnostics without introducing a general transaction table.
+remain legacy summary diagnostics; value-only analysis/final transaction tables and
+multi-loser scheduling/index counters expose complete transaction-specific progress.
 
 Sharp and dirty-page-fuzzy checkpoints are documented in [checkpoints.md](checkpoints.md)
 and [fuzzy-checkpoints.md](fuzzy-checkpoints.md). Obsolete whole WAL segments are deleted
 only behind the selected mode's retention floor; see
 [wal-segments.md](wal-segments.md). Persistent PageLSN reduces redundant REDO writes but
-does not add archive/PITR, multiple-writer recovery,
+does not add archive/PITR or production multiple writers,
 fine-grained locks, MVCC, torn-page protection, or crash-safe group commit. A usable
 checkpoint bounds startup to its retained tail. A crash after COMMIT fsync but
 before the response reaches a client is inherently ambiguous: the transaction committed,
@@ -197,6 +203,7 @@ but the client must reconnect and query state. Wire request IDs are not deduplic
 tokens.
 
 This design is not ARIES. It adopts PageLSN REDO tests, recLSN, fuzzy checkpoints, and
-restartable physical CLRs, but not physiological logging, transaction-table generality,
-fine-grained locking, or partial user rollback. MiniDB++ retains a serial physical
-baseline. See the citation in [wal.md](wal.md).
+restartable physical CLRs and transaction-keyed analysis, but not physiological logging,
+fine-grained locking, arbitrary overlapping allocation recovery or partial user rollback.
+MiniDB++ retains a single production writer and a physical logging baseline.
+See the citation in [wal.md](wal.md).

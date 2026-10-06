@@ -58,6 +58,7 @@ public:
     void begin(SessionId session, AccessMode mode = AccessMode::ReadWrite);
     void commit(SessionId session);
     void rollback(SessionId session);
+    [[nodiscard]] CheckpointId checkpoint(SessionId session, CheckpointMode mode);
     void beginMutation(SessionId session);
     void completeMutation(SessionId session);
     void failMutation(SessionId session);
@@ -117,7 +118,7 @@ private:
     [[nodiscard]] std::shared_ptr<SessionContext> sessionContext(SessionId session);
     [[nodiscard]] std::shared_ptr<SessionContext> findSession(SessionId session) const;
     void requireWriter(const SessionContext& session) const;
-    void captureWriterStats();
+    void captureWriterStats(TransactionId id);
     void finishRollback(SessionContext& session);
     void endExplicit(SessionContext& session);
     void safeBoundary(SessionContext& session) noexcept;

@@ -134,8 +134,11 @@ transaction state. See [transactions.md](transactions.md). Sharp
 full-buffer and opt-in fuzzy DPT checkpoints share the double-slotted `database.db.ckpt`
 recovery pointer; segmented WAL reclaims whole files behind the mode-specific floor.
 Selective REDO additionally skips a committed v2 update when the disk PageLSN is equal
-or newer. There is still no archive/PITR, transaction-overlapping checkpoint,
-fine-grained locks, MVCC, multiple-writer recovery, or torn-page protection. Restartable physical CLR
+or newer. Recovery owns TransactionId-keyed contexts, interleaved-chain analysis,
+and reverse-LSN multi-loser UNDO. Fuzzy checkpoints can snapshot live ATT between
+statements and retain every active BEGIN. This is a recovery substrate, not multiple
+production writers; global allocation truncation and physical conflicts still require
+one exclusive SQL writer. There is no archive/PITR, fine-grained locks, MVCC, or torn-page protection. Restartable physical CLR
 handling remains inside recovery; page-owning layers do not interpret it. See [wal.md](wal.md),
 [wal-segments.md](wal-segments.md), [fuzzy-checkpoints.md](fuzzy-checkpoints.md), [recovery.md](recovery.md),
 [checkpoints.md](checkpoints.md), and [page-lsn.md](page-lsn.md).
@@ -143,3 +146,6 @@ handling remains inside recovery; page-owning layers do not interpret it. See [w
 Session contexts hold database leases; read-only contexts never own physical recovery.
 Buffer metadata/LRU-K and DiskManager I/O are synchronized for simultaneous readers.
 See [concurrency-baseline.md](concurrency-baseline.md) for ownership and latch order.
+See [multi-transaction-recovery.md](multi-transaction-recovery.md) for keyed runtime
+ownership, live ATT, independent CLR progress and the allocation boundary. Persistent
+database-page, WAL, CLR and checkpoint ATT encodings are unchanged.

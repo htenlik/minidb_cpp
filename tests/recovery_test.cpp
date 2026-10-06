@@ -175,7 +175,7 @@ void testTailRepairAndChainValidation() {
             minidb::LogRecordType::Begin, 1, minidb::INVALID_LSN,
             minidb::encodeBeginLogPayload({1})}));
         static_cast<void>(log.append(minidb::LogRecord{
-            minidb::LogRecordType::Begin, 2, minidb::INVALID_LSN,
+            minidb::LogRecordType::Begin, 1, minidb::INVALID_LSN,
             minidb::encodeBeginLogPayload({1})}));
         log.flushAll();
     }
@@ -183,7 +183,7 @@ void testTailRepairAndChainValidation() {
     minidb::LogManager log(corrupt.wal);
     minidb::test::requireThrows<minidb::WalError>(
         [&] { static_cast<void>(minidb::RecoveryManager(disk, log).recover()); },
-        "Recovery accepted overlapping active transaction chains");
+        "Recovery accepted duplicate transaction BEGIN records");
 }
 
 void testPageZeroCommitAndRollback(minidb::WalUpdateMode mode) {

@@ -41,8 +41,11 @@ struct CheckpointStats {
     std::uint64_t fuzzyCheckpointsCompleted = 0;
     std::uint64_t dptEntriesCaptured = 0;
     std::uint64_t activeTransactionsCaptured = 0;
+    std::uint64_t attEntriesCaptured = 0;
     std::uint64_t pinnedFramesObserved = 0;
     Lsn oldestRecLsn = INVALID_LSN;
+    Lsn oldestActiveTransactionBeginLsn = INVALID_LSN;
+    Lsn activeTransactionRetentionFloor = INVALID_LSN;
     Lsn retentionFloorLsn = INVALID_LSN;
     CheckpointId lastCheckpointId = INVALID_CHECKPOINT_ID;
     Lsn lastCheckpointEndLsn = INVALID_LSN;
@@ -63,6 +66,7 @@ public:
 
     [[nodiscard]] CheckpointId checkpoint();
     [[nodiscard]] CheckpointId checkpoint(CheckpointMode mode);
+    [[nodiscard]] CheckpointId checkpoint(CheckpointMode mode, const DatabaseAccessGate::Lease& lease);
     void attachAccessGate(DatabaseAccessGate& gate) noexcept { gate_ = &gate; }
     [[nodiscard]] bool onStatementCommitted(const DatabaseAccessGate::Lease* lease = nullptr) noexcept;
     [[nodiscard]] bool onTransactionCompleted(const DatabaseAccessGate::Lease* lease = nullptr) noexcept;

@@ -10,8 +10,8 @@ This is a deliberately serial subset of ideas used by ARIES-style recovery. The
 describes a broader protocol with transaction and dirty-page tables, PageLSNs, fuzzy
 checkpoints, CLRs, locking, and partial rollback. MiniDB++ is not ARIES-compliant: it has
 one WAL-producing implicit or explicit writer at a time, physical restartable-UNDO CLRs, and
-publishes fuzzy checkpoints only between completed transactions. Automatic triggers
-remain pending while an explicit scope is active; runtime ATT snapshots stay empty.
+publishes fuzzy checkpoints only at prepared between-statements boundaries. Automatic
+fuzzy triggers may capture a live writer's ATT; sharp triggers wait for its completion.
 
 ## Dirty Page Table ownership and lifetime
 
@@ -24,7 +24,7 @@ returns a canonical PageId-ordered metadata snapshot without reading mutable pag
 
 Because the current mutation API discovers the physical update at statement preparation,
 write intent can temporarily mark a frame pending-dirty before an LSN exists. A fuzzy
-checkpoint cannot run in that interval: the no-active-statement restriction guarantees
+checkpoint cannot run in that interval: the prepared safe-boundary restriction guarantees
 that every snapshotted dirty frame has its exact recLSN and PageLSN assigned.
 
 ## WAL record types and byte layouts
@@ -84,13 +84,14 @@ Each future-compatible ATT entry is 48 bytes:
 
 The codec rejects unsupported versions and sizes, unknown status values, noncanonical or
 duplicate IDs, invalid LSN relationships, nonzero reserved bytes, arithmetic/record-size
-overflow, and trailing bytes. Production checkpoints currently encode an empty ATT and
-recovery rejects a nonempty checkpoint ATT: transaction-overlap checkpointing is
-explicitly deferred.
+overflow, and trailing bytes. Production fuzzy checkpoints can encode the active
+WAL writer at a prepared between-statements boundary. The 48-byte format is unchanged;
+read-only and unlogged contexts are excluded. See
+[multi-transaction-recovery.md](multi-transaction-recovery.md).
 
 ## Publication, restart, and retention
 
-Fuzzy publication appends BEGIN, snapshots the DPT/empty ATT, appends END, fsyncs WAL
+Fuzzy publication appends BEGIN, snapshots the DPT/live ATT, appends END, fsyncs WAL
 through END, then writes and fsyncs the inactive control slot. Segment rotation and
 reclamation follow publication. It does not call `flushAll()`, write database pages, or
 fsync `database.db`. Pinned frames are allowed because only frame recovery metadata is
@@ -103,14 +104,14 @@ are not WAL-logged. Physical REDO starts at the minimum restart recLSN. An updat
 is rejected without a page read when its page is absent or `R < recLSN`; a surviving
 PageLSN-aware update is skipped when persistent `PageLSN >= R`. Legacy updates use the
 safe PageId/recLSN filter but never PageLSN skipping. Existing winner/loser analysis and
-serial loser UNDO follows CLR `undoNextLSN` progress. A CLR is page-affecting and can
+reverse-LSN multi-loser UNDO follows each CLR's `undoNextLSN` progress. A CLR is page-affecting and can
 conservatively seed a missing DPT entry at its own LSN.
 
-The retention floor is `min(fuzzy BEGIN, minimum DPT recLSN, minimum ATT BEGIN if
-supported)`, plus one retained predecessor segment. A page with an old recLSN therefore
+The retention floor is `min(fuzzy BEGIN, minimum DPT recLSN, minimum active ATT BEGIN)`,
+plus one retained predecessor segment. A page with an old recLSN therefore
 pins history. After it is flushed, a later fuzzy snapshot omits it or records a new dirty
 period, allowing the floor to advance. Sharp checkpoints remain useful for an empty DPT,
 simpler recovery, and aggressive reclamation.
 
 Neither mode makes multi-file operations crash-atomic. There is no background writer,
-concurrent transaction, locking, MVCC, WAL archive, or torn-page recovery.
+concurrent production writer, fine-grained locking, MVCC, WAL archive, or torn-page recovery.

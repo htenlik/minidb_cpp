@@ -1781,9 +1781,15 @@ BenchmarkResult runExplicitTransactionBenchmark(const BenchmarkConfig& config, s
         result.validationPassed = std::get<std::int64_t>(std::get<sql::SelectResult>(
             engine.execute("SELECT value FROM counter")).rows.at(0).at(0))
                 == (rollback ? 0 : static_cast<std::int64_t>(config.operations));
-        if (checkpoint) result.validationPassed = result.validationPassed
-            && result.transaction.checkpointPending && result.transaction.checkpointDeferred
-            && !server.checkpointManager().pending() && result.checkpoint.checkpointsCompleted == 1;
+        if (checkpoint) {
+            const bool checkpointValid = config.checkpointMode == CheckpointMode::Sharp
+                ? result.transaction.checkpointPending && result.transaction.checkpointDeferred
+                    && result.checkpoint.checkpointsCompleted == 1
+                : !result.transaction.checkpointDeferred && result.checkpoint.attEntriesCaptured > 0
+                    && result.checkpoint.fuzzyCheckpointsCompleted > 0;
+            result.validationPassed = result.validationPassed && checkpointValid
+                && !server.checkpointManager().pending();
+        }
         server.catalog().validate();
         server.pageAllocator().validate();
         server.bufferPool().flushAll();

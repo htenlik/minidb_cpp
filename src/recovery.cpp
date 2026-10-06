@@ -15,6 +15,7 @@
 #include <map>
 #include <limits>
 #include <numeric>
+#include <queue>
 #include <stdexcept>
 #include <unordered_map>
 #include <unistd.h>
@@ -23,16 +24,11 @@
 namespace minidb {
 namespace {
 
-enum class TransactionStatus { Active, Committed, Aborted };
+using TransactionStatus = RecoveryTransactionStatus;
 
-struct AnalyzedTransaction {
-    TransactionId id = INVALID_TRANSACTION_ID;
-    TransactionStatus status = TransactionStatus::Active;
-    BeginLogPayload begin{};
-    Lsn lastLsn = INVALID_LSN;
+struct AnalyzedTransaction : RecoveryTransactionEntry {
     std::vector<const LogRecord*> updates;
     std::vector<const LogRecord*> clrs;
-    Lsn lastUndoNextLsn = INVALID_LSN;
 };
 
 struct PageUpdateIdentity {
@@ -108,31 +104,83 @@ DiskManager::Page compensatedPageFor(
 // Both startup loser recovery and live transaction rollback use this one WAL
 // traversal/durability protocol. Live rollback supplies its retained original
 // page as the delta base: disk may not yet contain an earlier NO-FORCE winner.
-void undoTransaction(
+void undoTransactions(
     DiskManager& disk,
     LogManager& log,
-    TransactionId transactionId,
-    std::uint64_t startPageCount,
-    Lsn transactionLastLsn,
-    bool hadClrs,
+    std::vector<RecoveryTransactionEntry*> losers,
     const std::function<LogRecord(Lsn)>& readRecord,
     const std::function<void(PageId, DiskManager::Page&)>& readUndoBase,
     RecoveryStats& stats,
     bool liveRollback = false) {
     const auto undoStart = std::chrono::steady_clock::now();
-    auto nextUndoLsn = transactionLastLsn;
-    bool appendedClr = false;
-    while (isValidLsn(nextUndoLsn)) {
+    struct Work {
+        Lsn target;
+        TransactionId transactionId;
+        std::size_t index;
+        bool operator<(const Work& other) const noexcept {
+            return target < other.target
+                || (target == other.target && transactionId < other.transactionId);
+        }
+    };
+    std::priority_queue<Work> work;
+    for (std::size_t i = 0; i < losers.size(); ++i) {
+        losers[i]->status = TransactionStatus::Aborting;
+        losers[i]->undoNextLsn = losers[i]->lastLsn;
+        work.push({losers[i]->lastLsn, losers[i]->transactionId, i});
+    }
+    stats.undoQueuePeak = work.size();
+    while (!work.empty()) {
+        const auto [position, transactionId, index] = work.top();
+        work.pop();
+        ++stats.undoQueuePops;
+        auto& transaction = *losers[index];
+        auto& transactionLastLsn = transaction.lastLsn;
+        auto& nextUndoLsn = transaction.undoNextLsn;
+        const auto startPageCount = transaction.startPageCount;
+        nextUndoLsn = position;
         const auto record = readRecord(nextUndoLsn);
         if (record.transactionId != transactionId) {
             throw WalError(WalErrorKind::CorruptRecord,
                            "UNDO chain crosses transaction ownership");
         }
-        if (record.type == LogRecordType::Begin) break;
+        if (record.type == LogRecordType::Begin) {
+            if (transaction.clrCount != 0) recoveryFailPoint("recovery_after_final_clr");
+            const auto beforeCount = disk.pageCount();
+            if (beforeCount > startPageCount) {
+                disk.truncateToPageCount(startPageCount);
+                stats.pagesTruncated += beforeCount - startPageCount;
+                disk.sync();
+                ++stats.databaseSyncCalls;
+                recoveryFailPoint("recovery_after_appended_page_truncation");
+            }
+            stats.loserLastLsn = transactionLastLsn;
+            stats.loserLastUndoNextLsn = nextUndoLsn;
+            disk.sync();
+            ++stats.databaseSyncCalls;
+            recoveryFailPoint("recovery_after_database_sync");
+            if (liveRollback) recoveryFailPoint("rollback_after_database_sync");
+            recoveryFailPoint("recovery_before_abort_append");
+            const auto abortLsn = log.append(LogRecord{
+                LogRecordType::Abort, transactionId, transactionLastLsn, {}, INVALID_LSN,
+            });
+            recoveryFailPoint("recovery_after_abort_append");
+            log.flushUpTo(abortLsn);
+            transactionLastLsn = abortLsn;
+            transaction.undoNextLsn = INVALID_LSN;
+            transaction.status = TransactionStatus::Aborted;
+            transaction.hasDurableAbort = true;
+            ++stats.abortedTransactions;
+            stats.durableAbortObserved = true;
+            recoveryFailPoint("recovery_after_abort_fsync");
+            recoveryFailPoint("recovery_after_abort_sync");
+            if (liveRollback) recoveryFailPoint("rollback_after_abort_sync");
+            continue;
+        }
         if (record.type == LogRecordType::Compensation) {
             nextUndoLsn = decodeCompensationLogPayload(record.payload).undoNextLsn;
             ++stats.undoClrsEncountered;
             ++stats.undoRecordsSkippedByClr;
+            work.push({nextUndoLsn, transactionId, index});
             continue;
         }
         if (!isPageUpdateRecord(record.type)) {
@@ -143,7 +191,10 @@ void undoTransaction(
         const auto identity = pageUpdateIdentity(record);
         nextUndoLsn = record.prevLsn;
         // Appended pages are removed by the idempotent final truncation.
-        if (!identity.beforePageExisted) continue;
+        if (!identity.beforePageExisted) {
+            work.push({nextUndoLsn, transactionId, index});
+            continue;
+        }
 
         auto compensated = compensatedPageFor(record, readUndoBase);
         const bool pageSupportsLsn = supportsPersistentPageLsn(compensated);
@@ -156,7 +207,7 @@ void undoTransaction(
             payload, INVALID_LSN,
         });
         transactionLastLsn = clrLsn;
-        appendedClr = true;
+        ++transaction.clrCount;
         ++stats.clrsAppended;
         ++stats.undoUserRecordsCompensated;
         stats.undoWalBytes += wal_record_layout::HEADER_SIZE + payload.size();
@@ -174,36 +225,15 @@ void undoTransaction(
         recoveryFailPoint("recovery_after_compensation_page_write");
         recoveryFailPoint("recovery_after_undo_page");
         recoveryFailPoint("recovery_midway_loser_chain");
+        const auto* crashAfter = std::getenv("MINIDB_RECOVERY_CRASH_AFTER_CLRS");
+        if (crashAfter != nullptr && stats.clrsAppended == std::strtoull(crashAfter, nullptr, 10)) {
+            ::_exit(86);
+        }
+        work.push({nextUndoLsn, transactionId, index});
     }
-    if (appendedClr || hadClrs) recoveryFailPoint("recovery_after_final_clr");
-    const auto beforeCount = disk.pageCount();
-    if (beforeCount > startPageCount) {
-        disk.truncateToPageCount(startPageCount);
-        stats.pagesTruncated += beforeCount - startPageCount;
-        disk.sync();
-        ++stats.databaseSyncCalls;
-        recoveryFailPoint("recovery_after_appended_page_truncation");
-    }
-    stats.loserLastLsn = transactionLastLsn;
-    stats.loserLastUndoNextLsn = nextUndoLsn;
     stats.undoNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - undoStart).count());
-    disk.sync();
-    ++stats.databaseSyncCalls;
-    recoveryFailPoint("recovery_after_database_sync");
-    if (liveRollback) recoveryFailPoint("rollback_after_database_sync");
-    recoveryFailPoint("recovery_before_abort_append");
-    const auto abortLsn = log.append(LogRecord{
-        LogRecordType::Abort, transactionId, transactionLastLsn, {}, INVALID_LSN,
-    });
-    recoveryFailPoint("recovery_after_abort_append");
-    log.flushUpTo(abortLsn);
-    ++stats.abortedTransactions;
-    stats.durableAbortObserved = true;
-    recoveryFailPoint("recovery_after_abort_fsync");
-    recoveryFailPoint("recovery_after_abort_sync");
-    if (liveRollback) recoveryFailPoint("rollback_after_abort_sync");
 }
 
 TransactionId nextTransactionIdFrom(const WalScanResult& scan) {
@@ -294,6 +324,8 @@ void recoveryFailPoint(std::string_view name) {
 }
 
 RecoveryStats RecoveryManager::recover() {
+    analysisTransactions_.clear();
+    recoveredTransactions_.clear();
     const auto totalStart = std::chrono::steady_clock::now();
     RecoveryStats stats;
     stats.recoveryStartOffset = logManager_.oldestRetainedLsn();
@@ -334,11 +366,7 @@ RecoveryStats RecoveryManager::recover() {
         if (endRecord.type == LogRecordType::FuzzyCheckpointEnd) {
             validateCheckpointRecord(endRecord);
             fuzzyCheckpoint = decodeFuzzyCheckpointEndLogPayload(endRecord.payload);
-            if (!fuzzyCheckpoint->activeTransactions.empty()) {
-                throw WalError(
-                    WalErrorKind::CorruptRecord,
-                    "Active-transaction fuzzy checkpoints are not supported");
-            }
+            stats.checkpointActiveTransactionCount = fuzzyCheckpoint->activeTransactions.size();
             stats.checkpointMode = CheckpointMode::Fuzzy;
             stats.checkpointDirtyPageCount = fuzzyCheckpoint->dirtyPages.size();
             for (const auto& entry : fuzzyCheckpoint->dirtyPages) {
@@ -355,6 +383,18 @@ RecoveryStats RecoveryManager::recover() {
     if (fuzzyCheckpoint.has_value() && isValidLsn(stats.oldestCheckpointRecLsn)) {
         scanStart = std::min(scanStart, stats.oldestCheckpointRecLsn);
     }
+    std::map<TransactionId, CheckpointTransactionEntry> checkpointAtt;
+    if (fuzzyCheckpoint.has_value()) {
+        for (const auto& entry : fuzzyCheckpoint->activeTransactions) {
+            if (entry.beginLsn < logManager_.oldestRetainedLsn()
+                || entry.lastLsn >= analysisBoundary
+                || entry.transactionId >= fuzzyCheckpoint->nextTransactionId) {
+                throw WalError(WalErrorKind::CorruptRecord, "Checkpoint ATT chain is unavailable or invalid");
+            }
+            scanStart = std::min(scanStart, entry.beginLsn);
+            checkpointAtt.emplace(entry.transactionId, entry);
+        }
+    }
     stats.walBytesSkipped = scanStart - logManager_.oldestRetainedLsn();
     auto scan = logManager_.scanFrom(scanStart);
     stats.walBytesScanned = scan.fileBytes - scanStart;
@@ -370,16 +410,38 @@ RecoveryStats RecoveryManager::recover() {
     scan.truncatedTail = false;
     scan.fileBytes = scan.validBytes;
     std::map<TransactionId, AnalyzedTransaction> transactions;
-    std::optional<TransactionId> activeTransaction;
+    std::size_t activeTransactionCount = 0;
+    std::map<PageId, TransactionId> activePageOwners;
     std::map<CheckpointId, CheckpointBeginLogPayload> checkpointBegins;
     std::map<CheckpointId, Lsn> fuzzyCheckpointBegins;
     TransactionId highestTailTransactionId = 0;
     std::vector<const LogRecord*> redo;
     std::unordered_map<Lsn, const LogRecord*> recordsByLsn;
     recordsByLsn.reserve(scan.records.size());
+    for (const auto& record : scan.records) recordsByLsn.emplace(record.lsn, &record);
+    stats.lsnIndexEntries = recordsByLsn.size();
+    stats.recoveryLsnIndexEntries = recordsByLsn.size();
+    stats.recoveryLsnIndexBytes = recordsByLsn.size() * sizeof(decltype(recordsByLsn)::value_type)
+        + recordsByLsn.bucket_count() * sizeof(void*);
+    bool checkedAtt = false;
+    const auto checkAtt = [&] {
+        for (const auto& [id, entry] : checkpointAtt) {
+            const auto found = transactions.find(id);
+            if (found == transactions.end() || found->second.status != TransactionStatus::Active
+                || found->second.beginLsn != entry.beginLsn
+                || found->second.lastLsn != entry.lastLsn
+                || found->second.startPageCount != entry.startPageCount) {
+                throw WalError(WalErrorKind::CorruptRecord, "Checkpoint ATT disagrees with retained transaction chain");
+            }
+        }
+    };
     for (const auto& record : scan.records) {
-        recordsByLsn.emplace(record.lsn, &record);
-        if (record.lsn < analysisBoundary) {
+        highestTailTransactionId = std::max(highestTailTransactionId, record.transactionId);
+        if (record.lsn >= analysisBoundary && !checkedAtt) {
+            checkAtt();
+            checkedAtt = true;
+        }
+        if (record.lsn < analysisBoundary && !checkpointAtt.contains(record.transactionId)) {
             if (isPageAffectingRecord(record.type)) {
                 validateTransactionRecordPayload(record);
                 redo.push_back(&record);
@@ -399,7 +461,9 @@ RecoveryStats RecoveryManager::recover() {
             || record.type == LogRecordType::FuzzyCheckpointBegin
             || record.type == LogRecordType::FuzzyCheckpointEnd) {
             validateCheckpointRecord(record);
-            if (activeTransaction.has_value()) {
+            if ((record.type == LogRecordType::CheckpointBegin
+                 || record.type == LogRecordType::CheckpointEnd)
+                && activeTransactionCount != 0) {
                 throw WalError(WalErrorKind::CorruptRecord,
                                "Checkpoint record overlaps an active transaction");
             }
@@ -442,29 +506,40 @@ RecoveryStats RecoveryManager::recover() {
         highestTailTransactionId = std::max(highestTailTransactionId, record.transactionId);
         auto found = transactions.find(record.transactionId);
         if (record.type == LogRecordType::Begin) {
-            if (found != transactions.end() || activeTransaction.has_value()) {
+            if (found != transactions.end()) {
                 throw WalError(WalErrorKind::CorruptRecord, "Transaction has duplicate BEGIN records");
             }
             AnalyzedTransaction transaction;
-            transaction.id = record.transactionId;
-            transaction.begin = decodeBeginLogPayload(record.payload);
+            transaction.transactionId = record.transactionId;
+            transaction.startPageCount = decodeBeginLogPayload(record.payload).startPageCount;
+            transaction.beginLsn = record.lsn;
             transaction.lastLsn = record.lsn;
+            transaction.undoNextLsn = record.lsn;
             transactions.emplace(record.transactionId, std::move(transaction));
-            activeTransaction = record.transactionId;
+            ++activeTransactionCount;
             continue;
         }
-        if (!activeTransaction.has_value() || *activeTransaction != record.transactionId
-            || found == transactions.end() || found->second.status != TransactionStatus::Active
+        if (found == transactions.end()
+            || (found->second.status != TransactionStatus::Active
+                && found->second.status != TransactionStatus::Aborting)
+            || record.prevLsn >= record.lsn
             || record.prevLsn != found->second.lastLsn) {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
         if (isPageUpdateRecord(record.type)) {
+            if (found->second.status != TransactionStatus::Active) {
+                throw WalError(WalErrorKind::CorruptRecord, "Page update after transaction entered UNDO");
+            }
             const auto identity = pageUpdateIdentity(record);
             const auto pageId = identity.pageId;
             const auto beforePageExisted = identity.beforePageExisted;
-            if (beforePageExisted != (pageId < found->second.begin.startPageCount)) {
+            if (beforePageExisted != (pageId < found->second.startPageCount)) {
                 throw WalError(WalErrorKind::CorruptRecord,
                                "Page-update existence flag contradicts transaction BEGIN");
+            }
+            const auto [owner, inserted] = activePageOwners.emplace(pageId, record.transactionId);
+            if (!inserted && owner->second != record.transactionId) {
+                throw WalError(WalErrorKind::CorruptRecord, "Conflicting active physical page histories are unsupported");
             }
             found->second.updates.push_back(&record);
             if (fuzzyCheckpoint.has_value() && !dirtyPageTable.contains(pageId)) {
@@ -472,7 +547,7 @@ RecoveryStats RecoveryManager::recover() {
             }
         } else if (record.type == LogRecordType::Compensation) {
             const auto compensation = decodeCompensationLogPayload(record.payload);
-            if (compensation.pageId >= found->second.begin.startPageCount) {
+            if (compensation.pageId >= found->second.startPageCount) {
                 throw WalError(
                     WalErrorKind::CorruptRecord,
                     "CLR cannot compensate a page created by the loser transaction");
@@ -482,6 +557,7 @@ RecoveryStats RecoveryManager::recover() {
             if (compensated == recordsByLsn.end()
                 || compensated->second->transactionId != record.transactionId
                 || !isPageUpdateRecord(compensated->second->type)
+                || compensated->second->lsn >= record.lsn
                 || compensated->second->prevLsn != compensation.undoNextLsn
                 || pageUpdateIdentity(*compensated->second).pageId
                     != compensation.pageId) {
@@ -489,26 +565,57 @@ RecoveryStats RecoveryManager::recover() {
                     WalErrorKind::CorruptRecord,
                     "CLR does not identify a matching transaction update");
             }
+            auto target = found->second.status == TransactionStatus::Aborting
+                ? found->second.undoNextLsn : record.prevLsn;
+            while (isValidLsn(target)) {
+                const auto prior = recordsByLsn.find(target);
+                if (prior == recordsByLsn.end() || prior->second->transactionId != record.transactionId
+                    || prior->second->lsn >= record.lsn) {
+                    throw WalError(WalErrorKind::CorruptRecord, "CLR undoNext chain is malformed");
+                }
+                if (!isPageUpdateRecord(prior->second->type)
+                    || pageUpdateIdentity(*prior->second).beforePageExisted) break;
+                target = prior->second->prevLsn;
+            }
+            if (target != compensation.compensatedUpdateLsn) {
+                throw WalError(WalErrorKind::CorruptRecord, "CLR skips or repeats an uncompensated update");
+            }
+            found->second.status = TransactionStatus::Aborting;
+            found->second.undoNextLsn = compensation.undoNextLsn;
+            ++found->second.clrCount;
             found->second.clrs.push_back(&record);
-            found->second.lastUndoNextLsn = compensation.undoNextLsn;
             ++stats.analyzedClrCount;
             if (fuzzyCheckpoint.has_value()
                 && !dirtyPageTable.contains(compensation.pageId)) {
                 dirtyPageTable.emplace(compensation.pageId, record.lsn);
             }
         } else if (record.type == LogRecordType::Commit) {
+            if (found->second.status != TransactionStatus::Active) {
+                throw WalError(WalErrorKind::CorruptRecord, "COMMIT after rollback began");
+            }
             found->second.status = TransactionStatus::Committed;
+            found->second.hasDurableCommit = true;
             ++stats.committedTransactions;
-            activeTransaction.reset();
         } else if (record.type == LogRecordType::Abort) {
             found->second.status = TransactionStatus::Aborted;
+            found->second.hasDurableAbort = true;
             ++stats.abortedTransactions;
             stats.durableAbortObserved = true;
-            activeTransaction.reset();
         }
         found->second.lastLsn = record.lsn;
+        if (found->second.status == TransactionStatus::Active) found->second.undoNextLsn = record.lsn;
+        if (found->second.hasDurableCommit || found->second.hasDurableAbort) {
+            --activeTransactionCount;
+            found->second.undoNextLsn = INVALID_LSN;
+            for (const auto* update : found->second.updates) {
+                activePageOwners.erase(pageUpdateIdentity(*update).pageId);
+            }
+        }
     }
+    if (!checkedAtt) checkAtt();
     stats.transactionsAnalyzed = transactions.size();
+    stats.analysisTransactions = transactions.size();
+    stats.peakRecoveryTransactionTableSize = transactions.size();
     TransactionId baseNext = checkpoint.slot.has_value()
         ? checkpoint.slot->nextTransactionId : TransactionId{1};
     if (highestTailTransactionId == std::numeric_limits<TransactionId>::max()) {
@@ -516,28 +623,53 @@ RecoveryStats RecoveryManager::recover() {
     }
     stats.nextTransactionId = std::max(baseNext, highestTailTransactionId + 1);
 
-    AnalyzedTransaction* loser = nullptr;
+    std::vector<RecoveryTransactionEntry*> losers;
     for (auto& [id, transaction] : transactions) {
         static_cast<void>(id);
         if (transaction.status == TransactionStatus::Committed) {
             redo.insert(redo.end(), transaction.updates.begin(), transaction.updates.end());
-        } else if (transaction.status == TransactionStatus::Active) {
-            if (loser != nullptr) {
-                throw WalError(WalErrorKind::CorruptRecord, "WAL contains multiple active transactions");
-            }
-            loser = &transaction;
+        } else if (transaction.status == TransactionStatus::Active
+                   || transaction.status == TransactionStatus::Aborting) {
+            losers.push_back(&transaction);
             ++stats.loserTransactions;
+            if (transaction.status == TransactionStatus::Active) ++stats.analysisActiveTransactions;
+            else ++stats.analysisAbortingTransactions;
+            if (!transaction.clrs.empty()) ++stats.undoRestartCount;
         }
+        analysisTransactions_.push_back(transaction);
         redo.insert(redo.end(), transaction.clrs.begin(), transaction.clrs.end());
     }
     std::sort(redo.begin(), redo.end(), [](const LogRecord* left, const LogRecord* right) {
         return left->lsn < right->lsn;
     });
-    if (loser != nullptr) {
-        stats.loserLastLsn = loser->lastLsn;
-        stats.loserLastUndoNextLsn = loser->lastUndoNextLsn;
-        if (!loser->clrs.empty()) ++stats.undoRestartCount;
+    if (!losers.empty()) {
+        stats.loserLastLsn = losers.front()->lastLsn;
+        stats.loserLastUndoNextLsn = losers.front()->undoNextLsn;
+        // Allocation ownership is deliberately not redesigned here. Multiple
+        // losers are supported only on preallocated, disjoint physical pages.
+        const auto minimumStart = (*std::min_element(losers.begin(), losers.end(),
+            [](const auto* left, const auto* right) { return left->startPageCount < right->startPageCount; }))
+            ->startPageCount;
+        for (const auto& [id, transaction] : transactions) {
+            static_cast<void>(id);
+            const bool unfinished = transaction.status == TransactionStatus::Active
+                || transaction.status == TransactionStatus::Aborting;
+            if (losers.size() > 1 && unfinished
+                && transaction.startPageCount != diskManager_.pageCount()) {
+                throw WalError(WalErrorKind::CorruptRecord, "Interleaved allocation history is unsupported");
+            }
+            if (transaction.hasDurableCommit) {
+                for (const auto* update : transaction.updates) {
+                    if (pageUpdateIdentity(*update).pageId >= minimumStart) {
+                        throw WalError(WalErrorKind::CorruptRecord, "Loser truncation would remove a winner page");
+                    }
+                }
+            }
+        }
     }
+    stats.analysisWinners = stats.committedTransactions;
+    stats.analysisLosers = stats.loserTransactions;
+    stats.analysisAborted = stats.abortedTransactions;
     stats.redoCandidates = redo.size();
     if (fuzzyCheckpoint.has_value() && !dirtyPageTable.empty()) {
         stats.redoStartLsn = std::min_element(
@@ -698,10 +830,9 @@ RecoveryStats RecoveryManager::recover() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - redoStart).count());
 
-    if (loser != nullptr) {
-        undoTransaction(
-            diskManager_, logManager_, loser->id, loser->begin.startPageCount,
-            loser->lastLsn, !loser->clrs.empty(),
+    if (!losers.empty()) {
+        undoTransactions(
+            diskManager_, logManager_, losers,
             [&](Lsn lsn) -> LogRecord {
                 const auto found = recordsByLsn.find(lsn);
                 if (found == recordsByLsn.end()) {
@@ -719,7 +850,14 @@ RecoveryStats RecoveryManager::recover() {
         ++stats.databaseSyncCalls;
         recoveryFailPoint("recovery_after_database_sync");
     }
+    stats.multiLoserUndoSteps = stats.undoQueuePops;
+    stats.multiLoserClrsAppended = stats.clrsAppended;
+    stats.transactionsCompletedDuringUndo = stats.abortedTransactions - stats.analysisAborted;
     diskManager_.reloadDatabaseHeader();
+    for (const auto& [id, transaction] : transactions) {
+        static_cast<void>(id);
+        recoveredTransactions_.push_back(transaction);
+    }
     stats.totalNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - totalStart).count());
@@ -742,63 +880,170 @@ void RecoveryCoordinator::attachBufferPool(BufferPoolManager& bufferPool) noexce
 }
 
 TransactionId RecoveryCoordinator::activeTransactionId() const noexcept {
-    return active_.has_value() ? active_->transactionId : INVALID_TRANSACTION_ID;
+    std::lock_guard lock(contextsMutex_);
+    return (active_ != nullptr) ? active_->transactionId : INVALID_TRANSACTION_ID;
 }
 
-bool RecoveryCoordinator::hasMaterializedWalBegin() const noexcept {
-    return active_.has_value() && isValidLsn(active_->beginLsn);
+bool RecoveryCoordinator::hasMaterializedWalBegin(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    return (context != nullptr) && isValidLsn(context->beginLsn);
 }
 
-Lsn RecoveryCoordinator::lastLsn() const noexcept {
-    return active_.has_value() ? active_->previousLsn : INVALID_LSN;
+Lsn RecoveryCoordinator::lastLsn(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    return (context != nullptr) ? context->lastLsn : INVALID_LSN;
 }
 
-std::size_t RecoveryCoordinator::touchedPageCount() const noexcept {
-    return active_.has_value() ? active_->pages.size() : 0;
+std::size_t RecoveryCoordinator::touchedPageCount(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    return (context != nullptr) ? context->pages.size() : 0;
 }
 
-std::uint64_t RecoveryCoordinator::transactionWalBytes() const noexcept {
-    return active_.has_value() ? active_->walBytes : 0;
+std::uint64_t RecoveryCoordinator::transactionWalBytes(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    return (context != nullptr) ? context->walBytes : 0;
 }
 
-std::uint64_t RecoveryCoordinator::originalBeforeImageBytes() const noexcept {
-    if (!active_.has_value()) return 0;
+std::uint64_t RecoveryCoordinator::originalBeforeImageBytes(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    if (context == nullptr) return 0;
     return static_cast<std::uint64_t>(std::count_if(
-        active_->pages.begin(), active_->pages.end(),
+        context->pages.begin(), context->pages.end(),
         [](const auto& page) { return page.second.beforeExisted; }))
         * database_format::PAGE_SIZE;
 }
 
-std::uint64_t RecoveryCoordinator::transactionRecoveryBytes() const noexcept {
-    if (!active_.has_value()) return 0;
-    return sizeof(ActiveStatement)
-        + active_->pages.size() * sizeof(decltype(active_->pages)::value_type);
+std::uint64_t RecoveryCoordinator::transactionRecoveryBytes(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    if (context == nullptr) return 0;
+    return sizeof(RecoveryTransactionContext)
+        + context->pages.size() * sizeof(decltype(context->pages)::value_type);
 }
 
-std::uint64_t RecoveryCoordinator::peakTransactionRecoveryBytes() const noexcept {
-    return active_.has_value() ? active_->peakRecoveryBytes : 0;
+std::uint64_t RecoveryCoordinator::peakTransactionRecoveryBytes(TransactionId id) const noexcept {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    const auto* context = id == INVALID_TRANSACTION_ID ? active_
+        : found == contexts_.end() ? nullptr : &found->second;
+    return (context != nullptr) ? context->peakRecoveryBytes : 0;
+}
+
+TransactionId RecoveryCoordinator::beginTransaction() {
+    std::lock_guard lock(contextsMutex_);
+    if (nextTransactionId_ == INVALID_TRANSACTION_ID
+        || nextTransactionId_ == std::numeric_limits<TransactionId>::max()) {
+        throw std::overflow_error("Transaction ID space is exhausted");
+    }
+    const auto id = nextTransactionId_++;
+    RecoveryTransactionContext context;
+    context.transactionId = id;
+    context.startPageCount = diskManager_.pageCount();
+    auto [position, inserted] = contexts_.emplace(id, std::move(context));
+    static_cast<void>(inserted);
+    position->second.peakRecoveryBytes = sizeof(RecoveryTransactionContext);
+    contextCount_ = contexts_.size();
+    activeSignal_ = true;
+    ++stats_.transactionsBegun;
+    return id;
+}
+
+void RecoveryCoordinator::bindTransaction(TransactionId id) {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    if (found == contexts_.end()) throw std::logic_error("Unknown recovery transaction");
+    if (rollbackActive_) throw std::logic_error("Rollback is in progress");
+    if (active_ != nullptr && !active_->safeBoundary && active_->transactionId != id) {
+        throw std::logic_error("Cannot switch a physically mutating transaction");
+    }
+    active_ = &found->second;
+}
+
+void RecoveryCoordinator::beginMutation(TransactionId id) {
+    bindTransaction(id);
+    std::lock_guard lock(contextsMutex_);
+    active_->safeBoundary = false;
+}
+
+void RecoveryCoordinator::prepareTransaction(TransactionId id) {
+    bindTransaction(id);
+    prepareStatement();
+}
+
+void RecoveryCoordinator::commitTransaction(TransactionId id) {
+    bindTransaction(id);
+    commitStatement();
+}
+
+void RecoveryCoordinator::rollbackTransaction(TransactionId id) {
+    bindTransaction(id);
+    rollbackStatement();
 }
 
 void RecoveryCoordinator::beginStatement() {
-    if (active_.has_value()) throw std::logic_error("A mutating statement is already active");
-    if (nextTransactionId_ == INVALID_TRANSACTION_ID) {
-        throw std::overflow_error("Transaction ID space is exhausted");
+    if (active_ != nullptr) throw std::logic_error("A mutating statement is already active");
+    bindTransaction(beginTransaction());
+}
+
+bool RecoveryCoordinator::checkpointSafe() const {
+    std::lock_guard lock(contextsMutex_);
+    return !rollbackActive_ && std::all_of(contexts_.begin(), contexts_.end(),
+        [](const auto& entry) { return entry.second.safeBoundary; });
+}
+
+std::vector<CheckpointTransactionEntry> RecoveryCoordinator::checkpointTransactions() const {
+    std::lock_guard lock(contextsMutex_);
+    if (!checkpointSafe()) throw std::logic_error("Checkpoint requires a safe statement boundary");
+    std::vector<CheckpointTransactionEntry> entries;
+    for (const auto& [id, context] : contexts_) {
+        if (!isValidLsn(context.beginLsn)) continue;
+        entries.push_back({id, CheckpointTransactionStatus::Active, context.beginLsn,
+                           context.lastLsn, context.startPageCount});
     }
-    active_.emplace(ActiveStatement{
-        nextTransactionId_++, diskManager_.pageCount(), INVALID_LSN, INVALID_LSN, {},
-    });
-    active_->peakRecoveryBytes = transactionRecoveryBytes();
-    activeSignal_ = true;
-    ++stats_.transactionsBegun;
+    return entries;
+}
+
+std::vector<RecoveryTransactionEntry> RecoveryCoordinator::transactionSnapshot() const {
+    std::lock_guard lock(contextsMutex_);
+    std::vector<RecoveryTransactionEntry> entries;
+    for (const auto& [id, context] : contexts_) {
+        static_cast<void>(id);
+        entries.push_back(context);
+    }
+    return entries;
 }
 
 void RecoveryCoordinator::notePageWriteIntent(
     PageId pageId,
     const DiskManager::Page& before) {
-    if (!active_.has_value()) {
+    std::lock_guard lock(contextsMutex_);
+    if (active_ == nullptr) {
         throw std::logic_error("Page mutation requires an active statement transaction");
     }
     if (pageId == INVALID_PAGE_ID) throw std::invalid_argument("Write intent has invalid PageId");
+    for (const auto& [id, context] : contexts_) {
+        if (id != active_->transactionId && context.pages.contains(pageId)) {
+            throw std::logic_error("Simultaneous physical page ownership is unsupported");
+        }
+    }
+    active_->safeBoundary = false;
     if (active_->pages.contains(pageId)) return;
     const bool existed = pageId < active_->startPageCount;
     Lsn beforePageLsn = INVALID_LSN;
@@ -820,42 +1065,51 @@ void RecoveryCoordinator::notePageWriteIntent(
     ++stats_.pagesFirstWritten;
 }
 
-void RecoveryCoordinator::ensureBeginLogged() {
-    if (isValidLsn(active_->beginLsn)) return;
-    const auto payload = encodeBeginLogPayload(BeginLogPayload{active_->startPageCount});
-    active_->beginLsn = logManager_.append(LogRecord{
+void RecoveryCoordinator::ensureBeginLogged(RecoveryTransactionContext& context) {
+    if (isValidLsn(context.beginLsn)) return;
+    const auto payload = encodeBeginLogPayload(BeginLogPayload{context.startPageCount});
+    context.beginLsn = logManager_.append(LogRecord{
         LogRecordType::Begin,
-        active_->transactionId,
+        context.transactionId,
         INVALID_LSN,
         payload,
         INVALID_LSN,
     });
     stats_.walTotalBytesGenerated += wal_record_layout::HEADER_SIZE + payload.size();
-    active_->walBytes += wal_record_layout::HEADER_SIZE + payload.size();
-    active_->previousLsn = active_->beginLsn;
+    context.walBytes += wal_record_layout::HEADER_SIZE + payload.size();
+    context.lastLsn = context.beginLsn;
+    context.undoNextLsn = context.beginLsn;
     recoveryFailPoint("after_begin_append");
 }
 
 Lsn RecoveryCoordinator::appendTransactionRecord(
+    RecoveryTransactionContext& context,
     LogRecordType type,
     std::vector<std::byte> payload) {
-    ensureBeginLogged();
+    ensureBeginLogged(context);
     const auto recordBytes = wal_record_layout::HEADER_SIZE + payload.size();
     const auto lsn = logManager_.append(LogRecord{
-        type, active_->transactionId, active_->previousLsn, std::move(payload), INVALID_LSN,
+        type, context.transactionId, context.lastLsn, std::move(payload), INVALID_LSN,
     });
     stats_.walTotalBytesGenerated += recordBytes;
-    active_->walBytes += recordBytes;
-    active_->previousLsn = lsn;
+    context.walBytes += recordBytes;
+    context.lastLsn = lsn;
+    context.undoNextLsn = lsn;
     return lsn;
 }
 
 Lsn RecoveryCoordinator::preparePageForWrite(
     PageId pageId,
     DiskManager::Page& after) {
-    if (!active_.has_value()) return INVALID_LSN;
-    const auto found = active_->pages.find(pageId);
-    if (found == active_->pages.end()) return INVALID_LSN;
+    std::lock_guard lock(contextsMutex_);
+    RecoveryTransactionContext* context = nullptr;
+    for (auto& [id, candidate] : contexts_) {
+        static_cast<void>(id);
+        if (candidate.pages.contains(pageId)) { context = &candidate; break; }
+    }
+    if (context == nullptr) return INVALID_LSN;
+    const auto found = context->pages.find(pageId);
+    if (found == context->pages.end()) return INVALID_LSN;
     auto& state = found->second;
     auto normalizedAfter = after;
     const bool afterSupportsPageLsn = supportsPersistentPageLsn(normalizedAfter);
@@ -979,7 +1233,7 @@ Lsn RecoveryCoordinator::preparePageForWrite(
         }
     }
     const auto payloadBytes = payload.size();
-    lsn = appendTransactionRecord(recordType, std::move(payload));
+    lsn = appendTransactionRecord(*context, recordType, std::move(payload));
     stats_.logicalBytesChanged += logicalBytesChanged;
     stats_.walUpdatePayloadBytes += payloadBytes;
     stats_.updateRecordBytes.push_back(wal_record_layout::HEADER_SIZE + payloadBytes);
@@ -1002,39 +1256,53 @@ void RecoveryCoordinator::requireNoPins() const {
 }
 
 void RecoveryCoordinator::prepareStatement() {
-    if (!active_.has_value()) throw std::logic_error("No statement transaction is active");
-    if (rollbackActive_) throw std::logic_error("Transaction rollback is in progress");
-    requireNoPins();
-    if (bufferPool_ != nullptr) {
-        for (auto& [pageId, state] : active_->pages) {
+    std::vector<PageId> pages;
+    TransactionId id;
+    {
+        std::lock_guard lock(contextsMutex_);
+        if (active_ == nullptr) throw std::logic_error("No statement transaction is active");
+        if (rollbackActive_) throw std::logic_error("Transaction rollback is in progress");
+        id = active_->transactionId;
+        for (const auto& [pageId, state] : active_->pages) {
             static_cast<void>(state);
-            bufferPool_->prepareResidentPageForCommit(pageId);
+            pages.push_back(pageId);
         }
     }
+    requireNoPins();
+    if (bufferPool_ != nullptr) {
+        for (const auto pageId : pages) bufferPool_->prepareResidentPageForCommit(pageId);
+    }
+    std::lock_guard lock(contextsMutex_);
+    contexts_.at(id).safeBoundary = true;
 }
 
 void RecoveryCoordinator::commitStatement() {
     prepareStatement();
+    std::lock_guard lock(contextsMutex_);
     if (!isValidLsn(active_->beginLsn)) {
         ++stats_.zeroWriteTransactions;
         ++stats_.transactionsCommitted;
-        active_.reset();
-        activeSignal_ = false;
+        contexts_.erase(active_->transactionId);
+        active_ = nullptr;
+        contextCount_ = contexts_.size();
+        activeSignal_ = !contexts_.empty();
         return;
     }
     recoveryFailPoint("before_commit_append");
-    const auto commitLsn = appendTransactionRecord(LogRecordType::Commit);
+    const auto commitLsn = appendTransactionRecord(*active_, LogRecordType::Commit);
     recoveryFailPoint("after_commit_append");
     logManager_.flushUpTo(commitLsn);
     ++stats_.commitFsyncs;
     recoveryFailPoint("after_commit_sync");
-    active_.reset();
-    activeSignal_ = false;
+    contexts_.erase(active_->transactionId);
+    active_ = nullptr;
+    contextCount_ = contexts_.size();
+    activeSignal_ = !contexts_.empty();
     ++stats_.transactionsCommitted;
 }
 
 void RecoveryCoordinator::rollbackStatement() {
-    if (!active_.has_value()) throw std::logic_error("No statement transaction is active");
+    if (active_ == nullptr) throw std::logic_error("No statement transaction is active");
     // Log the final resident states before invalidation. In particular, the
     // transaction may have failed midway through its most recent SQL statement.
     prepareStatement();
@@ -1044,17 +1312,21 @@ void RecoveryCoordinator::rollbackStatement() {
     if (!hasMaterializedWalBegin() && diskManager_.pageCount() > startPageCount) {
         // Even an all-zero newly appended page must be removed on restart if
         // rollback is interrupted; BEGIN carries the transaction's boundary.
-        ensureBeginLogged();
+        std::lock_guard lock(contextsMutex_);
+        ensureBeginLogged(*active_);
     }
     if (!hasMaterializedWalBegin()) {
+        std::lock_guard lock(contextsMutex_);
         ++stats_.zeroWriteTransactions;
         ++stats_.transactionsRolledBack;
-        active_.reset();
-        activeSignal_ = false;
+        contexts_.erase(active_->transactionId);
+        active_ = nullptr;
+        contextCount_ = contexts_.size();
+        activeSignal_ = !contexts_.empty();
         rollbackActive_ = false;
         return;
     }
-    logManager_.flushUpTo(active_->previousLsn);
+    logManager_.flushUpTo(active_->lastLsn);
     if (bufferPool_ != nullptr) {
         for (const auto& [pageId, state] : active_->pages) {
             static_cast<void>(state);
@@ -1062,10 +1334,10 @@ void RecoveryCoordinator::rollbackStatement() {
         }
         bufferPool_->discardPagesAtOrAboveForRecovery(static_cast<PageId>(startPageCount));
     }
+    std::lock_guard undoLock(contextsMutex_);
     lastRollbackStats_.loserTransactions = 1;
-    undoTransaction(
-        diskManager_, logManager_, active_->transactionId, startPageCount,
-        active_->previousLsn, false,
+    undoTransactions(
+        diskManager_, logManager_, {active_},
         [&](Lsn lsn) { return logManager_.readRecordAt(lsn); },
         [&](PageId pageId, DiskManager::Page& page) {
             const auto found = active_->pages.find(pageId);
@@ -1078,8 +1350,11 @@ void RecoveryCoordinator::rollbackStatement() {
         + wal_record_layout::HEADER_SIZE;
     stats_.rollbackDatabaseWrites += lastRollbackStats_.undoPageWrites;
     diskManager_.reloadDatabaseHeader();
-    active_.reset();
-    activeSignal_ = false;
+    std::lock_guard lock(contextsMutex_);
+    contexts_.erase(active_->transactionId);
+    active_ = nullptr;
+    contextCount_ = contexts_.size();
+    activeSignal_ = !contexts_.empty();
     rollbackActive_ = false;
     ++stats_.transactionsRolledBack;
 }

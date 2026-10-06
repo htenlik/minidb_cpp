@@ -41,15 +41,16 @@ users must also avoid acquiring another lease while holding a transferred lease.
 SqlEngine owns one TransactionManager with independently serialized session contexts,
 not one global optional transaction. Each context retains its access mode and movable
 lease. READ ONLY has no RecoveryCoordinator context or WAL transaction ID. READ WRITE
-alone owns the existing physical context, before-images, transaction ID, and prevLSN
+alone owns its keyed physical context, before-images, transaction ID, and prevLSN
 chain. Exclusive access proves that at most one WAL-producing user transaction exists.
 Writer ownership is checked at recovery boundaries; diagnostics are cached snapshots,
 not concurrent reads of mutable recovery state.
 
 The existing transaction-wide startPageCount/truncation remains safe precisely because
-no other writer can append/reuse pages concurrently. Startup still handles at most one
-user loser. No interleaved writer chains, transaction-local allocation rollback, or
-multi-loser recovery were introduced.
+no other writer can append/reuse pages concurrently. Recovery can analyze interleaved
+chains and resume multiple synthetic losers on disjoint preallocated pages. This does
+not enable production multiple writers or transaction-local allocation rollback;
+see [multi-transaction-recovery.md](multi-transaction-recovery.md).
 
 COMMIT retains exclusion through WAL force and cleanup. ROLLBACK/disconnect retain it
 through CLR compensation, database synchronization, and durable ABORT. READ ONLY
@@ -60,10 +61,11 @@ it does not generate a read-only mutation or enter mutable writer recovery state
 
 Manual checkpoints reject an active writer, and otherwise queue for exclusive access
 behind READ ONLY scopes. Calling checkpoint while retaining a shared lease on the same
-thread is a prohibited upgrade. Automatic writer thresholds remain pending during its
-explicit scope and execute under the still-owned exclusive lease after completion.
-Failed automatic attempts remain pending for the next writer boundary. Production
-checkpoint ATT remains empty. Publication/reclamation cannot overlap SQL readers.
+thread is a prohibited upgrade. Sharp thresholds remain pending during explicit
+scope; fuzzy thresholds may publish at prepared between-statements boundaries using
+the same exclusive lease and live ATT. A session-owned administrative checkpoint API
+can explicitly request that safe fuzzy boundary. Failed attempts remain pending.
+Publication/reclamation cannot overlap SQL readers or physical statement mutation.
 
 ## Buffer and disk synchronization
 

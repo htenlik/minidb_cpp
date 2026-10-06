@@ -171,8 +171,10 @@ an opt-in byte-range before/after encoding, and opt-in per-record adaptive selec
 with transaction chains, LSNs, and
 CRC32C validation. Full-page logging remains the default. The buffer
 pool may write an uncommitted dirty page (STEAL) and need not force committed pages at
-commit (NO-FORCE), so startup recovery redoes committed winners and undoes the final
-uncommitted loser. Persistent PageLSNs let recovery skip committed updates already
+commit (NO-FORCE), so startup recovery redoes committed winners and undoes losers.
+Recovery supports interleaved transaction chains and independent restartable UNDO;
+production SQL still permits only one writer. Persistent PageLSNs let recovery skip
+committed updates already
 represented by an equal or newer disk page; legacy WAL records remain always-redo.
 Physical compensation log records make completed loser-UNDO work durable across a crash
 during recovery; CLRs are REDO-able and never themselves undone.
@@ -199,7 +201,8 @@ See [wal.md](docs/wal.md), [wal-byte-range.md](docs/wal-byte-range.md),
 ## Checkpoints and segmented WAL
 
 Sharp checkpoints flush the bounded pool; opt-in fuzzy checkpoints instead persist a
-Dirty Page Table while dirty pages remain resident. Both publish through the same
+Dirty Page Table and live transaction table at safe statement boundaries while dirty
+pages remain resident. Both publish through the same
 double-slot recovery pointer. Segmented WAL reclaims only history older than the
 selected mode's recovery floor. See [checkpoints.md](docs/checkpoints.md),
 [fuzzy-checkpoints.md](docs/fuzzy-checkpoints.md), and
@@ -235,7 +238,7 @@ ctest --test-dir build --output-on-failure
 The suite covers byte-level format validation, deterministic state models, randomized
 differential tests, malformed and fuzz-like inputs, real reopen boundaries, TCP
 integration, and subprocess crash recovery. The current clean Release verification runs
-58 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
+77 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
 used during release verification.
 
 ## Documentation
@@ -248,6 +251,7 @@ used during release verification.
 - [Adaptive physical WAL update encoding](docs/wal-adaptive.md)
 - [Persistent PageLSN and selective REDO](docs/page-lsn.md)
 - [Crash recovery](docs/recovery.md)
+- [Multi-transaction recovery substrate](docs/multi-transaction-recovery.md)
 - [Explicit transactions](docs/transactions.md)
 - [Concurrent readers and database access](docs/concurrency-baseline.md)
 - [Compensation records and restartable UNDO](docs/clr-restartable-undo.md)
@@ -266,7 +270,7 @@ used during release verification.
 - Long transactions retain original page images in memory until completion.
 - Byte-range/adaptive WAL adds diff CPU cost; adaptive bounds each update to the smaller
   existing physical encoding, while full-page logging remains the default.
-- Checkpoints are synchronous; fuzzy mode is opt-in and transaction overlap is deferred.
+- Checkpoints are synchronous; fuzzy mode is opt-in and requires a safe statement boundary.
 - There is no point-in-time recovery or WAL archive.
 - Query planning, joins, aggregation, and secondary indexes are not implemented.
 - The TCP endpoint has no TLS, authentication, or authorization;
@@ -275,7 +279,7 @@ used during release verification.
 ## Future work
 
 - Finer-grained physiological/logical WAL and recovery experiments
-- Transaction-overlapping checkpoint and recovery experiments
+- Transaction-safe allocation ownership and broader recovery experiments
 - Multiple writers, finer-grained locking, and isolation
 - Additional indexes and query-planning functionality
 

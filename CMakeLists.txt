@@ -224,6 +224,12 @@ target_link_libraries(checkpoint_crash_test PRIVATE minidb_network)
 add_test(NAME checkpoint_crash_test COMMAND checkpoint_crash_test)
 
 add_executable(recovery_test tests/recovery_test.cpp)
+add_executable(multi_transaction_recovery_test tests/multi_transaction_recovery_test.cpp)
+target_link_libraries(multi_transaction_recovery_test PRIVATE minidb_network)
+add_test(NAME multi_transaction_recovery_test COMMAND multi_transaction_recovery_test)
+add_executable(multi_recovery_benchmark tests/multi_recovery_benchmark.cpp)
+target_link_libraries(multi_recovery_benchmark PRIVATE minidb_core)
+add_test(NAME multi_recovery_benchmark COMMAND multi_recovery_benchmark)
 target_link_libraries(recovery_test PRIVATE minidb_core)
 add_test(NAME recovery_test COMMAND recovery_test)
 

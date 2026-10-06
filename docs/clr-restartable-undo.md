@@ -85,9 +85,10 @@ count is idempotent, so a crash after truncation but before ABORT safely repeats
 
 A CLR is page-affecting for REDO and Dirty Page Table analysis; conservatively, a page
 not already present enters the restart DPT at the CLR LSN. Sharp and fuzzy checkpoint
-record formats are unchanged. Production checkpoints cannot overlap the one active
-statement or recovery, so segment reclamation cannot run while a loser/CLR chain is
-needed. After durable ABORT, a later checkpoint may advance the ordinary retention
+record formats are unchanged. Fuzzy checkpoints can capture prepared active writers
+between statements; their ATT BEGIN floor retains every required undo chain.
+Checkpoint/reclamation cannot overlap statement mutation or UNDO. After durable ABORT,
+a later checkpoint may advance the ordinary retention
 floor past the obsolete loser history. Retained-WAL checkpoint discovery accepts CLRs,
 including after checkpoint-control loss.
 
@@ -101,4 +102,6 @@ existing-page update. This intentionally favors a simple verifiable recovery rec
 over WAL volume. See [benchmarking.md](benchmarking.md) for the controlled workload.
 
 CLRs make recovery progress restartable, not crash-atomic as a whole. There is still no
-torn-page repair, archive/PITR, concurrent transaction recovery, or lock/MVCC protocol.
+torn-page repair, archive/PITR, production multiple writers, or fine-grained lock/MVCC protocol.
+Multi-loser recovery uses transaction-local CLR progress and a reverse-LSN queue;
+see [multi-transaction-recovery.md](multi-transaction-recovery.md).
