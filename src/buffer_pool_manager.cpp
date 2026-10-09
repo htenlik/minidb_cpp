@@ -188,14 +188,26 @@ std::optional<WritePageGuard> BufferPoolManager::fetchPageWrite(PageId pageId) {
 }
 
 std::optional<WritePageGuard> BufferPoolManager::newPageWrite() {
+    // Do not hold metadata while acquiring the recovery context mutex/forcing
+    // BEGIN. The SQL exclusive lease serializes transactional append privileges.
+    // Recheck availability afterward: raw concurrent buffer callers may consume
+    // the candidate while the durability hook runs.
+    {
+        std::lock_guard lock(metadataLatch_);
+        if (!availableFrame().has_value()) return std::nullopt;
+    }
+    if (recoveryHook_ != nullptr) recoveryHook_->prepareForPhysicalPageAppend();
     std::unique_lock lock(metadataLatch_);
     const auto frameId = availableFrame();
     if (!frameId.has_value()) return std::nullopt;
     const bool dirtyVictim = frames_[*frameId].valid && frames_[*frameId].dirty;
     flushVictimIfDirty(*frameId);
+    recoveryFailPoint("append_before_physical_extension");
     const auto pageId = diskManager_.appendPage();
+    recoveryFailPoint("append_after_physical_extension");
     DiskManager::Page page{};
     installPage(*frameId, pageId, std::move(page), true);
+    recoveryFailPoint("append_after_frame_installation");
     if (dirtyVictim) ++stats_.dirtyEvictions;
     ++stats_.appendedPages;
     lock.unlock();
