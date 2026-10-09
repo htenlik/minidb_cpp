@@ -243,6 +243,8 @@ public:
     void resetStats() noexcept { stats_ = {}; }
 
     void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) override;
+    void prepareForPhysicalPageAppend() override;
+    void prepareForPhysicalPageAppend(TransactionId id);
     [[nodiscard]] bool needsPreparation() const noexcept override { return activeSignal_.load(); }
     [[nodiscard]] Lsn preparePageForWrite(
         PageId pageId,

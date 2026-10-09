@@ -26,6 +26,8 @@ public:
 
     void readPage(PageId pageId, Page& output);
     void writePage(PageId pageId, const Page& page);
+    // Raw physical primitive, not a transactional allocator. WAL-backed normal
+    // append goes through BufferPoolManager's pre-extension recovery boundary.
     [[nodiscard]] PageId appendPage();
     void flush();
     void sync();

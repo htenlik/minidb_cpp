@@ -1065,6 +1065,32 @@ void RecoveryCoordinator::notePageWriteIntent(
     ++stats_.pagesFirstWritten;
 }
 
+void RecoveryCoordinator::prepareForPhysicalPageAppend() {
+    std::lock_guard lock(contextsMutex_);
+    if (active_ == nullptr) throw std::logic_error("Physical append requires a bound transaction");
+    prepareForPhysicalPageAppend(active_->transactionId);
+}
+
+void RecoveryCoordinator::prepareForPhysicalPageAppend(TransactionId id) {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    if (id == INVALID_TRANSACTION_ID || found == contexts_.end()
+        || active_ != &found->second || rollbackActive_
+        || found->second.status != RecoveryTransactionStatus::Active) {
+        throw std::logic_error("Physical append requires the active bound recovery transaction");
+    }
+    auto& context = found->second;
+    context.safeBoundary = false;
+    if (!isValidLsn(context.beginLsn)) recoveryFailPoint("append_before_begin_append");
+    ensureBeginLogged(context);
+    recoveryFailPoint("append_after_begin_before_force");
+    const auto durable = logManager_.durableLsn();
+    if (!isValidLsn(durable) || durable < context.beginLsn) {
+        logManager_.flushUpTo(context.beginLsn);
+    }
+    recoveryFailPoint("append_after_begin_force");
+}
+
 void RecoveryCoordinator::ensureBeginLogged(RecoveryTransactionContext& context) {
     if (isValidLsn(context.beginLsn)) return;
     const auto payload = encodeBeginLogPayload(BeginLogPayload{context.startPageCount});
@@ -1233,6 +1259,7 @@ Lsn RecoveryCoordinator::preparePageForWrite(
         }
     }
     const auto payloadBytes = payload.size();
+    recoveryFailPoint("before_page_update_append");
     lsn = appendTransactionRecord(*context, recordType, std::move(payload));
     stats_.logicalBytesChanged += logicalBytesChanged;
     stats_.walUpdatePayloadBytes += payloadBytes;
