@@ -65,7 +65,11 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
 `5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, `7 CHECKPOINT_END`,
 `8 PAGE_DELTA_UPDATE`, `9 PAGE_UPDATE_V2`, `10 PAGE_DELTA_UPDATE_V2`,
-`11 FUZZY_CHECKPOINT_BEGIN`, and `12 FUZZY_CHECKPOINT_END`.
+`11 FUZZY_CHECKPOINT_BEGIN`, `12 FUZZY_CHECKPOINT_END`, and `13 PAGE_RESERVE`.
+Type 13 is a 24-byte APPENDED-only transaction reservation, forced before physical
+extension together with its owning BEGIN. It has no page REDO or page CLR; see
+[durable-page-reservation.md](durable-page-reservation.md). Old record bytes and
+segment/checkpoint/database layouts remain unchanged; older binaries reject type 13.
 IDs 2 and 8 remain immutable legacy encodings; IDs 9 and 10 add explicit
 `beforePageLsn` and enable selective REDO. Production uses both physical update encodings and both
 sharp/fuzzy checkpoint records; type 5 is the physical restartable-UNDO CLR described in

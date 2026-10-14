@@ -70,6 +70,12 @@ An entirely unlogged read-only ID may be reused after restart; see
 
 ## Runtime mutation and durability path
 
+Physical append first forces transaction BEGIN plus a type-13 PAGE_RESERVE. Recovery
+reconstructs appended-page provenance, but reservations neither enter DPT nor perform
+physical REDO. UNDO and CLR target validation follow their prevLSN without a page CLR.
+Global BEGIN-boundary truncation is unchanged; multi-writer allocation is unsupported.
+See [durable-page-reservation.md](durable-page-reservation.md) for exact bytes/lifecycle.
+
 ```text
 Table / B+ tree / TupleStore
         |

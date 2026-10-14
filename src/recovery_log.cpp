@@ -8,6 +8,42 @@
 #include <stdexcept>
 
 namespace minidb {
+
+namespace {
+void validateReservation(const PageReserveLogPayload& payload, WalErrorKind kind) {
+    if (payload.pageId == 0 || payload.pageId == INVALID_PAGE_ID
+        || payload.source != PageAllocationSource::Appended
+        || payload.expectedOldPageCount != payload.pageId) {
+        throw WalError(kind, "Invalid APPENDED page reservation");
+    }
+}
+} // namespace
+
+std::vector<std::byte> encodePageReserveLogPayload(const PageReserveLogPayload& payload) {
+    using namespace page_reserve_log_layout;
+    validateReservation(payload, WalErrorKind::InvalidArgument);
+    std::vector<std::byte> bytes(PAYLOAD_SIZE);
+    byte_codec::writeUint32(bytes, PAGE_ID_OFFSET, payload.pageId);
+    byte_codec::writeUint16(bytes, VERSION_OFFSET, CURRENT_VERSION);
+    bytes[SOURCE_OFFSET] = static_cast<std::byte>(payload.source);
+    byte_codec::writeUint64(bytes, OLD_PAGE_COUNT_OFFSET, payload.expectedOldPageCount);
+    return bytes;
+}
+
+PageReserveLogPayload decodePageReserveLogPayload(std::span<const std::byte> bytes) {
+    using namespace page_reserve_log_layout;
+    if (bytes.size() != PAYLOAD_SIZE) throw WalError(WalErrorKind::CorruptRecord, "PAGE_RESERVE payload length");
+    if (byte_codec::readUint16(bytes, VERSION_OFFSET) != CURRENT_VERSION
+        || bytes[FLAGS_OFFSET] != std::byte{0}
+        || byte_codec::readUint64(bytes, RESERVED_OFFSET) != 0) {
+        throw WalError(WalErrorKind::CorruptRecord, "PAGE_RESERVE version/flags/reserved bytes");
+    }
+    PageReserveLogPayload payload{byte_codec::readUint32(bytes, PAGE_ID_OFFSET),
+        static_cast<PageAllocationSource>(std::to_integer<std::uint8_t>(bytes[SOURCE_OFFSET])),
+        byte_codec::readUint64(bytes, OLD_PAGE_COUNT_OFFSET)};
+    validateReservation(payload, WalErrorKind::CorruptRecord);
+    return payload;
+}
 namespace {
 
 Lsn decodeBeforePageLsn(std::span<const std::byte> bytes, std::size_t offset) {
@@ -657,6 +693,13 @@ void validateTransactionRecordPayload(const LogRecord& record) {
         throw WalError(WalErrorKind::CorruptRecord, "Transaction record uses transaction ID zero");
     }
     switch (record.type) {
+    case LogRecordType::PageReserve:
+        if (!isValidLsn(record.prevLsn) || !isValidLsn(record.lsn)
+            || record.prevLsn < wal_file_layout::HEADER_SIZE || record.prevLsn >= record.lsn) {
+            throw WalError(WalErrorKind::CorruptRecord, "PAGE_RESERVE invalid prevLSN");
+        }
+        static_cast<void>(decodePageReserveLogPayload(record.payload));
+        return;
     case LogRecordType::Begin:
         if (isValidLsn(record.prevLsn)) {
             throw WalError(WalErrorKind::CorruptRecord, "BEGIN record has a prevLSN");

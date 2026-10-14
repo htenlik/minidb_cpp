@@ -1,8 +1,8 @@
 # Durable BEGIN before physical page extension
 
 MiniDB++ retains one database-wide exclusive SQL writer and the existing 16-byte
-BEGIN payload containing `startPageCount`. This fix does not introduce allocation
-ownership, new WAL types, or a non-truncating rollback protocol.
+BEGIN payload containing `startPageCount`. Appended-page provenance is now recorded by
+[durable reservations](durable-page-reservation.md); rollback remains truncating.
 
 ## Original crash window
 
@@ -17,14 +17,15 @@ Normal transactional extension now follows:
 
 ```text
 bound ACTIVE recovery context, original startPageCount retained
-    -> prepareForPhysicalPageAppend()
+    -> prepareForPhysicalPageAppend(expectedPageId)
     -> append existing-format BEGIN once, if needed
-    -> flushUpTo(BEGIN LSN), only if BEGIN is not already durable
+    -> append PAGE_RESERVE once for the expected PageId
+    -> flushUpTo(reservation LSN), making BEGIN durable in the same force
     -> return from recovery hook
     -> acquire buffer metadata, recheck available frame
     -> prepare/flush dirty victim using existing WAL-before-data protocol
-    -> DiskManager::appendPage()
-    -> install zero buffer frame and create write guard
+    -> DiskManager::appendPage(expectedPageId), checked atomically
+    -> install zero buffer frame, runtime append confirmation, create write guard
     -> initialize/change page; normal PAGE_UPDATE preparation and COMMIT
 ```
 
@@ -35,8 +36,9 @@ checkpointing before materializing or forcing BEGIN. An existing BEGIN is never
 duplicated and its transaction-local lastLSN is not reset.
 
 `LogManager::flushUpTo()` supplies the actual WAL fsync. The hook compares durableLSN
-against BEGIN before calling it; subsequent appends do not force BEGIN again. It may
-flush more buffered WAL than BEGIN alone, but it does not force database pages.
+against the reservation before calling it; each new append needs a reservation force,
+but no duplicate BEGIN or separate BEGIN fsync. It may flush buffered updates too,
+but it does not force database pages.
 Failure before successful force prevents extension. An all-zero appended page is a
 physical mutation even if no PAGE_UPDATE is generated: its durable BEGIN now permits
 startup/live rollback to truncate it safely under exclusive-writer ownership.
@@ -65,8 +67,9 @@ WAL transactions. DiskManager stays independent of LogManager and transaction po
 ## Lock ordering
 
 Buffer metadata is briefly acquired to check availability, then released before the
-hook. The hook holds the recovery context mutex and accesses WAL, **not** buffer
-metadata or DiskManager. It releases that mutex before the buffer reacquires metadata
+hook. Its disk extent check finishes before taking the recovery context mutex and
+accessing WAL, with no buffer metadata or disk mutex held across force. It releases
+the context mutex before the buffer reacquires metadata
 and appends under the existing metadata -> disk order. Availability is rechecked
 because raw concurrent buffer callers might consume a frame during the force.
 
@@ -97,27 +100,29 @@ unchanged and are not part of this branch's CTest suite.
 Focused tests observe the physical WAL BEGIN and durableLSN while file extent is
 still unchanged. A second thread obtains buffer metadata during the hook, testing
 the latch boundary. Tests cover buffered/already-durable BEGIN, owner rejection,
-ABORTING rejection, exactly one BEGIN, prevLSN preservation, reuse rollback and live ATT.
+ABORTING rejection, exactly one BEGIN, reservation durability, prevLSN preservation,
+reuse rollback and live ATT.
 
 Hard subprocess tests cover before append/force, after force, immediately before/after
 extension, after installation/zero initialization, before/after PAGE_UPDATE, before
-COMMIT and after durable COMMIT. Eleven points x three WAL modes x two storage modes
-give 66 cases, plus the exact original empty-database/P1 regression. Final recovered
+COMMIT and after durable COMMIT, reservation append/force, interrupted UNDO and ABORT.
+Sixteen points x three WAL modes x two storage modes give 96 cases, plus the exact
+original empty-database/P1 regression. Final recovered
 state, not temporarily unlinked pages in an active transaction, determines success.
 SQL tests include 100 append/INSERT/ROLLBACK cycles, catalog/allocator/index validation,
 read-only zero WAL, one-BEGIN explicit inserts, and committed close/reopen structures.
 
 `durable_page_append_benchmark` compares existing-page UPDATE, first append, and four
-appends for FullPage/ByteRange/Adaptive, with 20 samples per combination. It excludes
-WAL header-creation fsync and reports mutation/allocation and commit p95 nanoseconds.
-With eight frames and no eviction, expected transaction WAL fsync counts are 1 for
-existing-page UPDATE and 2 for either append workload: one first-BEGIN force and one
-COMMIT force. Latencies are machine-specific; extra first-allocation durability is
+appends and allocation-heavy INSERT for FullPage/ByteRange/Adaptive, with 20 samples
+per combination. It excludes WAL header-creation fsync and reports latency, throughput
+and WAL accounting. With eight frames and no eviction, transaction WAL fsync counts
+are 1 for existing-page UPDATE, 2 for one append and 5 for four appends. Latencies are
+machine-specific; extra first-allocation durability is
 not free. No timing threshold or universal speed claim is made.
 
 ## Remaining boundary
 
-Transaction-owned reservation/reuse/release provenance, restartable allocator
+Free-list reuse/release provenance, restartable allocator
 compensation, safe shared-free-list publication and overlapping allocation rollback
 remain separate work. This fix is not a power-loss/torn-page recovery guarantee,
 allocation epoch protocol, multi-writer implementation, or replacement for the

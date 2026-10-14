@@ -10,6 +10,29 @@
 
 namespace minidb {
 
+namespace page_reserve_log_layout {
+inline constexpr std::uint16_t CURRENT_VERSION = 1;
+inline constexpr std::size_t PAGE_ID_OFFSET = 0;
+inline constexpr std::size_t VERSION_OFFSET = 4;
+inline constexpr std::size_t SOURCE_OFFSET = 6;
+inline constexpr std::size_t FLAGS_OFFSET = 7;
+inline constexpr std::size_t OLD_PAGE_COUNT_OFFSET = 8;
+inline constexpr std::size_t RESERVED_OFFSET = 16;
+inline constexpr std::size_t PAYLOAD_SIZE = 24;
+} // namespace page_reserve_log_layout
+
+enum class PageAllocationSource : std::uint8_t { Appended = 1 };
+
+struct PageReserveLogPayload {
+    PageId pageId = INVALID_PAGE_ID;
+    PageAllocationSource source = PageAllocationSource::Appended;
+    std::uint64_t expectedOldPageCount = 0;
+    bool operator==(const PageReserveLogPayload&) const = default;
+};
+
+[[nodiscard]] std::vector<std::byte> encodePageReserveLogPayload(const PageReserveLogPayload& payload);
+[[nodiscard]] PageReserveLogPayload decodePageReserveLogPayload(std::span<const std::byte> bytes);
+
 namespace begin_log_layout {
 
 inline constexpr std::size_t START_PAGE_COUNT_OFFSET = 0;

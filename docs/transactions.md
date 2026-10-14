@@ -36,7 +36,11 @@ storage/recovery objects.
 
 READ WRITE BEGIN allocates an in-memory transaction ID and captures the current page count before
 any allocation. With serial ownership that is also the pre-first-mutation boundary.
-The WAL BEGIN is materialized only by the first logged change. Each successful mutating
+The WAL BEGIN is materialized by the first logged change or physical append reservation.
+An append forces BEGIN plus PAGE_RESERVE before extension; later appends log distinct
+reservations while preserving the original BEGIN boundary. Provenance survives statement
+boundaries but free-list reuse/release is not covered. Rollback still truncates; see
+[durable-page-reservation.md](durable-page-reservation.md). Each successful mutating
 statement prepares the latest resident touched pages without committing or forcing them.
 Eviction may prepare and force updates sooner under STEAL.
 
