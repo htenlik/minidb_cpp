@@ -123,7 +123,9 @@ without control publication because database fsync preceded END fsync. Thus the
 control sidecar is not a single point of recoverability.
 
 For fuzzy checkpoints the floor is the minimum of fuzzy BEGIN and every captured DPT
-recLSN (and would include an ATT BEGIN if transaction overlap were supported). One old
+recLSN and every live ATT BEGIN. This also retains all required PAGE_RESERVE records in
+an active transaction's ordinary chain; reservations need no new checkpoint format.
+See [durable-page-reservation.md](durable-page-reservation.md). One old
 dirty period can retain WAL until the page is flushed and a later snapshot omits it.
 See [fuzzy-checkpoints.md](fuzzy-checkpoints.md).
 

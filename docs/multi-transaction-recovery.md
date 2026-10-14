@@ -116,6 +116,12 @@ Production leaves test failpoint variables unset.
 
 ## Allocation and conflict restriction
 
+Type-13 [appended-page reservations](durable-page-reservation.md) now reconstruct a
+per-transaction provenance map from WAL. They share the transaction prevLSN chain,
+are not physical REDO/DPT entries, and are skipped without a CLR during UNDO. Active
+reservation/page-update ownership conflicts remain rejected. This does not extend
+the supported allocation concurrency boundary or track free-list reuse ownership.
+
 Global `startPageCount` truncation is **not transaction-local allocation ownership**.
 Multiple-loser histories are accepted only when unfinished transaction boundaries equal
 the existing preallocated page count. Recovery rejects conflicting simultaneously

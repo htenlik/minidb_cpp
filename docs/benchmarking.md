@@ -50,6 +50,17 @@ count, and resident-frame count immediately before and after the measured worklo
 
 ## Methodology
 
+`durable_page_append_benchmark` runs 20 samples each of existing-page UPDATE, first
+append, four appends, and 16 allocation-heavy INSERTs in one explicit transaction,
+for FullPage/ByteRange/Adaptive. Setup/header fsyncs are excluded. It reports BEGIN and
+PAGE_RESERVE counts, transaction WAL fsyncs, reservation/total record bytes, mutation
+batch p95, per-append p95/p99 and commit p95. SQL INSERT percentiles include full SQL
+execution, not allocator-only latency. Throughput excludes setup and includes commit;
+low-level throughput counts transactions, SQL throughput counts rows. No timings are
+pass/fail thresholds. The implementation combines BEGIN+reservation in one first
+force; separate forces were not benchmarked. See
+[durable-page-reservation.md](durable-page-reservation.md) for correctness boundaries.
+
 Use a Release build for representative measurements:
 
 ```bash
