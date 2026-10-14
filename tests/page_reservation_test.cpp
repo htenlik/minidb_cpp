@@ -51,7 +51,7 @@ void codec() {
 }
 
 void corruptChains() {
-    for (unsigned scenario = 0; scenario < 9; ++scenario) {
+    for (unsigned scenario = 0; scenario < 12; ++scenario) {
         test::TemporaryDatabase db("reservation_bad_chain");
         DiskManager disk(db.path().string());
         LogManager log(walPathForDatabase(db.path().string()));
@@ -65,6 +65,14 @@ void corruptChains() {
         if (scenario == 3) {
             static_cast<void>(log.append({LogRecordType::Begin, 2, INVALID_LSN, encodeBeginLogPayload({1})}));
         }
+        if (scenario == 10) {
+            static_cast<void>(log.append({LogRecordType::PageReserve, 1, last, payload}));
+            last = log.append({LogRecordType::Begin, 2, INVALID_LSN, encodeBeginLogPayload({1})});
+        }
+        if (scenario == 11) {
+            last = log.append({LogRecordType::PageReserve, 1, last,
+                encodePageReserveLogPayload({2, PageAllocationSource::Appended, 2})});
+        }
         auto bad = payload;
         if (scenario == 4) bad[8] = std::byte{2};
         if (scenario == 5) bad[4] = std::byte{2};
@@ -72,7 +80,8 @@ void corruptChains() {
         if (scenario == 7) bad.push_back(std::byte{0});
         if (scenario == 8) bad.pop_back();
         static_cast<void>(log.append({LogRecordType::PageReserve,
-            scenario == 1 || scenario == 3 ? TransactionId{2} : TransactionId{1}, last, bad}));
+            scenario == 9 ? INVALID_TRANSACTION_ID : scenario == 1 || scenario == 3 || scenario == 10
+                ? TransactionId{2} : TransactionId{1}, last, bad}));
         log.flushAll();
         test::requireThrows<WalError>([&] { static_cast<void>(RecoveryManager(disk, log).recover()); }, "Invalid reservation chain accepted");
     }

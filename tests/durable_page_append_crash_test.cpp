@@ -99,7 +99,20 @@ void matrix() {
                                LogOpenMode::DeferredRecovery,
                                segmented ? WalStorageMode::Segmented : WalStorageMode::LegacySingleFile, 9000);
                 const bool committed = std::string_view(point) == "after_commit_sync";
-                const auto stats = RecoveryManager(disk, log).recover();
+                const auto durableHistory = log.scan();
+                const auto reservationCount = static_cast<std::uint64_t>(std::count_if(
+                    durableHistory.records.begin(), durableHistory.records.end(), [](const auto& r) {
+                        return r.type == LogRecordType::PageReserve;
+                    }));
+                RecoveryManager manager(disk, log);
+                const auto stats = manager.recover();
+                require(stats.pageReservationsRecovered == reservationCount, "Crash analysis lost reservation provenance");
+                if (reservationCount != 0) {
+                    const auto& entry = manager.recoveredTransactions().front().reservations.at(2);
+                    require(entry.expectedOldPageCount == 2 && !entry.materializedInRuntime
+                        && log.readRecordAt(entry.reserveLsn).transactionId == 1,
+                        "Recovered reservation fabricated volatile materialization or wrong owner");
+                }
                 require(disk.pageCount() == (committed ? 3U : 2U),
                         "Wrong recovered extent at " + std::string(point) + " mode="
                             + std::string(walUpdateModeName(mode)));
@@ -123,7 +136,7 @@ void matrix() {
             }
         }
     }
-    std::cout << "append crash matrix: 66 subprocess boundaries passed\n";
+    std::cout << "append/reservation crash matrix: 96 subprocess boundaries passed\n";
 }
 
 net::ServerConfig config() {
