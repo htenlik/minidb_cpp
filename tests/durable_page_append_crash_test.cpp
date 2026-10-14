@@ -38,7 +38,8 @@ void exactOrphanRegression() {
                    LogOpenMode::DeferredRecovery);
     require(disk.pageCount() == 2, "Orphan regression did not physically append P1");
     const auto input = log.scan();
-    require(input.records.size() == 1 && input.records.front().type == LogRecordType::Begin
+    require(input.records.size() == 2 && input.records.front().type == LogRecordType::Begin
+            && input.records.back().type == LogRecordType::PageReserve
             && decodeBeginLogPayload(input.records.front().payload).startPageCount == 1,
             "First append did not persist its original BEGIN boundary");
     const auto stats = RecoveryManager(disk, log).recover();
@@ -57,6 +58,8 @@ void matrix() {
         "append_before_physical_extension", "append_after_physical_extension",
         "append_after_frame_installation", "zero_initialized", "before_page_update_append",
         "after_page_update_append", "before_commit_append", "after_commit_sync",
+        "append_after_reservation_append", "append_after_reservation_force", "after_commit_append",
+        "recovery_midway_loser_chain", "recovery_after_abort_sync",
     };
     for (auto mode : {WalUpdateMode::FullPage, WalUpdateMode::ByteRange, WalUpdateMode::Adaptive}) {
         for (bool segmented : {false, true}) {
@@ -76,6 +79,7 @@ void matrix() {
                     recovery.attachBufferPool(pool);
                     PageAllocator allocator(pool, disk);
                     recovery.beginStatement();
+                    { auto page = pool.fetchPageWrite(1); page->data()[80] = std::byte{0x33}; }
                     const auto pageId = allocator.allocatePage(); // zero initialized by allocator
                     if (std::string_view(point) == "zero_initialized") ::_exit(86);
                     {
@@ -85,6 +89,7 @@ void matrix() {
                         static_cast<void>(view.insert(TupleBytes(128, std::byte{0xB2})));
                     }
                     recovery.prepareStatement();
+                    if (std::string_view(point).starts_with("recovery_")) recovery.rollbackStatement();
                     recovery.commitStatement();
                     ::_exit(92);
                 }
@@ -105,6 +110,10 @@ void matrix() {
                             "Durable commit lost initialized page");
                     require(stats.committedTransactions == 1, "Durable commit not classified as winner");
                 }
+                DiskManager::Page original{};
+                disk.readPage(1, original);
+                require(original[80] == (committed ? std::byte{0x33} : std::byte{0}),
+                        "Mixed reservation/update CLR chain lost original page at " + std::string(point));
                 BufferPoolManager pool(disk, 4, 2);
                 PageAllocator allocator(pool, disk);
                 allocator.validate();

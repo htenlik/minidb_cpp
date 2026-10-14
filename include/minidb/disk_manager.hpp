@@ -29,6 +29,9 @@ public:
     // Raw physical primitive, not a transactional allocator. WAL-backed normal
     // append goes through BufferPoolManager's pre-extension recovery boundary.
     [[nodiscard]] PageId appendPage();
+    // Check and append atomically under the I/O mutex; fail before writing if
+    // an administrative append changed the extent since reservation.
+    [[nodiscard]] PageId appendPage(PageId expectedPageId);
     void flush();
     void sync();
 

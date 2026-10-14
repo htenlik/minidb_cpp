@@ -121,6 +121,14 @@ void DiskManager::writePage(PageId pageId, const Page& page) {
 
 PageId DiskManager::appendPage() {
     std::lock_guard lock(ioLatch_);
+    return appendPage(pageCount_);
+}
+
+PageId DiskManager::appendPage(PageId expectedPageId) {
+    std::lock_guard lock(ioLatch_);
+    if (expectedPageId != pageCount_) {
+        throw std::logic_error("Physical extent changed after page reservation");
+    }
     if (pageCount_ == INVALID_PAGE_ID) {
         throw std::overflow_error("Database has exhausted the available page IDs.");
     }

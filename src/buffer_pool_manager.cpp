@@ -196,14 +196,15 @@ std::optional<WritePageGuard> BufferPoolManager::newPageWrite() {
         std::lock_guard lock(metadataLatch_);
         if (!availableFrame().has_value()) return std::nullopt;
     }
-    if (recoveryHook_ != nullptr) recoveryHook_->prepareForPhysicalPageAppend();
+    const auto expectedPageId = diskManager_.pageCount();
+    if (recoveryHook_ != nullptr) recoveryHook_->prepareForPhysicalPageAppend(expectedPageId);
     std::unique_lock lock(metadataLatch_);
     const auto frameId = availableFrame();
     if (!frameId.has_value()) return std::nullopt;
     const bool dirtyVictim = frames_[*frameId].valid && frames_[*frameId].dirty;
     flushVictimIfDirty(*frameId);
     recoveryFailPoint("append_before_physical_extension");
-    const auto pageId = diskManager_.appendPage();
+    const auto pageId = diskManager_.appendPage(expectedPageId);
     recoveryFailPoint("append_after_physical_extension");
     DiskManager::Page page{};
     installPage(*frameId, pageId, std::move(page), true);
@@ -211,6 +212,7 @@ std::optional<WritePageGuard> BufferPoolManager::newPageWrite() {
     if (dirtyVictim) ++stats_.dirtyEvictions;
     ++stats_.appendedPages;
     lock.unlock();
+    if (recoveryHook_ != nullptr) recoveryHook_->notePhysicalPageAppend(pageId);
     return WritePageGuard(BasicPageGuard(*this, *frameId, pageId, true));
 }
 

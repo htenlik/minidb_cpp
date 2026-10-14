@@ -19,13 +19,13 @@ public:
     BufferPoolManager* pool = nullptr;
     std::size_t preparations = 0;
     PageId lastPreAppendCount = 0;
-    void prepareForPhysicalPageAppend() override {
+    void prepareForPhysicalPageAppend(PageId expected) override {
         // A different thread must be able to take buffer metadata while the
         // recovery hook is running. CTest's timeout catches a lock regression.
         std::thread observer([&] { static_cast<void>(pool->stats()); });
         observer.join();
         lastPreAppendCount = disk_.pageCount();
-        recovery_.prepareForPhysicalPageAppend();
+        recovery_.prepareForPhysicalPageAppend(expected);
         const auto entry = recovery_.transactionSnapshot().front();
         require(isValidLsn(entry.beginLsn) && log_.durableLsn() >= entry.beginLsn,
                 "BEGIN was not durable in pre-append hook");
@@ -35,8 +35,16 @@ public:
                 && decodeBeginLogPayload(physical.payload).startPageCount == entry.startPageCount,
                 "Physical WAL does not contain the owning BEGIN/boundary");
         require(disk_.pageCount() == lastPreAppendCount, "Hook ran after physical extension");
+        const auto reservation = entry.reservations.at(expected);
+        const auto reserveRecord = log_.readRecordAt(reservation.reserveLsn);
+        require(log_.durableLsn() >= reservation.reserveLsn
+                && reserveRecord.type == LogRecordType::PageReserve
+                && reserveRecord.transactionId == entry.transactionId
+                && decodePageReserveLogPayload(reserveRecord.payload).pageId == expected,
+                "Matching reservation was not durable before extension");
         ++preparations;
     }
+    void notePhysicalPageAppend(PageId page) override { recovery_.notePhysicalPageAppend(page); }
     void notePageWriteIntent(PageId page, const DiskManager::Page& before) override {
         require(disk_.pageCount() == lastPreAppendCount + 1,
                 "Frame installation did not follow append preparation");
@@ -74,7 +82,7 @@ void orderingAndOneForce() {
         if (i == 0) begin = current.beginLsn;
         require(current.beginLsn == begin && current.startPageCount == 1,
                 "Repeated append changed transaction boundary/BEGIN");
-        require(log.stats().fsyncCalls == 1, "Repeated append unnecessarily forced WAL");
+        require(log.stats().fsyncCalls == static_cast<std::uint64_t>(i + 1), "Reservation force count differs from append count");
         recovery.prepareTransaction(id);
     }
     const auto last = recovery.lastLsn(id);
@@ -84,7 +92,7 @@ void orderingAndOneForce() {
                 return record.type == LogRecordType::Begin;
             }) == 1 && records.back().prevLsn == last,
             "Append reset prevLSN or duplicated BEGIN");
-    require(witness.preparations == 3 && log.stats().fsyncCalls == 2,
+    require(witness.preparations == 3 && log.stats().fsyncCalls == 4,
             "Unexpected BEGIN/COMMIT force count");
 }
 
@@ -105,7 +113,7 @@ void bufferedBeginMustBeForced() {
     log.resetStats();
     { auto page = pool.newPageWrite(); require(page.has_value(), "Append failed"); }
     const auto after = recovery.transactionSnapshot().front();
-    require(after.beginLsn == before.beginLsn && after.lastLsn == before.lastLsn
+    require(after.beginLsn == before.beginLsn && log.readRecordAt(after.lastLsn).prevLsn == before.lastLsn
             && log.durableLsn() >= before.beginLsn && log.stats().fsyncCalls == 1,
             "Buffered BEGIN was duplicated/not forced or prevLSN changed");
     recovery.rollbackStatement();

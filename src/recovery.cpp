@@ -184,6 +184,11 @@ void undoTransactions(
             continue;
         }
         if (!isPageUpdateRecord(record.type)) {
+            if (record.type == LogRecordType::PageReserve) {
+                nextUndoLsn = record.prevLsn;
+                work.push({nextUndoLsn, transactionId, index});
+                continue;
+            }
             throw WalError(WalErrorKind::CorruptRecord,
                            "UNDO chain contains a non-undoable record");
         }
@@ -526,7 +531,24 @@ RecoveryStats RecoveryManager::recover() {
             || record.prevLsn != found->second.lastLsn) {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
-        if (isPageUpdateRecord(record.type)) {
+        if (record.type == LogRecordType::PageReserve) {
+            const auto payload = decodePageReserveLogPayload(record.payload);
+            auto& transaction = found->second;
+            if (transaction.status != TransactionStatus::Active
+                || payload.expectedOldPageCount < transaction.startPageCount
+                || transaction.reservations.contains(payload.pageId)
+                || (!transaction.reservations.empty()
+                    && payload.pageId <= transaction.reservations.rbegin()->first)) {
+                throw WalError(WalErrorKind::CorruptRecord, "Duplicate/out-of-order reservation or invalid transaction state");
+            }
+            const auto [owner, inserted] = activePageOwners.emplace(payload.pageId, record.transactionId);
+            if (!inserted && owner->second != record.transactionId) {
+                throw WalError(WalErrorKind::CorruptRecord, "Conflicting active page reservation");
+            }
+            transaction.reservations.emplace(payload.pageId, PageReservationEntry{
+                payload.pageId, record.lsn, payload.source, payload.expectedOldPageCount, false});
+            ++stats.pageReservationsRecovered;
+        } else if (isPageUpdateRecord(record.type)) {
             if (found->second.status != TransactionStatus::Active) {
                 throw WalError(WalErrorKind::CorruptRecord, "Page update after transaction entered UNDO");
             }
@@ -573,8 +595,9 @@ RecoveryStats RecoveryManager::recover() {
                     || prior->second->lsn >= record.lsn) {
                     throw WalError(WalErrorKind::CorruptRecord, "CLR undoNext chain is malformed");
                 }
-                if (!isPageUpdateRecord(prior->second->type)
-                    || pageUpdateIdentity(*prior->second).beforePageExisted) break;
+                if (prior->second->type != LogRecordType::PageReserve
+                    && (!isPageUpdateRecord(prior->second->type)
+                        || pageUpdateIdentity(*prior->second).beforePageExisted)) break;
                 target = prior->second->prevLsn;
             }
             if (target != compensation.compensatedUpdateLsn) {
@@ -609,6 +632,10 @@ RecoveryStats RecoveryManager::recover() {
             found->second.undoNextLsn = INVALID_LSN;
             for (const auto* update : found->second.updates) {
                 activePageOwners.erase(pageUpdateIdentity(*update).pageId);
+            }
+            for (const auto& [page, reservation] : found->second.reservations) {
+                static_cast<void>(reservation);
+                activePageOwners.erase(page);
             }
         }
     }
@@ -659,6 +686,12 @@ RecoveryStats RecoveryManager::recover() {
                 throw WalError(WalErrorKind::CorruptRecord, "Interleaved allocation history is unsupported");
             }
             if (transaction.hasDurableCommit) {
+                for (const auto& [page, reservation] : transaction.reservations) {
+                    static_cast<void>(reservation);
+                    if (page >= minimumStart) {
+                        throw WalError(WalErrorKind::CorruptRecord, "Loser truncation would remove a winner reservation");
+                    }
+                }
                 for (const auto* update : transaction.updates) {
                     if (pageUpdateIdentity(*update).pageId >= minimumStart) {
                         throw WalError(WalErrorKind::CorruptRecord, "Loser truncation would remove a winner page");
@@ -856,6 +889,11 @@ RecoveryStats RecoveryManager::recover() {
     diskManager_.reloadDatabaseHeader();
     for (const auto& [id, transaction] : transactions) {
         static_cast<void>(id);
+        if (transaction.status == TransactionStatus::Committed) {
+            stats.pageReservationsCommitted += transaction.reservations.size();
+        } else if (transaction.status == TransactionStatus::Aborted) {
+            stats.pageReservationsAborted += transaction.reservations.size();
+        }
         recoveredTransactions_.push_back(transaction);
     }
     stats.totalNs = static_cast<std::uint64_t>(
@@ -935,7 +973,8 @@ std::uint64_t RecoveryCoordinator::transactionRecoveryBytes(TransactionId id) co
         : found == contexts_.end() ? nullptr : &found->second;
     if (context == nullptr) return 0;
     return sizeof(RecoveryTransactionContext)
-        + context->pages.size() * sizeof(decltype(context->pages)::value_type);
+        + context->pages.size() * sizeof(decltype(context->pages)::value_type)
+        + context->reservations.size() * sizeof(decltype(context->reservations)::value_type);
 }
 
 std::uint64_t RecoveryCoordinator::peakTransactionRecoveryBytes(TransactionId id) const noexcept {
@@ -1039,7 +1078,8 @@ void RecoveryCoordinator::notePageWriteIntent(
     }
     if (pageId == INVALID_PAGE_ID) throw std::invalid_argument("Write intent has invalid PageId");
     for (const auto& [id, context] : contexts_) {
-        if (id != active_->transactionId && context.pages.contains(pageId)) {
+        if (id != active_->transactionId
+            && (context.pages.contains(pageId) || context.reservations.contains(pageId))) {
             throw std::logic_error("Simultaneous physical page ownership is unsupported");
         }
     }
@@ -1065,13 +1105,22 @@ void RecoveryCoordinator::notePageWriteIntent(
     ++stats_.pagesFirstWritten;
 }
 
-void RecoveryCoordinator::prepareForPhysicalPageAppend() {
-    std::lock_guard lock(contextsMutex_);
-    if (active_ == nullptr) throw std::logic_error("Physical append requires a bound transaction");
-    prepareForPhysicalPageAppend(active_->transactionId);
+void RecoveryCoordinator::prepareForPhysicalPageAppend(PageId expectedPageId) {
+    const auto id = activeTransactionId();
+    prepareForPhysicalPageAppend(id, expectedPageId);
 }
 
 void RecoveryCoordinator::prepareForPhysicalPageAppend(TransactionId id) {
+    const auto expectedPageId = diskManager_.pageCount();
+    prepareForPhysicalPageAppend(id, expectedPageId);
+}
+
+void RecoveryCoordinator::prepareForPhysicalPageAppend(TransactionId id, PageId expectedPageId) {
+    // Never hold the recovery context mutex while querying physical extent.
+    // DiskManager rechecks atomically at append, after the WAL force.
+    if (expectedPageId != diskManager_.pageCount()) {
+        throw std::logic_error("Reservation does not identify the next physical page");
+    }
     std::lock_guard lock(contextsMutex_);
     const auto found = contexts_.find(id);
     if (id == INVALID_TRANSACTION_ID || found == contexts_.end()
@@ -1080,15 +1129,58 @@ void RecoveryCoordinator::prepareForPhysicalPageAppend(TransactionId id) {
         throw std::logic_error("Physical append requires the active bound recovery transaction");
     }
     auto& context = found->second;
+    if (expectedPageId == INVALID_PAGE_ID || expectedPageId == 0
+        || expectedPageId < context.startPageCount) {
+        throw std::logic_error("Invalid next physical page reservation");
+    }
+    for (const auto& [otherId, other] : contexts_) {
+        if (otherId != id && (other.reservations.contains(expectedPageId)
+                             || other.pages.contains(expectedPageId))) {
+            throw std::logic_error("Conflicting active page reservation");
+        }
+    }
     context.safeBoundary = false;
     if (!isValidLsn(context.beginLsn)) recoveryFailPoint("append_before_begin_append");
     ensureBeginLogged(context);
     recoveryFailPoint("append_after_begin_before_force");
+    auto reservation = context.reservations.find(expectedPageId);
+    if (reservation == context.reservations.end()) {
+        if (!context.reservations.empty() && expectedPageId <= context.reservations.rbegin()->first) {
+            throw std::logic_error("Out-of-order physical page reservation");
+        }
+        const auto payload = encodePageReserveLogPayload({expectedPageId,
+            PageAllocationSource::Appended, expectedPageId});
+        const auto lsn = appendTransactionRecord(context, LogRecordType::PageReserve, payload);
+        reservation = context.reservations.emplace(expectedPageId, PageReservationEntry{
+            expectedPageId, lsn, PageAllocationSource::Appended, expectedPageId, false}).first;
+        ++stats_.pageReservationsLogged;
+        stats_.reservationWalBytes += wal_record_layout::HEADER_SIZE + payload.size();
+        context.peakRecoveryBytes = std::max(context.peakRecoveryBytes, transactionRecoveryBytes(id));
+        recoveryFailPoint("append_after_reservation_append");
+    } else if (reservation->second.materializedInRuntime) {
+        throw std::logic_error("Physical page reservation already materialized");
+    }
     const auto durable = logManager_.durableLsn();
-    if (!isValidLsn(durable) || durable < context.beginLsn) {
-        logManager_.flushUpTo(context.beginLsn);
+    if (!isValidLsn(durable) || durable < reservation->second.reserveLsn) {
+        logManager_.flushUpTo(reservation->second.reserveLsn);
+        ++stats_.reservationWalForces;
     }
     recoveryFailPoint("append_after_begin_force");
+    recoveryFailPoint("append_after_reservation_force");
+}
+
+void RecoveryCoordinator::notePhysicalPageAppend(PageId pageId) {
+    std::lock_guard lock(contextsMutex_);
+    if (active_ == nullptr || active_->status != TransactionStatus::Active) {
+        throw std::logic_error("Append confirmation lacks active owner");
+    }
+    const auto found = active_->reservations.find(pageId);
+    const auto durable = logManager_.durableLsn();
+    if (found == active_->reservations.end() || found->second.materializedInRuntime
+        || !isValidLsn(durable) || durable < found->second.reserveLsn) {
+        throw std::logic_error("Append confirmation lacks matching durable reservation");
+    }
+    found->second.materializedInRuntime = true;
 }
 
 void RecoveryCoordinator::ensureBeginLogged(RecoveryTransactionContext& context) {
@@ -1321,6 +1413,7 @@ void RecoveryCoordinator::commitStatement() {
     logManager_.flushUpTo(commitLsn);
     ++stats_.commitFsyncs;
     recoveryFailPoint("after_commit_sync");
+    stats_.pageReservationsCommitted += active_->reservations.size();
     contexts_.erase(active_->transactionId);
     active_ = nullptr;
     contextCount_ = contexts_.size();
@@ -1378,6 +1471,7 @@ void RecoveryCoordinator::rollbackStatement() {
     stats_.rollbackDatabaseWrites += lastRollbackStats_.undoPageWrites;
     diskManager_.reloadDatabaseHeader();
     std::lock_guard lock(contextsMutex_);
+    stats_.pageReservationsAborted += active_->reservations.size();
     contexts_.erase(active_->transactionId);
     active_ = nullptr;
     contextCount_ = contexts_.size();

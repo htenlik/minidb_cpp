@@ -40,7 +40,7 @@ void measure(WalUpdateMode mode, unsigned appendCount) {
             }
         }
         mutations.push_back(nsSince(start));
-        test::require(log.stats().fsyncCalls == (appendCount == 0 ? 0U : 1U),
+        test::require(log.stats().fsyncCalls == appendCount,
                       "Unexpected pre-commit BEGIN force count");
         const auto commitStart = Clock::now();
         recovery.commitStatement();
@@ -49,12 +49,12 @@ void measure(WalUpdateMode mode, unsigned appendCount) {
         test::require(std::count_if(records.begin(), records.end(), [](const auto& r) {
                           return r.type == LogRecordType::Begin;
                       }) == 1, "Allocation benchmark duplicated BEGIN");
-        test::require(log.stats().fsyncCalls == (appendCount == 0 ? 1U : 2U),
+        test::require(log.stats().fsyncCalls == appendCount + 1,
                       "Unexpected transaction WAL fsync count");
     }
     std::cout << "mode=" << walUpdateModeName(mode) << " workload="
               << (appendCount == 0 ? "existing-update" : appendCount == 1 ? "first-append" : "four-appends")
-              << " samples=" << SAMPLES << " begin_records=1 wal_fsyncs=" << (appendCount == 0 ? 1 : 2)
+              << " samples=" << SAMPLES << " begin_records=1 wal_fsyncs=" << appendCount + 1
               << " mutation_or_allocation_p95_ns=" << p95(mutations)
               << " commit_p95_ns=" << p95(commits) << '\n';
 }

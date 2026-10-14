@@ -26,6 +26,16 @@ enum class RedoPolicy : std::uint8_t {
 
 enum class RecoveryTransactionStatus : std::uint8_t { Active, Committed, Aborting, Aborted };
 
+struct PageReservationEntry {
+    PageId pageId = INVALID_PAGE_ID;
+    Lsn reserveLsn = INVALID_LSN;
+    PageAllocationSource source = PageAllocationSource::Appended;
+    std::uint64_t expectedOldPageCount = 0;
+    // False after restart means unknown, not proof that append did not occur.
+    bool materializedInRuntime = false;
+    bool operator==(const PageReservationEntry&) const = default;
+};
+
 // Value-only snapshots: neither sessions nor page/frame pointers belong in ATT.
 struct RecoveryTransactionEntry {
     TransactionId transactionId = INVALID_TRANSACTION_ID;
@@ -37,9 +47,13 @@ struct RecoveryTransactionEntry {
     std::uint64_t clrCount = 0;
     bool hasDurableCommit = false;
     bool hasDurableAbort = false;
+    std::map<PageId, PageReservationEntry> reservations;
 };
 
 struct RecoveryStats {
+    std::uint64_t pageReservationsRecovered = 0;
+    std::uint64_t pageReservationsCommitted = 0;
+    std::uint64_t pageReservationsAborted = 0;
     std::uint64_t analysisTransactions = 0;
     std::uint64_t analysisWinners = 0;
     std::uint64_t analysisLosers = 0;
@@ -129,6 +143,11 @@ struct RecoveryStats {
 };
 
 struct TransactionRuntimeStats {
+    std::uint64_t pageReservationsLogged = 0;
+    std::uint64_t pageReservationsCommitted = 0;
+    std::uint64_t pageReservationsAborted = 0;
+    std::uint64_t reservationWalBytes = 0;
+    std::uint64_t reservationWalForces = 0;
     std::uint64_t transactionsBegun = 0;
     std::uint64_t transactionsCommitted = 0;
     std::uint64_t transactionsRolledBack = 0;
@@ -243,8 +262,10 @@ public:
     void resetStats() noexcept { stats_ = {}; }
 
     void notePageWriteIntent(PageId pageId, const DiskManager::Page& before) override;
-    void prepareForPhysicalPageAppend() override;
+    void prepareForPhysicalPageAppend(PageId expectedPageId) override;
     void prepareForPhysicalPageAppend(TransactionId id);
+    void prepareForPhysicalPageAppend(TransactionId id, PageId expectedPageId);
+    void notePhysicalPageAppend(PageId pageId) override;
     [[nodiscard]] bool needsPreparation() const noexcept override { return activeSignal_.load(); }
     [[nodiscard]] Lsn preparePageForWrite(
         PageId pageId,

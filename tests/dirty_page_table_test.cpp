@@ -24,7 +24,8 @@ private:
 
 class SequencedRecoveryHook final : public minidb::PageRecoveryHook {
 public:
-    void prepareForPhysicalPageAppend() override {} // metadata-only test double; no transaction WAL
+    void prepareForPhysicalPageAppend(minidb::PageId) override {} // metadata-only double; no transaction WAL
+    void notePhysicalPageAppend(minidb::PageId) override {}
     void notePageWriteIntent(minidb::PageId, const minidb::DiskManager::Page&) override {}
     minidb::Lsn preparePageForWrite(
         minidb::PageId, minidb::DiskManager::Page&) override {
