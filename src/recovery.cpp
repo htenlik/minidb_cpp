@@ -817,6 +817,10 @@ RecoveryStats RecoveryManager::recover() {
                 else if (record->type == LogRecordType::PageDeltaUpdate) applyPageDeltaAfter(logical, decodePageDeltaUpdateLogPayload(record->payload));
                 else {
                     const auto delta = decodePageDeltaUpdateV2LogPayload(record->payload);
+                    // Type transitions can move the PageLSN slot. Match normal
+                    // v2 REDO by clearing the old type's slot before applying
+                    // normalized delta bytes, then assign the new type's LSN.
+                    if (supportsPersistentPageLsn(logical)) clearPersistentPageLsn(logical);
                     applyPageDeltaAfter(logical, {delta.pageId, delta.beforePageExisted, delta.ranges});
                 }
                 if (page == 0) {

@@ -105,6 +105,19 @@ void reuse() {
         }
     }
 }
+void repeatedLifecycle() {
+    for (auto mode : {WalUpdateMode::FullPage,WalUpdateMode::ByteRange,WalUpdateMode::Adaptive}) {
+        test::TemporaryDatabase db("reclaim_repeat_lifecycle");
+        { test::ReclaimFixture f(db.path().string(),WalStorageMode::Segmented,mode); f.initialize();
+          static_cast<void>(f.reclaim(30)); require(f.reuse()==30,"Repeated reuse ID");
+          // The fixture owns the only logical reference and explicitly drops
+          // it, then establishes the stable bytes certified for the new action.
+          f.live.erase(30); f.pool.flushAll(); static_cast<void>(f.reclaim(30)); }
+        static_cast<void>(test::recoverReclaim(db.path().string()));
+        test::ReclaimFixture f(db.path().string());
+        require(f.allocator.freePageIds()==std::vector<PageId>({30,20,10}),"Repeated lifecycle duplicates/lost head");
+    }
+}
 void crashes() {
     const char* points[] = {"reclaim_before_append","reclaim_after_append","reclaim_after_wal_force",
         "reclaim_after_free_write","reclaim_after_metadata_write","reclaim_before_database_sync","reclaim_after_database_sync"};
@@ -253,6 +266,6 @@ void model() {
 }
 }
 int main() {
-    try { codec(); directed(); forceOrder(); reuse(); unfinishedReuse(); crashes(); checkpoint(); corruption(); model(); return 0; }
+    try { codec(); directed(); forceOrder(); reuse(); repeatedLifecycle(); unfinishedReuse(); crashes(); checkpoint(); corruption(); model(); return 0; }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
