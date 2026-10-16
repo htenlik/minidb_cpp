@@ -97,6 +97,12 @@ capacity; reopen must supply the same value. This is not a per-startup format to
 
 ## Checkpoint reclamation floors
 
+Restricted PAGE_RECLAIM operations fsync both affected database pages before allowing
+checkpoint publication. Scanned system records bypass user DPT filtering; completed
+effects can be covered by later checkpoint boundaries and normal segment reclamation.
+There is no additional in-flight system ATT/DPT format. See
+[crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
+
 After database sync, durable `CHECKPOINT_END`, and durable control publication, the
 checkpoint critical path is complete. MiniDB++ then synchronously rotates to a fresh
 active segment and separately measures best-effort reclamation. It conservatively

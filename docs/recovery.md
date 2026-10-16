@@ -70,6 +70,11 @@ An entirely unlogged read-only ID may be reused after restart; see
 
 ## Runtime mutation and durability path
 
+Type 14 PAGE_RECLAIM is an independent non-undoable system operation affecting a Free
+Page and page 0. It requires idle exclusive ownership, synchronous data fsync and
+independent two-target REDO, not user DPT filtering. It does not replace truncating
+user rollback. See [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
+
 Physical append first forces transaction BEGIN plus a type-13 PAGE_RESERVE. Recovery
 reconstructs appended-page provenance, but reservations neither enter DPT nor perform
 physical REDO. UNDO and CLR target validation follow their prevLSN without a page CLR.

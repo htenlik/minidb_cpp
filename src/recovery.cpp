@@ -6,6 +6,8 @@
 #include "minidb/checkpoint_log.hpp"
 #include "minidb/log_manager.hpp"
 #include "minidb/page_lsn.hpp"
+#include "minidb/page_reclaim.hpp"
+#include "minidb/page_allocator.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -446,6 +448,14 @@ RecoveryStats RecoveryManager::recover() {
             checkAtt();
             checkedAtt = true;
         }
+        if (record.type == LogRecordType::PageReclaim) {
+            static_cast<void>(decodePageReclaim(record));
+            if (activeTransactionCount != 0) {
+                throw WalError(WalErrorKind::CorruptRecord, "Reclaim overlaps a live user transaction");
+            }
+            redo.push_back(&record); ++stats.reclaimRecords;
+            continue;
+        }
         if (record.lsn < analysisBoundary && !checkpointAtt.contains(record.transactionId)) {
             if (isPageAffectingRecord(record.type)) {
                 validateTransactionRecordPayload(record);
@@ -714,7 +724,114 @@ RecoveryStats RecoveryManager::recover() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - analysisStart).count());
     const auto redoStart = std::chrono::steady_clock::now();
+    // Logical replay state is independent of physical PageLSN skips. It rejects
+    // duplicate insertions even if a later durable reuse masks their disk images.
+    std::map<PageId, DiskManager::Page> reclaimedHistory;
+    std::optional<PageId> historicalHead;
+    Lsn historicalMetadataLsn = INVALID_LSN;
     for (const auto* record : redo) {
+        if (record->type == LogRecordType::PageReclaim) {
+            const auto value = decodePageReclaim(*record);
+            const auto prior = reclaimedHistory.find(value.page);
+            if (prior != reclaimedHistory.end() && (crc32c(prior->second) != value.beforeCrc
+                || std::equal(free_page_layout::MAGIC.begin(), free_page_layout::MAGIC.end(), prior->second.begin()))) {
+                throw WalError(WalErrorKind::CorruptRecord, "Duplicate/stale PAGE_RECLAIM without eligible reuse");
+            }
+            if (historicalHead.has_value() && (*historicalHead != value.head
+                || historicalMetadataLsn != value.beforeMetadataLsn)) {
+                throw WalError(WalErrorKind::CorruptRecord, "Inconsistent reclaim previous-head history");
+            }
+            historicalHead = value.page; historicalMetadataLsn = record->lsn;
+            reclaimedHistory[value.page] = reclaimedPage(value, record->lsn);
+            const auto applied = redoPageReclaim(diskManager_, *record, [&](PageId page, Lsn lsn) {
+                if (!isValidLsn(lsn)) {
+                    // A reused page can be persisted as zero/opaque bytes before
+                    // typed initialization. Prove a later legacy WAL transition
+                    // from this exact Free Page, not merely a matching PageId.
+                    if (page == 0) return false;
+                    DiskManager::Page physical{}; diskManager_.readPhysicalPage(page, physical);
+                    const auto base = reclaimedPage(value, record->lsn);
+                    for (const auto& candidate : scan.records) {
+                        if (candidate.lsn <= record->lsn) continue;
+                        if (candidate.type == LogRecordType::PageUpdate) {
+                            const auto update = decodePageUpdateLogPayload(candidate.payload);
+                            if (update.pageId == page && update.beforePageExisted
+                                && update.beforeImage == base && update.afterImage == physical) return true;
+                        } else if (candidate.type == LogRecordType::PageDeltaUpdate) {
+                            const auto delta = decodePageDeltaUpdateLogPayload(candidate.payload);
+                            if (delta.pageId != page || !delta.beforePageExisted) continue;
+                            bool matches = true;
+                            for (const auto& range : delta.ranges) {
+                                matches = matches && std::equal(range.beforeBytes.begin(), range.beforeBytes.end(),
+                                    base.begin() + range.offset);
+                            }
+                            auto after = base; applyPageDeltaAfter(after, delta);
+                            if (matches && after == physical) return true;
+                        }
+                    }
+                    return false;
+                }
+                const auto found = recordsByLsn.find(lsn);
+                if (found == recordsByLsn.end()) return false;
+                DiskManager::Page actual{}; diskManager_.readPhysicalPage(page, actual);
+                if (found->second->type == LogRecordType::PageReclaim) {
+                    const auto later = decodePageReclaim(*found->second);
+                    return page == 0
+                        ? database_format::deserializeDatabaseHeader(actual).freeListRootPageId == later.page
+                        : later.page == page && actual == reclaimedPage(later, lsn);
+                }
+                const auto& later = *found->second;
+                if (!isPageAffectingRecord(later.type) || pageUpdateIdentity(later).pageId != page) return false;
+                if (later.type == LogRecordType::PageDeltaUpdate || later.type == LogRecordType::PageDeltaUpdateV2) {
+                    const auto ranges = later.type == LogRecordType::PageDeltaUpdate
+                        ? decodePageDeltaUpdateLogPayload(later.payload).ranges
+                        : decodePageDeltaUpdateV2LogPayload(later.payload).ranges;
+                    return std::all_of(ranges.begin(), ranges.end(), [&](const auto& range) {
+                        return std::equal(range.afterBytes.begin(), range.afterBytes.end(), actual.begin() + range.offset);
+                    });
+                }
+                auto expected = later.type == LogRecordType::Compensation
+                    ? decodeCompensationLogPayload(later.payload).compensatedImage
+                    : later.type == LogRecordType::PageUpdate
+                        ? decodePageUpdateLogPayload(later.payload).afterImage
+                        : decodePageUpdateV2LogPayload(later.payload).afterImage;
+                if (later.type != LogRecordType::PageUpdate && supportsPersistentPageLsn(expected)) writePersistentPageLsn(expected, lsn);
+                return actual == expected;
+            });
+            stats.reclaimPageWrites += applied.writes; stats.reclaimRedoSkips += applied.skips;
+            stats.databaseWrites += applied.writes; stats.recoveryPageWrites += applied.writes;
+            continue; // Synchronously persisted system records bypass user DPT filtering.
+        }
+        if (historicalHead.has_value()) {
+            const auto page = pageUpdateIdentity(*record).pageId;
+            auto prior = reclaimedHistory.find(page);
+            // Page 0 needs only the root field projected through chronological
+            // delta records. Reclaimed targets retain full logical page images.
+            DiskManager::Page logical{};
+            if (page == 0) byte_codec::writeUint32(logical, database_format::FREE_LIST_ROOT_PAGE_ID_OFFSET, *historicalHead);
+            else if (prior != reclaimedHistory.end()) logical = prior->second;
+            if (page == 0 || prior != reclaimedHistory.end()) {
+                if (record->type == LogRecordType::PageUpdate) logical = decodePageUpdateLogPayload(record->payload).afterImage;
+                else if (record->type == LogRecordType::PageUpdateV2) logical = decodePageUpdateV2LogPayload(record->payload).afterImage;
+                else if (record->type == LogRecordType::Compensation) logical = decodeCompensationLogPayload(record->payload).compensatedImage;
+                else if (record->type == LogRecordType::PageDeltaUpdate) applyPageDeltaAfter(logical, decodePageDeltaUpdateLogPayload(record->payload));
+                else {
+                    const auto delta = decodePageDeltaUpdateV2LogPayload(record->payload);
+                    // Type transitions can move the PageLSN slot. Match normal
+                    // v2 REDO by clearing the old type's slot before applying
+                    // normalized delta bytes, then assign the new type's LSN.
+                    if (supportsPersistentPageLsn(logical)) clearPersistentPageLsn(logical);
+                    applyPageDeltaAfter(logical, {delta.pageId, delta.beforePageExisted, delta.ranges});
+                }
+                if (page == 0) {
+                    historicalHead = byte_codec::readUint32(logical, database_format::FREE_LIST_ROOT_PAGE_ID_OFFSET);
+                    historicalMetadataLsn = record->lsn;
+                } else {
+                    if (supportsPersistentPageLsn(logical)) writePersistentPageLsn(logical, record->lsn);
+                    prior->second = logical;
+                }
+            }
+        }
         if (fuzzyCheckpoint.has_value()) {
             const auto identity = pageUpdateIdentity(*record);
             const auto foundDpt = dirtyPageTable.find(identity.pageId);
@@ -887,6 +1004,18 @@ RecoveryStats RecoveryManager::recover() {
     stats.multiLoserClrsAppended = stats.clrsAppended;
     stats.transactionsCompletedDuringUndo = stats.abortedTransactions - stats.analysisAborted;
     diskManager_.reloadDatabaseHeader();
+    if (stats.reclaimRecords != 0) {
+        // Pending UNDO can legitimately restore an earlier head than a CLR in
+        // the scanned REDO prefix. Its existing validated compensation chain
+        // is authoritative; always validate physical membership below.
+        if (losers.empty() && historicalHead.has_value()
+            && diskManager_.databaseHeader().freeListRootPageId != *historicalHead) {
+            throw WalError(WalErrorKind::CorruptRecord, "Final free-list head disagrees with system/user replay history");
+        }
+        BufferPoolManager validationPool(diskManager_, 2);
+        PageAllocator validationAllocator(validationPool, diskManager_);
+        validationAllocator.validate();
+    }
     for (const auto& [id, transaction] : transactions) {
         static_cast<void>(id);
         if (transaction.status == TransactionStatus::Committed) {
@@ -987,6 +1116,7 @@ std::uint64_t RecoveryCoordinator::peakTransactionRecoveryBytes(TransactionId id
 
 TransactionId RecoveryCoordinator::beginTransaction() {
     std::lock_guard lock(contextsMutex_);
+    if (allocatorSystemOperation_) throw std::logic_error("Allocator system operation requires restart/completion");
     if (nextTransactionId_ == INVALID_TRANSACTION_ID
         || nextTransactionId_ == std::numeric_limits<TransactionId>::max()) {
         throw std::overflow_error("Transaction ID space is exhausted");
@@ -1043,8 +1173,22 @@ void RecoveryCoordinator::beginStatement() {
 
 bool RecoveryCoordinator::checkpointSafe() const {
     std::lock_guard lock(contextsMutex_);
-    return !rollbackActive_ && std::all_of(contexts_.begin(), contexts_.end(),
+    return !allocatorSystemOperation_ && !rollbackActive_ && std::all_of(contexts_.begin(), contexts_.end(),
         [](const auto& entry) { return entry.second.safeBoundary; });
+}
+
+void RecoveryCoordinator::beginAllocatorSystemOperation() {
+    std::lock_guard lock(contextsMutex_);
+    if (allocatorSystemOperation_ || rollbackActive_ || !contexts_.empty()) {
+        throw std::logic_error("Reclamation requires an idle exclusive recovery context");
+    }
+    allocatorSystemOperation_ = true;
+}
+
+void RecoveryCoordinator::finishAllocatorSystemOperation() {
+    std::lock_guard lock(contextsMutex_);
+    if (!allocatorSystemOperation_) throw std::logic_error("No allocator system operation");
+    allocatorSystemOperation_ = false;
 }
 
 std::vector<CheckpointTransactionEntry> RecoveryCoordinator::checkpointTransactions() const {

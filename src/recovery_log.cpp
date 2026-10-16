@@ -755,6 +755,7 @@ void validateTransactionRecordPayload(const LogRecord& record) {
     case LogRecordType::CheckpointEnd:
     case LogRecordType::FuzzyCheckpointBegin:
     case LogRecordType::FuzzyCheckpointEnd:
+    case LogRecordType::PageReclaim:
         throw WalError(WalErrorKind::CorruptRecord, "Unsupported WAL record type in recovery");
     }
     throw WalError(WalErrorKind::CorruptRecord, "Unknown WAL record type in recovery");

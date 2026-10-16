@@ -18,6 +18,7 @@ add_library(minidb_core
     src/lru_k_replacer.cpp
     src/log_manager.cpp
     src/page_allocator.cpp
+    src/page_reclaim.cpp
     src/page_guard.cpp
     src/page_lsn.cpp
     src/pager.cpp
@@ -114,6 +115,13 @@ target_link_libraries(minidb_client PRIVATE minidb_network)
 add_executable(minidb_bench src/benchmark_main.cpp)
 target_link_libraries(minidb_bench PRIVATE minidb_benchmark)
 enable_testing()
+add_executable(page_reclaim_test tests/page_reclaim_test.cpp)
+target_link_libraries(page_reclaim_test PRIVATE minidb_core)
+add_test(NAME page_reclaim_test COMMAND page_reclaim_test)
+set_tests_properties(page_reclaim_test PROPERTIES TIMEOUT 300)
+add_executable(page_reclaim_benchmark tests/page_reclaim_benchmark.cpp)
+target_link_libraries(page_reclaim_benchmark PRIVATE minidb_core)
+add_test(NAME page_reclaim_benchmark COMMAND page_reclaim_benchmark)
 add_executable(page_reservation_test tests/page_reservation_test.cpp)
 target_link_libraries(page_reservation_test PRIVATE minidb_core)
 add_test(NAME page_reservation_test COMMAND page_reservation_test)

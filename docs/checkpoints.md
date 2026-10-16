@@ -1,5 +1,10 @@
 # Sharp and fuzzy checkpoints
 
+The restricted allocator PAGE_RECLAIM operation is checkpoint-unsafe until both
+after-images are written and database-fsynced. Failed incomplete work requires restart;
+it cannot be omitted from a newly published checkpoint. Completed effects use existing
+sharp/fuzzy retention rules. See [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
+
 MiniDB++ preserves its quiescent **sharp** checkpoint and adds an opt-in, dirty-page
 **fuzzy** checkpoint. Sharp remains the default and its record bytes are unchanged: it
 requires zero pinned frames, flushes every dirty frame, and synchronizes the database.

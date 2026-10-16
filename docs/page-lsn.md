@@ -1,5 +1,10 @@
 # Persistent PageLSN and selective REDO
 
+PAGE_RECLAIM assigns its one record LSN to both the reclaimed Free Page and page 0.
+Replay checks same-page WAL evidence before preserving a later state, and exact later
+WAL transitions for opaque reuse without PageLSN. PageLSN alone is not an allocation
+generation/ownership proof. See [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
+
 MiniDB++ stores the LSN of the newest physical update represented by each active
 database page. Recovery can then avoid rewriting a committed update when the page on
 disk already contains that update or a later one.

@@ -1,5 +1,11 @@
 # Storage architecture
 
+The internal [PageReclaimer system operation](crash-safe-page-reclamation.md) publishes
+certified unreferenced pages through one WAL-backed two-page transformation. It has no
+production eligibility issuer or SQL/rollback call site yet; ordinary PageAllocator
+release and global truncating rollback remain unchanged. It requires idle exclusive
+ownership and synchronously persists both effects before permitting checkpoints.
+
 ## Active and legacy paths
 
 The legacy implementation used an unbounded process-local Pager cache:

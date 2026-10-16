@@ -51,6 +51,7 @@ struct RecoveryTransactionEntry {
 };
 
 struct RecoveryStats {
+    std::uint64_t reclaimRecords = 0, reclaimPageWrites = 0, reclaimRedoSkips = 0;
     std::uint64_t pageReservationsRecovered = 0;
     std::uint64_t pageReservationsCommitted = 0;
     std::uint64_t pageReservationsAborted = 0;
@@ -213,6 +214,11 @@ private:
 };
 
 class RecoveryCoordinator final : public PageRecoveryHook {
+    friend class PageReclaimer;
+    // Synchronous non-undoable system operations require an idle coordinator.
+    // A failed operation remains poisoned until restart, preventing checkpoints.
+    void beginAllocatorSystemOperation();
+    void finishAllocatorSystemOperation();
 public:
     RecoveryCoordinator(
         DiskManager& diskManager,
@@ -299,6 +305,7 @@ private:
     mutable std::recursive_mutex contextsMutex_;
     std::atomic<std::size_t> contextCount_{0};
     std::atomic<bool> activeSignal_{false};
+    bool allocatorSystemOperation_ = false;
     std::atomic<bool> rollbackActive_{false};
     TransactionRuntimeStats stats_{};
     RecoveryStats lastRollbackStats_{};
