@@ -50,6 +50,16 @@ count, and resident-frame count immediately before and after the measured worklo
 
 ## Methodology
 
+`page_reclaim_benchmark` compares ordinary release with explicit durable data completion,
+1/10/100 synchronous system reclaims, reclaim+reuse, and recovery after one interrupted
+two-page publication. It reports p50/p95/p99, throughput, actual WAL bytes/fsyncs, direct
+and buffered database writes, explicit data fsyncs, list length, extent and recovery
+PageLSN skips. System-only records cost 96 bytes each; reuse has additional user WAL.
+Ordinary release's comparison includes commit, buffer flush and data fsync, not just
+the method call. The structural/model tests and benchmark use controlled unreferenced
+physical fixtures, not arbitrary production reachability claims. See
+[crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
+
 `durable_page_append_benchmark` runs 20 samples each of existing-page UPDATE, first
 append, four appends, and 16 allocation-heavy INSERTs in one explicit transaction,
 for FullPage/ByteRange/Adaptive. Setup/header fsyncs are excluded. It reports BEGIN and
