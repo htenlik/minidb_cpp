@@ -95,8 +95,9 @@ DiskManager's cached header is updated by its physical page-0 write.
 For each physical target independently:
 
 1. PageLSN=R: validate the already-completed state and skip.
-2. PageLSN>R: require retained WAL evidence affecting that same physical page, then
-   preserve the later state. A numerical comparison alone is insufficient.
+2. PageLSN>R: require retained WAL evidence affecting that same physical page and
+   matching its full after-image or logged after-ranges, then preserve the later
+   state. A numerical comparison or PageId match alone is insufficient.
 3. Unknown PageLSN on a zero/opaque reused page: require a later full/delta WAL
    transition from this exact canonical Free Page to the exact current bytes before
    skipping. This covers a crash after reuse but before typed initialization.

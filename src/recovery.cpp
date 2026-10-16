@@ -773,11 +773,30 @@ RecoveryStats RecoveryManager::recover() {
                 }
                 const auto found = recordsByLsn.find(lsn);
                 if (found == recordsByLsn.end()) return false;
+                DiskManager::Page actual{}; diskManager_.readPhysicalPage(page, actual);
                 if (found->second->type == LogRecordType::PageReclaim) {
-                    return page == 0 || decodePageReclaim(*found->second).page == page;
+                    const auto later = decodePageReclaim(*found->second);
+                    return page == 0
+                        ? database_format::deserializeDatabaseHeader(actual).freeListRootPageId == later.page
+                        : later.page == page && actual == reclaimedPage(later, lsn);
                 }
-                return isPageAffectingRecord(found->second->type)
-                    && pageUpdateIdentity(*found->second).pageId == page;
+                const auto& later = *found->second;
+                if (!isPageAffectingRecord(later.type) || pageUpdateIdentity(later).pageId != page) return false;
+                if (later.type == LogRecordType::PageDeltaUpdate || later.type == LogRecordType::PageDeltaUpdateV2) {
+                    const auto ranges = later.type == LogRecordType::PageDeltaUpdate
+                        ? decodePageDeltaUpdateLogPayload(later.payload).ranges
+                        : decodePageDeltaUpdateV2LogPayload(later.payload).ranges;
+                    return std::all_of(ranges.begin(), ranges.end(), [&](const auto& range) {
+                        return std::equal(range.afterBytes.begin(), range.afterBytes.end(), actual.begin() + range.offset);
+                    });
+                }
+                auto expected = later.type == LogRecordType::Compensation
+                    ? decodeCompensationLogPayload(later.payload).compensatedImage
+                    : later.type == LogRecordType::PageUpdate
+                        ? decodePageUpdateLogPayload(later.payload).afterImage
+                        : decodePageUpdateV2LogPayload(later.payload).afterImage;
+                if (later.type != LogRecordType::PageUpdate && supportsPersistentPageLsn(expected)) writePersistentPageLsn(expected, lsn);
+                return actual == expected;
             });
             stats.reclaimPageWrites += applied.writes; stats.reclaimRedoSkips += applied.skips;
             stats.databaseWrites += applied.writes; stats.recoveryPageWrites += applied.writes;
@@ -982,6 +1001,13 @@ RecoveryStats RecoveryManager::recover() {
     stats.transactionsCompletedDuringUndo = stats.abortedTransactions - stats.analysisAborted;
     diskManager_.reloadDatabaseHeader();
     if (stats.reclaimRecords != 0) {
+        // Pending UNDO can legitimately restore an earlier head than a CLR in
+        // the scanned REDO prefix. Its existing validated compensation chain
+        // is authoritative; always validate physical membership below.
+        if (losers.empty() && historicalHead.has_value()
+            && diskManager_.databaseHeader().freeListRootPageId != *historicalHead) {
+            throw WalError(WalErrorKind::CorruptRecord, "Final free-list head disagrees with system/user replay history");
+        }
         BufferPoolManager validationPool(diskManager_, 2);
         PageAllocator validationAllocator(validationPool, diskManager_);
         validationAllocator.validate();
