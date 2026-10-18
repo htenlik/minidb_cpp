@@ -53,6 +53,7 @@ void testFuzzyCheckpointDoesNotFlushAndAllowsPins() {
                 "DPT entry has an invalid recLSN/PageLSN relationship");
     }
     const auto writesBefore = server.bufferPool().stats().physicalPageWrites;
+    const auto diskBefore = server.diskManager().writebackStats();
     auto pinned = minidb::requireReadPage(
         server.bufferPool(), beforeDpt.front().pageId, "pin dirty fuzzy-checkpoint page");
     const auto id = server.checkpointManager().checkpoint(minidb::CheckpointMode::Fuzzy);
@@ -65,7 +66,10 @@ void testFuzzyCheckpointDoesNotFlushAndAllowsPins() {
     const auto stats = server.checkpointManager().stats();
     require(stats.fuzzyCheckpointsCompleted == 1
                 && stats.dptEntriesCaptured == beforeDpt.size()
-                && stats.databaseSyncs == 1 // the preceding sharp checkpoint only
+                && stats.databaseSyncs == 1 + (diskBefore.pending() ? 1U : 0U)
+                && stats.fuzzyCheckpointDurabilitySyncs == (diskBefore.pending() ? 1U : 0U)
+                && server.diskManager().writebackStats().databaseSyncsCompleted
+                    == diskBefore.databaseSyncsCompleted + (diskBefore.pending() ? 1U : 0U)
                 && stats.pinnedFramesObserved >= 1,
             "Fuzzy checkpoint statistics are incorrect");
     pinned.drop();
