@@ -8,6 +8,7 @@
 #include "minidb/page_lsn.hpp"
 #include "minidb/page_reclaim.hpp"
 #include "minidb/page_allocator.hpp"
+#include "minidb/reclaim_lineage.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -724,6 +725,12 @@ RecoveryStats RecoveryManager::recover() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - analysisStart).count());
     const auto redoStart = std::chrono::steady_clock::now();
+    const ReclaimLineageValidator lineage(scan.records);
+    stats.reclaimLineagesValidated=lineage.stats().pages;
+    stats.reclaimTransitiveTransitions=lineage.stats().transitions;
+    stats.reclaimClrTransitions=lineage.stats().clrs;
+    stats.reclaimOpaqueTransitions=lineage.stats().opaque;
+    stats.reclaimLineageIndexBytes=lineage.stats().accountedBytes;
     // Logical replay state is independent of physical PageLSN skips. It rejects
     // duplicate insertions even if a later durable reuse masks their disk images.
     std::map<PageId, DiskManager::Page> reclaimedHistory;
@@ -744,33 +751,13 @@ RecoveryStats RecoveryManager::recover() {
             historicalHead = value.page; historicalMetadataLsn = record->lsn;
             reclaimedHistory[value.page] = reclaimedPage(value, record->lsn);
             const auto applied = redoPageReclaim(diskManager_, *record, [&](PageId page, Lsn lsn) {
-                if (!isValidLsn(lsn)) {
-                    // A reused page can be persisted as zero/opaque bytes before
-                    // typed initialization. Prove a later legacy WAL transition
-                    // from this exact Free Page, not merely a matching PageId.
-                    if (page == 0) return false;
-                    DiskManager::Page physical{}; diskManager_.readPhysicalPage(page, physical);
-                    const auto base = reclaimedPage(value, record->lsn);
-                    for (const auto& candidate : scan.records) {
-                        if (candidate.lsn <= record->lsn) continue;
-                        if (candidate.type == LogRecordType::PageUpdate) {
-                            const auto update = decodePageUpdateLogPayload(candidate.payload);
-                            if (update.pageId == page && update.beforePageExisted
-                                && update.beforeImage == base && update.afterImage == physical) return true;
-                        } else if (candidate.type == LogRecordType::PageDeltaUpdate) {
-                            const auto delta = decodePageDeltaUpdateLogPayload(candidate.payload);
-                            if (delta.pageId != page || !delta.beforePageExisted) continue;
-                            bool matches = true;
-                            for (const auto& range : delta.ranges) {
-                                matches = matches && std::equal(range.beforeBytes.begin(), range.beforeBytes.end(),
-                                    base.begin() + range.offset);
-                            }
-                            auto after = base; applyPageDeltaAfter(after, delta);
-                            if (matches && after == physical) return true;
-                        }
-                    }
-                    return false;
+                if (page != 0) {
+                    DiskManager::Page physical{}; diskManager_.readPhysicalPage(page,physical);
+                    const bool proven=lineage.provesLater(page,record->lsn,physical);
+                    if(proven)++stats.reclaimLaterStateSkips;
+                    return proven;
                 }
+                if (!isValidLsn(lsn)) return false;
                 const auto found = recordsByLsn.find(lsn);
                 if (found == recordsByLsn.end()) return false;
                 DiskManager::Page actual{}; diskManager_.readPhysicalPage(page, actual);
@@ -894,11 +881,13 @@ RecoveryStats RecoveryManager::recover() {
         } else if (record->type == LogRecordType::PageDeltaUpdate) {
             const auto update = decodePageDeltaUpdateLogPayload(record->payload);
             DiskManager::Page page{};
-            if (update.pageId < diskManager_.pageCount()) {
+            const auto proven=lineage.afterImage(update.pageId,record->lsn);
+            if(proven)page=*proven;
+            else if (update.pageId < diskManager_.pageCount()) {
                 diskManager_.readPhysicalPage(update.pageId, page);
                 ++stats.recoveryPageReads;
             }
-            applyPageDeltaAfter(page, update);
+            if(!proven)applyPageDeltaAfter(page, update);
             diskManager_.writePhysicalPage(update.pageId, page);
             ++stats.legacyRedoRecords;
         } else {
@@ -950,9 +939,13 @@ RecoveryStats RecoveryManager::recover() {
                     current = update.afterImage;
                 } else {
                     const auto update = decodePageDeltaUpdateV2LogPayload(record->payload);
-                    clearPersistentPageLsn(current);
-                    applyPageDeltaAfter(current, PageDeltaUpdateLogPayload{
-                        update.pageId, update.beforePageExisted, update.ranges});
+                    const auto proven=lineage.afterImage(pageId,record->lsn);
+                    if(proven)current=*proven;
+                    else {
+                        clearPersistentPageLsn(current);
+                        applyPageDeltaAfter(current, PageDeltaUpdateLogPayload{
+                            update.pageId, update.beforePageExisted, update.ranges});
+                    }
                 }
                 writePersistentPageLsn(current, record->lsn);
                 diskManager_.writePhysicalPage(pageId, current);

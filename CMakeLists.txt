@@ -19,6 +19,7 @@ add_library(minidb_core
     src/log_manager.cpp
     src/page_allocator.cpp
     src/page_reclaim.cpp
+    src/reclaim_lineage.cpp
     src/page_guard.cpp
     src/page_lsn.cpp
     src/pager.cpp
