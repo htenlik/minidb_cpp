@@ -1,5 +1,10 @@
 # Compensation log records and restartable UNDO
 
+A CLR-restored Free Page is a new physical state with the CLR's own PageLSN.
+Later reuse must derive from that state, not directly from the older reclaim image.
+[Reclaim lineage validation](crash-safe-page-reclamation.md#transitive-physical-lineage)
+checks this relationship without changing CLR bytes or restarting completed UNDO.
+
 MiniDB++ records startup loser and live SQL ROLLBACK compensation in the WAL. A compensation log
 record (CLR) is a physical, REDO-able description of the page after one original
 update has been undone. A CLR is never itself undone. When UNDO reaches a CLR, it

@@ -1,5 +1,11 @@
 # Write-ahead log and recovery records
 
+[Transitive reclaim/reuse recovery](crash-safe-page-reclamation.md#transitive-physical-lineage)
+uses existing types 2/8/9/10/5/14 only. It adds no WAL payload, allocation epoch or
+database format. Required retained records must establish full before/after lineage;
+an authoritative checkpoint may exclude completed older history. Owned rollback
+remains unmerged and inactive.
+
 MiniDB++ uses a versioned sidecar write-ahead log with log sequence numbers (LSNs),
 buffered append and `fsync` durability, safe scanning, write-ahead ordering, implicit
 and explicit durable transaction commit, and startup REDO/UNDO. Full-page physical updates remain the

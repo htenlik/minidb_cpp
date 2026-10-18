@@ -1,5 +1,24 @@
 # Benchmarking and storage observability
 
+## Reclaim lineage recovery experiment
+
+Build and run `reclaim_lineage_benchmark` in Release. It exercises 1/10/100/1000
+reclaim/reuse cycles, zero/one/two intermediate CLR/reuse cycles, unrelated-page WAL
+traffic and both single-file/segmented WAL. A cycle is not one WAL record: the output
+reports the actual scanned records and validated transitions. Every measured history
+must recover successfully. Columns include recovery microseconds, lineage/CLR steps,
+accounted lineage and LSN-index bytes, PageLSN skips and physical database writes.
+Memory accounting excludes scan payloads, allocator/node overhead and RSS.
+
+One local AppleClang 21 Release run (other validation workloads running concurrently)
+measured segmented 1000-cycle recovery at 153/716/1271 ms for zero/one/two CLR cycles,
+with 6,997/12,997/18,997 records and 4.18/8.35/12.53 MB accounted lineage storage.
+These are observations, not throughput promises or isolated-machine comparisons.
+
+`reclaim_lineage_test --frame-diagnostic` is a separate, currently failing diagnostic
+for clean resident-frame LSN retirement after WAL reclamation. It must not be reported
+as repaired by the lineage experiment; see [the limitation](crash-safe-page-reclamation.md#retention-accounting-and-remaining-boundary).
+
 The harness covers the legacy Pager, bounded buffer pool, storage/index/SQL paths,
 standalone WAL append/force behavior, durable transaction and recovery paths, sharp and
 fuzzy checkpoints, segment rotation/reclamation, and full-page versus physical byte-range

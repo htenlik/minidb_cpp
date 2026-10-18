@@ -1,5 +1,10 @@
 # Crash recovery and transaction chains
 
+Reclaimed-page REDO uses a [transitive physical lineage validator](crash-safe-page-reclamation.md#transitive-physical-lineage)
+to prove later full-page states through reuse and CLRs. For these targets, selected
+delta REDO uses the proven transaction base, not an unrelated current representation.
+Transaction classification and legacy truncating rollback are unchanged.
+
 Each mutating statement is an implicit atomic recovery unit unless grouped by SQL
 `BEGIN`/`COMMIT`/`ROLLBACK`. An explicit scope is one recovery unit spanning all its
 statements. Concurrent readers produce no WAL transaction context. All write-capable
