@@ -254,6 +254,10 @@ void crashes() {
             try {
                 test::WritebackFixture f(db.path().string(), mode, storage);
                 test::StableImage stable(db.path().string(), shadow.path().string()); stable.attach(f.disk); f.disk.sync();
+                // Start with a real older authoritative generation and, for
+                // segmented WAL, actual reclamation. A torn new control slot
+                // must fall back without depending on already-deleted history.
+                for (unsigned c = 0; c < 4; ++c) static_cast<void>(f.checkpoint());
                 f.root(6); f.update(1, 0xCD); f.pool.flushAll();
                 ::setenv("MINIDB_FAILPOINT", point, 1);
                 for (unsigned c = 0; c < 4; ++c) static_cast<void>(f.checkpoint());
@@ -262,7 +266,14 @@ void crashes() {
         }
         hardExit(child); test::StableImage(db.path().string(), shadow.path().string()).restore();
         test::WritebackFixture f(db.path().string(), mode, storage);
-        f.verify({0xCD, 0, 0, 0, 0}, 6); ++cases;
+        f.verify({0xCD, 0, 0, 0, 0}, 6);
+        const bool newControl = std::string_view(point) == "fuzzy_checkpoint_after_control_sync"
+            || std::string_view(point) == "fuzzy_checkpoint_before_reclamation"
+            || std::string_view(point).starts_with("wal_reclaim")
+            || std::string_view(point) == "fuzzy_checkpoint_after_reclamation";
+        require(f.startup.checkpointUsed && f.startup.checkpointGeneration == (newControl ? 5U : 4U),
+            "Restart selected wrong checkpoint authority/fallback");
+        ++cases;
        }
     std::cout << "hard-crash checkpoint matrix=" << cases << '\n';
 }
