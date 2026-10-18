@@ -51,6 +51,9 @@ struct RecoveryTransactionEntry {
 };
 
 struct RecoveryStats {
+    std::uint64_t reclaimLineagesValidated = 0, reclaimTransitiveTransitions = 0;
+    std::uint64_t reclaimClrTransitions = 0, reclaimOpaqueTransitions = 0;
+    std::uint64_t reclaimLineageIndexBytes = 0, reclaimLaterStateSkips = 0;
     std::uint64_t reclaimRecords = 0, reclaimPageWrites = 0, reclaimRedoSkips = 0;
     std::uint64_t pageReservationsRecovered = 0;
     std::uint64_t pageReservationsCommitted = 0;

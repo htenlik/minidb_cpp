@@ -1,5 +1,12 @@
 # Persistent PageLSN and selective REDO
 
+For reclaimed pages, a larger numeric PageLSN alone is not a skip proof. The
+[lineage validator](crash-safe-page-reclamation.md#transitive-physical-lineage)
+requires the exact retained transition and full after-image. Opaque reuse has no
+interpretable slot and requires a full-byte transitive proof instead. CLR Free
+Pages carry the CLR LSN, and type transitions use the new type's slot; normalization
+is limited to fields explicitly excluded by V2/CLR encoding.
+
 PAGE_RECLAIM assigns its one record LSN to both the reclaimed Free Page and page 0.
 Replay checks same-page WAL evidence before preserving a later state, and exact later
 WAL transitions for opaque reuse without PageLSN. PageLSN alone is not an allocation

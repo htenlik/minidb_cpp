@@ -19,6 +19,7 @@ add_library(minidb_core
     src/log_manager.cpp
     src/page_allocator.cpp
     src/page_reclaim.cpp
+    src/reclaim_lineage.cpp
     src/page_guard.cpp
     src/page_lsn.cpp
     src/pager.cpp
@@ -115,6 +116,14 @@ target_link_libraries(minidb_client PRIVATE minidb_network)
 add_executable(minidb_bench src/benchmark_main.cpp)
 target_link_libraries(minidb_bench PRIVATE minidb_benchmark)
 enable_testing()
+add_executable(reclaim_lineage_test tests/reclaim_lineage_test.cpp)
+add_executable(reclaim_lineage_benchmark tests/reclaim_lineage_benchmark.cpp)
+target_link_libraries(reclaim_lineage_benchmark PRIVATE minidb_core)
+target_link_libraries(reclaim_lineage_test PRIVATE minidb_core)
+add_test(NAME reclaim_lineage_test COMMAND reclaim_lineage_test)
+add_test(NAME reclaim_lineage_model_test COMMAND reclaim_lineage_test --model)
+set_tests_properties(reclaim_lineage_test reclaim_lineage_model_test PROPERTIES TIMEOUT 300)
+set_tests_properties(reclaim_lineage_model_test PROPERTIES TIMEOUT 900)
 add_executable(page_reclaim_test tests/page_reclaim_test.cpp)
 target_link_libraries(page_reclaim_test PRIVATE minidb_core)
 add_test(NAME page_reclaim_test COMMAND page_reclaim_test)

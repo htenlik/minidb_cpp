@@ -147,7 +147,89 @@ cost is 96 WAL bytes, one WAL force, two direct page writes and one data fsync, 
 any preceding committed-frame flushes. Reuse has its separate user WAL costs.
 Percentiles and throughput are local measurements, never performance assertions.
 
-Replay's diagnostic shadow stores one page image per reclaimed target plus head
-state. Opaque-reuse evidence may scan retained WAL; this is a conservative baseline,
-not a bounded-memory or optimized recovery index. Torn-page repair, general ownership
-epochs, automated loser reclamation and multi-writer publication remain out of scope.
+## Transitive physical lineage
+
+The original opaque-state check recognized only a direct transition from the
+canonical reclaim image to the current bytes. It incorrectly rejected:
+
+```text
+reclaim R -> reuse U -> abort/CLR C -> opaque reuse V -> STEAL -> crash
+```
+
+C restores Free Page contents with **PageLSN=C**, not R. V's original before-image
+therefore refers to C. Comparing it directly to R loses a legitimate intermediate
+state. A second problem arises if an older V2 delta is applied to a newer opaque
+physical representation with no PageLSN slot.
+
+`ReclaimLineageValidator` discovers targets and indexes retained records by reclaimed
+PageId in two linear passes, then validates each lineage before physical REDO. Its first
+PAGE_RECLAIM supplies the canonical full Free Page anchor. Subsequent full/range
+updates must agree with the transaction's original before-state. Logging is
+cumulative from that original state, **not** from the previous update record.
+V2 records additionally require the matching original PageLSN and normalize only
+the slot explicitly excluded by that encoding. Different page types use different
+slots; after-images receive the new operation's LSN in the new type's slot.
+
+A CLR must name an earlier validated same-owner update and its exact undoNextLSN.
+Its normalized compensation image must restore the transaction base, and its own
+LSN becomes the new physical Free Page identity. A later transaction can therefore
+prove reuse from this CLR state. Later reclaim generations require a non-Free
+intervening state matching their logged before-CRC **and** PageLSN. Consecutive
+reclaims without reuse remain corruption.
+
+For a typed physical state, lookup uses its exact record boundary and compares the
+entire derived after-image. For an opaque state, CRC32C is only a bucket index:
+the entire reconstructed page must match a later validated state descended from
+the reclaim. Neither zero bytes, PageId equality, CRC alone nor a numerical LSN
+comparison authorizes a skip. Invalid before-state or CLR lineage reports its
+PageId and failing LSN; it is never silently repaired.
+
+Existing winner/loser selection, chronological page-0 head shadow, CLR replay,
+subsequent loser UNDO, DPT filtering and final free-list validation remain in place.
+Selected REDO delta records for these targets obtain their full after-image from
+the proven transaction base rather than patching an unrelated later representation.
+This does not REDO every loser update or change the recovery algorithm to ARIES.
+Metadata head validation remains independent of physical skip decisions and retains
+its existing checks. Catalog and unrelated metadata are not repurposed.
+
+## Retention, accounting and remaining boundary
+
+Only the required recovery window is indexed. A durable authoritative checkpoint
+can legitimately exclude old reclaims and their ancestry; those excluded records
+are not revalidated. If a reclaim is in the window, its required later transitions
+must be present and consistent. No persistent epoch, sidecar, WAL type or page
+format is added, and no required WAL is retained forever as a workaround.
+
+Index storage is O(R + 4096*T), for indexed transitions R and transaction/page bases
+T. Bases are shared by a transaction's cumulative updates and CLRs, not copied for
+every record. Typed lookup is logarithmic; opaque CRC buckets filter candidates
+before exact page comparison. CRC collisions may increase candidate work but cannot
+authorize a false match. There is no fixed-byte recovery-memory cap.
+
+Counters define `reclaimLineagesValidated` as indexed target pages,
+`reclaimTransitiveTransitions` as validated user/CLR transitions after an anchor,
+`reclaimClrTransitions`/`reclaimOpaqueTransitions` as the respective transition
+subsets, and `reclaimLaterStateSkips` as accepted target skip proofs.
+`reclaimLineageIndexBytes` accounts base images, map values, opaque LSN entries and
+temporary record pointers; it excludes allocator/tree-node/control-block overhead,
+scan-owned payloads and the pre-existing diagnostic shadow. It is not RSS.
+Failed recovery throws instead of returning an invented validation-failure count.
+
+`reclaim_lineage_test` preserves the exact pre-fix hard-crash reproducer, compares
+both REDO policies byte-for-byte, and tests three WAL modes, both WAL stores,
+opaque/slotted/B+ leaf/internal representations, linked PageIds and corrupt
+before/after/CLR evidence. Its model completes 30,000 page lifecycle events over
+four seeds (0x123A31, 0xC0FFEE, 0xDE1A, 0xA110C), with 400 user crashes, 400 interrupted
+recovery crashes, and sharp/fuzzy checkpoint publication plus real segment deletion.
+Checkpoint model boundaries deliberately close/reopen storage to test durable state.
+
+The independent command `reclaim_lineage_test --frame-diagnostic` still reports
+`Buffer frame pageLSN is unknown to its WAL provider`: a clean resident frame can
+retain a volatile LSN after checkpoint reclamation removes its record. This diagnostic
+is not a passing correctness assertion or a repair. It is explicitly separate from
+the lineage tests and leaves buffer validation unchanged. Live-frame retirement
+requires a separate change before owned rollback can resume.
+
+Torn-page repair, ownership epochs, automated loser reclamation, owned rollback
+activation and multi-writer publication remain out of scope. Both unmerged allocation
+branches remain preserved; production still uses legacy truncating rollback.
