@@ -161,8 +161,8 @@ therefore refers to C. Comparing it directly to R loses a legitimate intermediat
 state. A second problem arises if an older V2 delta is applied to a newer opaque
 physical representation with no PageLSN slot.
 
-`ReclaimLineageValidator` now indexes retained records by reclaimed PageId in one
-scan and validates each chronological lineage before physical REDO. Its first
+`ReclaimLineageValidator` discovers targets and indexes retained records by reclaimed
+PageId in two linear passes, then validates each lineage before physical REDO. Its first
 PAGE_RECLAIM supplies the canonical full Free Page anchor. Subsequent full/range
 updates must agree with the transaction's original before-state. Logging is
 cumulative from that original state, **not** from the previous update record.

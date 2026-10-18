@@ -251,6 +251,26 @@ void linkedLineages() {
             require(physical==reclaimedPage({expected[i],i+1<expected.size()?expected[i+1]:INVALID_PAGE_ID,f.disk.pageCount()},readPersistentPageLsn(physical)),"Linked canonical bytes differ");}
       }
 }
+void interruptedClrReplay() {
+    for(auto mode:{WalUpdateMode::FullPage,WalUpdateMode::ByteRange,WalUpdateMode::Adaptive})
+      for(auto storage:{WalStorageMode::LegacySingleFile,WalStorageMode::Segmented}) {
+        test::TemporaryDatabase db("lineage_interrupted_clr_replay");
+        {test::ReclaimFixture f(db.path().string(),storage,mode);f.initialize();static_cast<void>(f.reclaim(30));static_cast<void>(f.reuse(false));}
+        auto child=::fork();
+        if(child==0){test::ReclaimFixture f(db.path().string(),storage,mode);f.recovery.beginStatement();
+            require(f.allocator.allocatePage()==30,"Interrupted replay identity");initialize(f,30,0,0xBC);f.pool.flushAll();f.disk.sync();::_exit(86);}
+        waitCrash(child);
+        child=::fork();
+        if(child==0){::setenv("MINIDB_FAILPOINT","recovery_after_redo_page",1);
+            static_cast<void>(recover(db.path().string(),storage,RedoPolicy::AlwaysRedo));::_exit(99);}
+        waitCrash(child);
+        child=::fork();
+        if(child==0){::setenv("MINIDB_FAILPOINT","recovery_after_clr_wal_force",1);
+            static_cast<void>(recover(db.path().string(),storage,RedoPolicy::PageLsnSelectiveRedo));::_exit(99);}
+        waitCrash(child);static_cast<void>(recover(db.path().string(),storage,RedoPolicy::PageLsnSelectiveRedo));
+        test::ReclaimFixture f(db.path().string(),storage,mode);verifyFree(f);
+    }
+}
 void frameDiagnostic() {
     test::TemporaryDatabase db("frame_retention_diagnostic");test::ReclaimFixture f(db.path().string());f.initialize();
     static_cast<void>(f.reclaim(30));static_cast<void>(f.reuse(true));f.pool.flushAll();
@@ -263,7 +283,7 @@ void frameDiagnostic() {
 int main(int argc,char** argv) {
     try {if(argc==2&&std::string_view(argv[1])=="--model")model();
         else if(argc==2&&std::string_view(argv[1])=="--frame-diagnostic")frameDiagnostic();
-        else{originalReproducer();matrix();negativeEvidence();corruptPhysicalBytes();crashPrefixes();linkedLineages();}
+        else{originalReproducer();matrix();negativeEvidence();corruptPhysicalBytes();crashPrefixes();linkedLineages();interruptedClrReplay();}
         std::cout<<"Transitive opaque reuse recovery passed\n";}
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }
