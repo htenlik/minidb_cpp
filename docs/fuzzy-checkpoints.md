@@ -5,6 +5,11 @@ dirty buffer frame and synchronizes `database.db` before publishing the checkpoi
 `fuzzy` is opt-in: it publishes recovery metadata while dirty page bytes remain in the
 buffer pool. Both modes use the existing double-slot `.ckpt` control format.
 
+Before publication, a [conditional database synchronization fence](physical-writeback-durability.md)
+covers accepted physical writes since the last database fsync, including evictions
+and direct page-0 writes. It does not write still-dirty buffer pages or change their
+DPT entries. No pending physical writes means no additional database fsync.
+
 This is a deliberately serial subset of ideas used by ARIES-style recovery. The
 [original ARIES paper record](https://research.ibm.com/publications/aries-a-transaction-recovery-method-supporting-fine-granularity-locking-and-partial-rollbacks-using-write-ahead-logging)
 describes a broader protocol with transaction and dirty-page tables, PageLSNs, fuzzy
@@ -93,8 +98,9 @@ read-only and unlogged contexts are excluded. See
 
 Fuzzy publication appends BEGIN, snapshots the DPT/live ATT, appends END, fsyncs WAL
 through END, then writes and fsyncs the inactive control slot. Segment rotation and
-reclamation follow publication. It does not call `flushAll()`, write database pages, or
-fsync `database.db`. Pinned frames are allowed because only frame recovery metadata is
+reclamation follow publication. It does not call `flushAll()` or write dirty database
+pages. It conditionally fsyncs already-written database state **before** BEGIN/control
+publication. Pinned frames are allowed because only frame recovery metadata is
 copied. Failures before control durability leave the prior generation authoritative;
 reclamation failures can only retain extra history.
 

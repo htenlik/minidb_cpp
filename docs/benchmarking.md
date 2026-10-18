@@ -1,5 +1,50 @@
 # Benchmarking and storage observability
 
+## Physical writeback frontier experiment
+
+Build/run `physical_writeback_benchmark` in Release, or use `--smoke` for three
+samples per case. The full run takes 30 checkpoints per deterministic workload,
+Adaptive WAL, 9000-byte segmented payloads and 128 buffer frames (one for the
+eviction case). Pending writes are prepared before timing. No test shadow-copy
+observer is installed in this benchmark. Timed checkpoints do not flush buffers.
+
+Observed on local macOS arm64, AppleClang 21 Release, while other verification
+jobs were active. Microseconds below are empirical nearest-rank quantiles; with
+30 samples p99 is the maximum, not a strong tail-latency estimate.
+
+| Case | p50 us | p95 us | p99 us | DB fsyncs | WAL fsyncs | Checkpoint DB writes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| No pending writeback | 498.541 | 824.542 | 1104.83 | 0 | 90 | 0 |
+| One clean resident writeback | 533.875 | 733.917 | 913.666 | 30 | 90 | 0 |
+| 100 distinct page writebacks | 844.750 | 1387.42 | 3113.17 | 30 | 90 | 0 |
+| Evicted writeback | 524.417 | 550.458 | 1099.46 | 30 | 90 | 0 |
+| Direct page-0 writeback | 522.708 | 552.375 | 615.542 | 30 | 90 | 0 |
+| One written + one still-dirty page | 1096.38 | 2506.50 | 2509.46 | 30 | 90 | 0 |
+
+| Case | Mean pending epoch distance | Mean DPT entries | Retained WAL bytes | Segments deleted | Reopen/recovery ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| No pending | 0 | 0 | 640 | 28 | 0.437459 |
+| One clean | 1 | 0 | 1160 | 28 | 0.624917 |
+| 100 writebacks | 100 | 0 | 15360 | 58 | 1.203000 |
+| Evicted | 1 | 0 | 1160 | 28 | 0.445500 |
+| Page zero | 1 | 0 | 1048 | 28 | 0.519375 |
+| Mixed dirty | 1 | 1 | 23888 | 0 | 4.783580 |
+
+Counts cover the 30 timed checkpoints, not setup. WAL counts include checkpoint
+forces and segment rotation syncs. Recovery timing includes opening/recovery and
+teardown of the test fixture, not a pure REDO-loop measurement. Retained size and
+deletions are observed before closing the first fixture. The mixed case deliberately
+keeps a dirty period open, so its recLSN protects history; other cases demonstrate
+real bounded reclamation. A later sharp checkpoint can flush that dirty period.
+
+These cases measure the corrected conditional fence, not a claimed speedup over
+the unsafe implementation. Some fuzzy checkpoints now incur database fsync; no
+pending writebacks incur none, and 100 writes share one. Timing differences are
+not isolated fsync-cost estimates or universal performance claims. See
+[physical writeback durability](physical-writeback-durability.md) for the protocol
+and [buffer WAL retention](buffer-wal-retention.md) for the intentionally remaining
+clean-frame PageLSN defect.
+
 ## Reclaim lineage recovery experiment
 
 Build and run `reclaim_lineage_benchmark` in Release. It exercises 1/10/100/1000

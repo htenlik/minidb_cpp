@@ -1,5 +1,9 @@
 # Storage architecture
 
+DiskManager owns the [volatile physical-writeback durability frontier](physical-writeback-durability.md).
+Its atomic conditional sync lets fuzzy checkpoints protect clean/evicted and direct
+page-0 writes without flushing still-dirty buffer frames or changing persistent formats.
+
 The internal [PageReclaimer system operation](crash-safe-page-reclamation.md) publishes
 certified unreferenced pages through one WAL-backed two-page transformation. It has no
 production eligibility issuer or SQL/rollback call site yet; ordinary PageAllocator

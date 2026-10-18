@@ -1,5 +1,9 @@
 # Sharp and fuzzy checkpoints
 
+Fuzzy publication first [synchronizes pending physical writebacks](physical-writeback-durability.md)
+when necessary. This protects clean/evicted pages and direct metadata without
+flushing still-dirty frames; sharp checkpoints retain their existing one-sync path.
+
 The restricted allocator PAGE_RECLAIM operation is checkpoint-unsafe until both
 after-images are written and database-fsynced. Failed incomplete work requires restart;
 it cannot be omitted from a newly published checkpoint. Completed effects use existing

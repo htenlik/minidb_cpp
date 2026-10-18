@@ -1,5 +1,10 @@
 # Bounded buffer pool and LRU-K
 
+Clean after writeback does not imply database-fsynced. The
+[physical durability frontier](physical-writeback-durability.md) lives in DiskManager,
+so evicted writes remain covered. The separate [volatile clean-frame PageLSN
+retirement defect](buffer-wal-retention.md) remains unresolved.
+
 The synchronized fixed-capacity BufferPoolManager and latched guards are the active backend
 for PageAllocator, TupleStore,
 PersistentBPlusTree, Catalog, Table, SQL, and TCP. The legacy Pager remains an explicitly

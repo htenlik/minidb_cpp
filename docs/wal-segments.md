@@ -1,5 +1,9 @@
 # Segmented WAL lifecycle
 
+Fuzzy checkpoints [fsync pending physical database writes](physical-writeback-durability.md)
+before becoming authoritative and reclaiming segments. Still-dirty DPT and live ATT
+dependencies retain their existing floor. No WAL/checkpoint encoding changes.
+
 MiniDB++ stores the active write-ahead log as one monotonically advancing
 logical byte stream split across files. PostgreSQL's
 [WAL configuration](https://www.postgresql.org/docs/current/wal-configuration.html)
