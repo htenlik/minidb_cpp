@@ -114,7 +114,8 @@ ReclaimLineageValidator::ReclaimLineageValidator(const std::vector<LogRecord>& r
                         && original->second.record->prevLsn==v.undoNextLsn
                         && v.pageSupportsLsn==supportsPersistentPageLsn(*base)
                         && v.compensatedImage==normalized(*base);
-                    if(matches)++stats_.clrs;break;
+                    if(matches)++stats_.clrs;
+                    break;
                 }
                 default:break;
                 }

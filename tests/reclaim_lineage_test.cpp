@@ -86,11 +86,14 @@ void matrix() {
                  initialize(f,30,n%4,n+1);f.recovery.prepareStatement();f.recovery.rollbackStatement();verifyFree(f);}}
             const auto child=::fork();
             if(child==0){test::ReclaimFixture f(db.path().string(),storage,mode);f.recovery.beginStatement();
-                require(f.allocator.allocatePage()==30,"Final reuse identity");initialize(f,30,kind,0xBC);
+                require(f.allocator.allocatePage()==30,"Final reuse identity");initialize(f,30,0,0xBC);
                 // An intermediate opaque write is intentional, followed by a
                 // typed initialization on the same transaction/base.
-                f.recovery.prepareStatement();f.pool.flushAll();f.disk.sync();
-                if(commit)f.recovery.commitStatement();::_exit(86);}
+                f.recovery.prepareStatement();f.pool.flushAll();
+                if(kind!=0){initialize(f,30,kind,0xBC);f.recovery.prepareStatement();f.pool.flushAll();}
+                f.disk.sync();
+                if(commit)f.recovery.commitStatement();
+                ::_exit(86);}
             waitCrash(child);
             static_cast<void>(recover(db.path().string(),storage,policy));
             static_cast<void>(recover(db.path().string(),storage,policy));
@@ -241,7 +244,8 @@ void linkedLineages() {
         if(child==0){test::ReclaimFixture f(db.path().string(),WalStorageMode::Segmented,mode);f.recovery.beginStatement();
             require(f.allocator.allocatePage()==40&&f.allocator.allocatePage()==30,"Linked reuse order");
             initialize(f,40,0,0xBB);initialize(f,30,1,0xCC);f.pool.flushAll();f.disk.sync();
-            if(commit)f.recovery.commitStatement();::_exit(86);}
+            if(commit)f.recovery.commitStatement();
+            ::_exit(86);}
         waitCrash(child);static_cast<void>(recover(db.path().string(),WalStorageMode::Segmented,RedoPolicy::PageLsnSelectiveRedo));
         test::ReclaimFixture f(db.path().string(),WalStorageMode::Segmented,mode);
         const auto expected=commit?std::vector<PageId>{20,10}:std::vector<PageId>{40,30,20,10};
