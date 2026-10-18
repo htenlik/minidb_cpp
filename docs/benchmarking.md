@@ -12,7 +12,9 @@ Memory accounting excludes scan payloads, allocator/node overhead and RSS.
 
 One local AppleClang 21 Release run (other validation workloads running concurrently)
 measured segmented 1000-cycle recovery at 153/716/1271 ms for zero/one/two CLR cycles,
-with 6,997/12,997/18,997 records and 4.18/8.35/12.53 MB accounted lineage storage.
+with 7,998/13,998/19,998 scanned records and 4.18/8.35/12.53 MB accounted lineage storage.
+The separate `records_analyzed` counter excludes system reclaim records; it is not
+the total scan count.
 These are observations, not throughput promises or isolated-machine comparisons.
 
 `reclaim_lineage_test --frame-diagnostic` is a separate, currently failing diagnostic

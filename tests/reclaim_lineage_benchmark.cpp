@@ -17,7 +17,8 @@ int main() {
             const auto start=std::chrono::steady_clock::now();const auto stats=test::recoverReclaim(db.path().string(),storage);
             const auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
             std::cout<<"storage="<<(storage==WalStorageMode::Segmented?"segmented":"legacy")<<" cycles="<<count<<" clr_cycles="<<clrs
-                <<" recovery_us="<<elapsed<<" records="<<stats.recordsAnalyzed<<" transitions="<<stats.reclaimTransitiveTransitions
+                <<" recovery_us="<<elapsed<<" wal_records_scanned="<<stats.recoveryLsnIndexEntries
+                <<" records_analyzed="<<stats.recordsAnalyzed<<" transitions="<<stats.reclaimTransitiveTransitions
                 <<" clr_transitions="<<stats.reclaimClrTransitions<<" accounted_lineage_bytes="<<stats.reclaimLineageIndexBytes
                 <<" accounted_lsn_index_bytes="<<stats.recoveryLsnIndexBytes
                 <<" page_lsn_skips="<<stats.redoSkippedByPageLsn+stats.reclaimRedoSkips<<" writes="<<stats.databaseWrites<<'\n';
