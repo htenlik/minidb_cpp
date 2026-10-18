@@ -1,5 +1,10 @@
 # Crash recovery and transaction chains
 
+The [physical writeback frontier](physical-writeback-durability.md) fences already-written
+database state before fuzzy checkpoint publication. Recovery formats, dirty-page/ATT
+retention, PageLSN REDO and CLR UNDO are unchanged. This does not implement volatile
+frame LSN retirement or hardware torn-write recovery.
+
 Reclaimed-page REDO uses a [transitive physical lineage validator](crash-safe-page-reclamation.md#transitive-physical-lineage)
 to prove later full-page states through reuse and CLRs. For these targets, selected
 delta REDO uses the proven transaction base, not an unrelated current representation.

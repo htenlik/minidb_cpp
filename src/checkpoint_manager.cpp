@@ -73,6 +73,17 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
         ++nextCheckpointId_;
         const auto walStart = logManager_.lastValidOffset();
         if (mode == CheckpointMode::Fuzzy) {
+            // The exclusive checkpoint authority excludes production writes.
+            // Cover stream-written/evicted/direct page-0 changes, without
+            // materializing any still-dirty buffer page or changing its DPT.
+            recoveryFailPoint("fuzzy_checkpoint_before_database_fence");
+            if (diskManager_.syncPendingWritebacks()) {
+                ++stats_.databaseSyncs;
+                ++stats_.fuzzyCheckpointDurabilitySyncs;
+            } else {
+                ++stats_.fuzzyCheckpointsWithoutPhysicalSync;
+            }
+            recoveryFailPoint("fuzzy_checkpoint_after_database_fence");
             const auto beginLsn = logManager_.append(LogRecord{
                 LogRecordType::FuzzyCheckpointBegin,
                 INVALID_TRANSACTION_ID,
@@ -106,6 +117,7 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
             logManager_.flushUpTo(endLsn);
             recoveryFailPoint("fuzzy_checkpoint_after_end_fsync");
 
+            recoveryFailPoint("fuzzy_checkpoint_before_control_publish");
             const auto controlBefore = control_.stats();
             control_.publish(CheckpointSlot{
                 lastGeneration_ + 1,
@@ -138,8 +150,10 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
             std::uint64_t reclaimedBytes = 0;
             try {
                 logManager_.rotateSegment();
+                recoveryFailPoint("fuzzy_checkpoint_before_reclamation");
                 recoveryFailPoint("fuzzy_checkpoint_during_reclamation");
                 reclaimedBytes = logManager_.reclaimSegmentsBefore(retentionFloor, 1);
+                recoveryFailPoint("fuzzy_checkpoint_after_reclamation");
             } catch (const std::exception&) {
                 ++stats_.reclamationFailures;
             }

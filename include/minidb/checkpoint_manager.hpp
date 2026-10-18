@@ -29,6 +29,9 @@ struct CheckpointStats {
     std::uint64_t databaseWrites = 0;
     std::uint64_t walForces = 0;
     std::uint64_t databaseSyncs = 0;
+    // Fence outcomes, recorded before subsequent WAL/control publication.
+    std::uint64_t fuzzyCheckpointDurabilitySyncs = 0;
+    std::uint64_t fuzzyCheckpointsWithoutPhysicalSync = 0;
     std::uint64_t controlFileSyncs = 0;
     std::uint64_t walBytesSincePreviousCheckpoint = 0;
     std::uint64_t checkpointDurationNs = 0;

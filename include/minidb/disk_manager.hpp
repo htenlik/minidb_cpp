@@ -11,6 +11,22 @@
 
 namespace minidb {
 
+struct PhysicalWritebackStats {
+    std::uint64_t physicalWriteEpoch = 0;
+    std::uint64_t synchronizedWriteEpoch = 0;
+    std::uint64_t databaseSyncsCompleted = 0;
+    std::uint64_t databaseSyncFailures = 0;
+    bool writeFailure = false;
+    // An opened file may contain unsynchronized writes from its previous
+    // process. Do not fabricate a write epoch, or infer durability from open().
+    bool initialSyncRequired = true;
+
+    [[nodiscard]] bool pending() const noexcept {
+        return writeFailure || initialSyncRequired
+            || physicalWriteEpoch != synchronizedWriteEpoch;
+    }
+};
+
 // Owns the database file and performs validated fixed-page physical I/O. It does not
 // cache pages, choose eviction victims, or track dirty state.
 class DiskManager {
@@ -34,6 +50,10 @@ public:
     [[nodiscard]] PageId appendPage(PageId expectedPageId);
     void flush();
     void sync();
+    // Atomically checks the physical frontier and fsyncs only if needed. True
+    // means a successful fsync; a failed fsync never advances the frontier.
+    [[nodiscard]] bool syncPendingWritebacks();
+    [[nodiscard]] PhysicalWritebackStats writebackStats() const noexcept;
 
     // Recovery-only physical I/O includes page 0 and may extend the file. These
     // APIs deliberately bypass the normal "data pages only" boundary.
@@ -56,11 +76,15 @@ public:
     }
 
 private:
+    friend struct DiskManagerTestAccess;
     std::string path_;
     mutable std::recursive_mutex ioLatch_;
     std::fstream file_;
     PageId pageCount_ = 0;
     database_format::DatabaseHeader databaseHeader_{};
+    PhysicalWritebackStats writeback_{};
+    // Private syscall seam for deterministic fsync failures/storage-loss tests.
+    int (*syncFunction_)(int) = nullptr;
 
     void openOrCreate();
     void initializeDatabase();
@@ -69,6 +93,9 @@ private:
     void requireExistingDataPage(PageId pageId) const;
     void requireExistingPhysicalPage(PageId pageId) const;
     void reopenFile();
+    void requireWritable() const;
+    void requireWriteEpochAvailable() const;
+    void writePageBytes(PageId pageId, const Page& page, bool flushStream);
 };
 
 } // namespace minidb

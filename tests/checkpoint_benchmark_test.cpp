@@ -22,7 +22,8 @@ int main() {
         results = minidb::bench::runConfiguredBenchmarks(config);
         minidb::test::require(results.size() == 1 && results[0].validationPassed
                     && results[0].checkpoint.fuzzyCheckpointsCompleted == 1
-                    && results[0].checkpoint.databaseSyncs == 0
+                    && results[0].checkpoint.databaseSyncs == 1
+                    && results[0].checkpoint.fuzzyCheckpointDurabilitySyncs == 1
                     && results[0].checkpoint.dptEntriesCaptured != 0,
                 "Fuzzy checkpoint latency benchmark smoke result is invalid");
 
