@@ -51,7 +51,7 @@ public:
     void flush();
     void sync();
     // Atomically checks the physical frontier and fsyncs only if needed. True
-    // means an actual successful fsync; failure throws without advancing it.
+    // means a successful fsync; a failed fsync never advances the frontier.
     [[nodiscard]] bool syncPendingWritebacks();
     [[nodiscard]] PhysicalWritebackStats writebackStats() const noexcept;
 

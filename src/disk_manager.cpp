@@ -183,6 +183,7 @@ void DiskManager::sync() {
             recoveryFailPoint("database_before_fsync");
             result = syncFunction_ ? syncFunction_(descriptor) : ::fsync(descriptor);
             savedError = errno;
+            recoveryFailPoint("database_after_fsync_syscall");
         } catch (...) {
             ::close(descriptor);
             throw;
