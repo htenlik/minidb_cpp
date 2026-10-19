@@ -26,6 +26,9 @@ rules.ninja
 /benchmarks/results/*.json
 *.benchmark.json
 
+# Local development command metrics
+/.dev-verify.jsonl
+
 # Platform/editor files
 .DS_Store
 .idea/
