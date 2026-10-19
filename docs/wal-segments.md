@@ -4,6 +4,12 @@ Fuzzy checkpoints [fsync pending physical database writes](physical-writeback-du
 before becoming authoritative and reclaiming segments. Still-dirty DPT and live ATT
 dependencies retain their existing floor. No WAL/checkpoint encoding changes.
 
+After durable control publication and before deletion, eligible clean resident
+frames [retire frame-local WAL dependencies](frame-wal-dependency-retirement.md).
+Historical PageLSNs remain unchanged. ATT/DPT and fallback retention still govern
+global deletion; partial reclamation failure cannot leave clean frames requiring
+already-unlinked history.
+
 MiniDB++ stores the active write-ahead log as one monotonically advancing
 logical byte stream split across files. PostgreSQL's
 [WAL configuration](https://www.postgresql.org/docs/current/wal-configuration.html)

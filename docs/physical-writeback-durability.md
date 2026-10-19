@@ -83,6 +83,7 @@ exclusive checkpoint authority + prepared between-statements boundary
     -> FUZZY_END
     -> force checkpoint WAL through END
     -> publish/fsync checkpoint control
+    -> retire eligible clean frame dependencies (volatile metadata only)
     -> rotate WAL and reclaim below DPT/ATT retention floor
 ```
 
@@ -159,12 +160,10 @@ lost-unsynchronized-write restarts. Each completed batch verifies exact committe
 tuple bytes, free-list root/membership, epoch accounting, DPT/ATT snapshots and
 actual WAL deletion. Failed prefixes are not counted as completion.
 
-## Deliberately separate remaining work
+## Frame metadata and remaining work
 
-The [clean-frame volatile PageLSN problem](buffer-wal-retention.md) is **not fixed**.
-`reclaim_lineage_test --frame-diagnostic` may still fail after legitimate segment
-reclamation; it is not a registered passing assertion for this change. A later
-repair can use a proven synchronization/checkpoint boundary for explicit volatile
-dependency retirement without clearing persistent PageLSNs or weakening dirty WAL
-validation. Owned rollback, shared allocator ownership and multiple production
-writers remain out of scope.
+The fence itself does not retire frame history. After durable control publication,
+the checkpoint manager separately [retires eligible clean dependencies](frame-wal-dependency-retirement.md).
+The original frame diagnostic now passes with unchanged bytes and real deletion.
+Dirty/pending writes retain strict WAL handling. Owned rollback, shared allocator
+ownership and multiple production writers remain out of scope.

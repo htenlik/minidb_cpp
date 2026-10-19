@@ -246,6 +246,7 @@ used during release verification.
 - [Storage architecture](docs/storage-architecture.md)
 - [Database storage formats](docs/storage-format.md)
 - [Buffer pool and LRU-K](docs/buffer-pool.md)
+- [Checkpoint-authorized frame WAL dependency retirement](docs/frame-wal-dependency-retirement.md)
 - [Write-ahead log](docs/wal.md)
 - [Physical byte-range WAL experiment](docs/wal-byte-range.md)
 - [Adaptive physical WAL update encoding](docs/wal-adaptive.md)

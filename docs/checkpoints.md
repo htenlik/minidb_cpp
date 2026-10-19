@@ -34,7 +34,9 @@ The resulting invariant is:
 6. write the next generation into the inactive checkpoint-control slot and fsync the
    control file;
 7. only after that final fsync treat the new checkpoint as authoritative;
-8. rotate to a fresh segment and separately reclaim obsolete whole segments.
+8. [retire eligible clean frame WAL dependencies](frame-wal-dependency-retirement.md)
+   without changing persistent/historical PageLSNs;
+9. rotate to a fresh segment and separately reclaim obsolete whole segments.
 
 The checkpoint ID is consumed even if an attempt fails. On restart the next ID is one
 greater than the maximum selected checkpoint or checkpoint record in the scanned tail.

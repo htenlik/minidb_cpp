@@ -1,5 +1,58 @@
 # Benchmarking and storage observability
 
+## Frame dependency retirement experiment
+
+`frame_wal_retirement_benchmark` takes 30 samples per case (`--smoke`: 3), using
+Adaptive WAL, 9000-byte segments and enough frames for 1/100/1000 written pages;
+the eviction case uses two frames. Mutation/commit/writeback precedes timing.
+The mixed case adds a still-dirty page. Repeated-fuzzy/sharp cases alternate
+mutation and the selected checkpoint, without turning fuzzy into sharp.
+An eight-thread READ ONLY benchmark separately executes 8,000 SELECTs and checks
+zero transaction WAL growth.
+
+The identical benchmark source was also compiled with `MINIDB_RETIREMENT_BASELINE`
+against clean baseline `2e55271` headers/libraries. That switch only omits new
+diagnostics and the known-failing post-reclamation validation on the baseline;
+workload, reclamation, bytes and timing boundaries stay identical. It is not a
+production option or a weakened correctness test.
+
+Local macOS arm64, AppleClang 21, warning-enabled Release observations, with other
+verification jobs running. Nearest-rank microseconds; p99 with 30 samples is the
+maximum and not a reliable tail estimate. These noisy runs do not establish a
+speedup, regression estimate, isolated fsync cost or universal throughput claim.
+
+| Case | Baseline p50/p95/p99 us | Repaired p50/p95/p99 us | Mean retirement us | Retired / renewed |
+| --- | ---: | ---: | ---: | ---: |
+| 1 clean | 939.750 / 1250.08 / 1496.17 | 619.625 / 893.209 / 985.875 | 2.926 | 30 / 29 |
+| 100 clean | 1124.79 / 1766.08 / 2506.62 | 983.834 / 1399.21 / 1496.79 | 17.825 | 3000 / 2900 |
+| 1000 clean | 3241.12 / 4127.21 / 4597.50 | 4003.33 / 6384.21 / 16303.3 | 365.204 | 30000 / 29000 |
+| Mixed | 971.416 / 1281.21 / 1283.04 | 1129.88 / 1577.25 / 1627.92 | 22.424 | 3000 / 2900 |
+| Repeated fuzzy | 655.875 / 902.916 / 960.917 | 631.583 / 857.541 / 1170.46 | 1.241 | 30 / 29 |
+| Repeated sharp | 610.500 / 746.375 / 954.625 | 602.709 / 797.541 / 1052.67 | 0.873 | 30 / 29 |
+| Eviction | 654.167 / 967.708 / 992.875 | 677.625 / 1363.21 / 1446.33 | 0.905 | 0 / 0 |
+
+Every case in both versions performed **90 WAL fsyncs, 30 database fsyncs and
+zero timed database page writes**. Retirement adds metadata work, not data writes
+or fsyncs. Baseline retirement counts are unavailable, not measured zero work.
+The repaired hit ratio over setup/mutation/read requests was 0.966667 (0 for the
+eviction workload). The SELECT runs observed 22,164 baseline vs 23,114 repaired
+queries/s, with no inferred speedup.
+
+| Case | Retained WAL bytes (both) | Actually deleted segments (both) | Baseline / repaired reopen ms |
+| --- | ---: | ---: | ---: |
+| 1 clean | 1160 | 28 | 1.310 / 0.631 |
+| 100 clean | 15360 | 58 | 2.893 / 1.913 |
+| 1000 clean | 15296 | 508 | 1.456 / 2.963 |
+| Mixed | 15636 | 58 | 1.725 / 1.711 |
+| Repeated fuzzy | 1160 | 28 | 0.683 / 0.668 |
+| Repeated sharp | 1128 | 28 | 0.658 / 0.783 |
+| Eviction | 1160 | 28 | 0.545 / 1.077 |
+
+Reopen times include fixture construction/recovery/teardown. Retirement time
+includes preflight after metadata-lock acquisition. Global retained bytes and
+deletion counts match the baseline: no keep-everything retention workaround.
+See [frame lifecycle/proof/tests](frame-wal-dependency-retirement.md).
+
 ## Physical writeback frontier experiment
 
 Build/run `physical_writeback_benchmark` in Release, or use `--smoke` for three
@@ -42,8 +95,8 @@ the unsafe implementation. Some fuzzy checkpoints now incur database fsync; no
 pending writebacks incur none, and 100 writes share one. Timing differences are
 not isolated fsync-cost estimates or universal performance claims. See
 [physical writeback durability](physical-writeback-durability.md) for the protocol
-and [buffer WAL retention](buffer-wal-retention.md) for the intentionally remaining
-clean-frame PageLSN defect.
+and [buffer WAL retention](buffer-wal-retention.md) for the separate frame-local
+dependency lifecycle.
 
 ## Reclaim lineage recovery experiment
 
@@ -62,9 +115,9 @@ The separate `records_analyzed` counter excludes system reclaim records; it is n
 the total scan count.
 These are observations, not throughput promises or isolated-machine comparisons.
 
-`reclaim_lineage_test --frame-diagnostic` is a separate, currently failing diagnostic
-for clean resident-frame LSN retirement after WAL reclamation. It must not be reported
-as repaired by the lineage experiment; see [the limitation](crash-safe-page-reclamation.md#retention-accounting-and-remaining-boundary).
+`reclaim_lineage_test --frame-diagnostic` is now a passing independent regression
+for [frame retirement](frame-wal-dependency-retirement.md). The lineage experiment
+itself does not implement retirement.
 
 The harness covers the legacy Pager, bounded buffer pool, storage/index/SQL paths,
 standalone WAL append/force behavior, durable transaction and recovery paths, sharp and
