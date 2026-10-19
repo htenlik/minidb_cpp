@@ -17,6 +17,8 @@ add_library(minidb_core
     src/disk_manager.cpp
     src/lru_k_replacer.cpp
     src/log_manager.cpp
+    src/owned_rollback_log.cpp
+    src/owned_rollback_analysis.cpp
     src/page_allocator.cpp
     src/page_reclaim.cpp
     src/reclaim_lineage.cpp
@@ -206,6 +208,10 @@ add_test(NAME row_test COMMAND row_test)
 add_executable(wal_codec_test tests/wal_codec_test.cpp)
 target_link_libraries(wal_codec_test PRIVATE minidb_core)
 add_test(NAME wal_codec_test COMMAND wal_codec_test)
+
+add_executable(owned_rollback_codec_test tests/owned_rollback_codec_test.cpp)
+target_link_libraries(owned_rollback_codec_test PRIVATE minidb_core)
+add_test(NAME owned_rollback_codec_test COMMAND owned_rollback_codec_test)
 
 add_executable(log_manager_test tests/log_manager_test.cpp)
 target_link_libraries(log_manager_test PRIVATE minidb_core)

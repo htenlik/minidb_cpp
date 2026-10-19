@@ -1,4 +1,5 @@
 #include "minidb/recovery_log.hpp"
+#include "minidb/owned_rollback_log.hpp"
 
 #include "minidb/byte_codec.hpp"
 #include "minidb/page_lsn.hpp"
@@ -693,6 +694,14 @@ void validateTransactionRecordPayload(const LogRecord& record) {
         throw WalError(WalErrorKind::CorruptRecord, "Transaction record uses transaction ID zero");
     }
     switch (record.type) {
+    case LogRecordType::BeginOwned:
+        static_cast<void>(decodeOwnedBegin(record)); return;
+    case LogRecordType::RollbackCleanupBegin:
+        static_cast<void>(decodeCleanupBegin(record)); return;
+    case LogRecordType::RollbackCleanupIntent:
+        static_cast<void>(decodeCleanupIntent(record)); return;
+    case LogRecordType::RollbackCleanupProgress:
+        static_cast<void>(decodeCleanupProgress(record)); return;
     case LogRecordType::PageReserve:
         if (!isValidLsn(record.prevLsn) || !isValidLsn(record.lsn)
             || record.prevLsn < wal_file_layout::HEADER_SIZE || record.prevLsn >= record.lsn) {

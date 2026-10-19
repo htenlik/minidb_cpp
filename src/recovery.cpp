@@ -405,6 +405,13 @@ RecoveryStats RecoveryManager::recover() {
     }
     stats.walBytesSkipped = scanStart - logManager_.oldestRetainedLsn();
     auto scan = logManager_.scanFrom(scanStart);
+    // Codecs/analysis exist, but no owned cleanup executor is authorized yet.
+    // Fail before tail repair, REDO, CLR generation or physical page mutation.
+    if (std::any_of(scan.records.begin(), scan.records.end(), [](const auto& record) {
+            return isOwnedRollbackRecord(record.type);
+        })) {
+        throw WalError(WalErrorKind::CorruptRecord, "Owned rollback execution is not enabled");
+    }
     stats.walBytesScanned = scan.fileBytes - scanStart;
     if (scan.truncatedTail) {
         stats.repairedTail = true;
