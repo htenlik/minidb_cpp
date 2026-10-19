@@ -29,6 +29,10 @@ struct BufferFrame {
     bool valid = false;
     Lsn pageLsn = INVALID_LSN;
     Lsn recLsn = INVALID_LSN;
+    // Retirement preserves historical pageLsn. A later guard is pending until
+    // its new image is logged (or preparation proves the intent was a no-op).
+    bool walDependencyRetired = false;
+    bool pendingWalPreparation = false;
 };
 
 struct BufferPoolStats {
@@ -49,6 +53,14 @@ struct BufferPoolStats {
     std::uint64_t capacity = 0;
     std::uint64_t frameAvailabilityWaits = 0;
     std::uint64_t contentLatchWaits = 0;
+    std::uint64_t cleanDependenciesRetired = 0;
+    std::uint64_t dirtyDependenciesPreserved = 0;
+    std::uint64_t dependenciesRenewedAfterRetirement = 0;
+    std::uint64_t historicalMissingWalAccepted = 0;
+    std::uint64_t liveMissingWalRejected = 0;
+    std::uint64_t retirementReconciliationCalls = 0;
+    std::uint64_t retirementReconciliationFailures = 0;
+    std::uint64_t retirementDurationNs = 0;
 
     bool operator==(const BufferPoolStats&) const = default;
 };
@@ -87,6 +99,8 @@ public:
     [[nodiscard]] std::optional<bool> isDirty(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<Lsn> pageLsn(PageId pageId) const noexcept;
     [[nodiscard]] std::optional<Lsn> recLsn(PageId pageId) const noexcept;
+    [[nodiscard]] std::optional<bool> walDependencyRetired(PageId pageId) const noexcept;
+    [[nodiscard]] std::optional<bool> pendingWalPreparation(PageId pageId) const noexcept;
     [[nodiscard]] std::vector<DirtyPageEntry> dirtyPageTableSnapshot() const;
     [[nodiscard]] std::optional<DiskManager::Page> residentPageCopy(PageId pageId) const;
     // Finalizes a transaction's resident page image after WAL append, including
@@ -103,6 +117,8 @@ public:
 
 private:
     friend class BasicPageGuard;
+    friend class CheckpointManager;
+    friend struct BufferPoolTestAccess;
 
     DiskManager& diskManager_;
     // Recursive only for existing metadata helper/snapshot calls. All LRU-K
@@ -116,7 +132,7 @@ private:
     LRUKReplacer replacer_;
     WalFlushProvider* walProvider_;
     PageRecoveryHook* recoveryHook_;
-    BufferPoolStats stats_{};
+    mutable BufferPoolStats stats_{};
     bool waitForReadFrames_;
 
     [[nodiscard]] std::optional<BasicPageGuard> fetchPage(PageId pageId, bool writable);
@@ -124,6 +140,12 @@ private:
     void flushVictimIfDirty(FrameId frameId);
     void ensureWalDurable(Lsn pageLsn);
     void ensureWalDurableBeforePageWrite(const BufferFrame& frame);
+    void validateWalDependency(const BufferFrame& frame, bool forWrite) const;
+    void assignPreparedLsn(BufferFrame& frame, Lsn lsn);
+    // Only CheckpointManager may authorize this after DB synchronization AND
+    // durable control publication, under exclusive checkpoint authority. Run
+    // before segment deletion, including deletion attempts that fail partially.
+    void retireCheckpointCoveredDependencies();
     void prepareFrameForWrite(BufferFrame& frame);
     void installPage(FrameId frameId, PageId pageId, DiskManager::Page page, bool dirty);
     void releasePin(FrameId frameId);

@@ -223,12 +223,11 @@ four seeds (0x123A31, 0xC0FFEE, 0xDE1A, 0xA110C), with 400 user crashes, 400 int
 recovery crashes, and sharp/fuzzy checkpoint publication plus real segment deletion.
 Checkpoint model boundaries deliberately close/reopen storage to test durable state.
 
-The independent command `reclaim_lineage_test --frame-diagnostic` still reports
-`Buffer frame pageLSN is unknown to its WAL provider`: a clean resident frame can
-retain a volatile LSN after checkpoint reclamation removes its record. This diagnostic
-is not a passing correctness assertion or a repair. It is explicitly separate from
-the lineage tests and leaves buffer validation unchanged. Live-frame retirement
-requires a separate change before owned rollback can resume.
+The independent `reclaim_lineage_test --frame-diagnostic` now passes through
+[checkpoint-authorized clean-frame dependency retirement](frame-wal-dependency-retirement.md).
+It keeps the original logical history and real segment deletion, while historical
+PageLSNs and page bytes remain unchanged. This bookkeeping repair does not change
+the transitive lineage proof or activate owned rollback.
 
 Torn-page repair, ownership epochs, automated loser reclamation, owned rollback
 activation and multi-writer publication remain out of scope. Both unmerged allocation

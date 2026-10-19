@@ -2,8 +2,9 @@
 
 The [physical writeback frontier](physical-writeback-durability.md) fences already-written
 database state before fuzzy checkpoint publication. Recovery formats, dirty-page/ATT
-retention, PageLSN REDO and CLR UNDO are unchanged. This does not implement volatile
-frame LSN retirement or hardware torn-write recovery.
+retention, PageLSN REDO and CLR UNDO are unchanged. Checkpoint-authorized
+[frame dependency retirement](frame-wal-dependency-retirement.md) preserves historical
+LSNs while new dirty writes stay strict. No hardware torn-write repair is added.
 
 Reclaimed-page REDO uses a [transitive physical lineage validator](crash-safe-page-reclamation.md#transitive-physical-lineage)
 to prove later full-page states through reuse and CLRs. For these targets, selected
@@ -116,8 +117,10 @@ logged after-image. It appends the selected update record only when needed, adva
 value to the volatile frame PageLSN. The persistent slot is excluded from logical image
 comparison and delta generation. The volatile frame value then drives the rule that
 WAL is fsynced before the database page is written. Dirty eviction is therefore STEAL-
-safe. On frame reuse and reload, the volatile PageLSN is reset or reconstructed from
-the page bytes; it is not itself persisted as a buffer-frame object.
+safe. Checkpoint-covered clean frames preserve this value as history without
+requiring the old record; new writes establish fresh dependencies. On installation
+the volatile PageLSN starts invalid, as before; persistent bytes are untouched.
+No buffer-frame object is persisted.
 
 Commit preparation visits every touched resident page and logs its latest state.
 Nonresident pages were necessarily prepared before eviction. Commit then appends

@@ -2,6 +2,7 @@
 #include "minidb/recovery.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -63,13 +64,57 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
 }
 
 void BufferPoolManager::prepareFrameForWrite(BufferFrame& frame) {
+    if (!frame.dirty) return;
     if (recoveryHook_ == nullptr || !recoveryHook_->needsPreparation()) return;
     const auto lsn = recoveryHook_->preparePageForWrite(frame.pageId, frame.data);
     if (isValidLsn(lsn)) {
-        frame.pageLsn = lsn;
-        if (!isValidLsn(frame.recLsn)) frame.recLsn = lsn;
+        assignPreparedLsn(frame, lsn);
     } else if (!isValidLsn(frame.recLsn)) {
         frame.dirty = false;
+    }
+    frame.pendingWalPreparation = false;
+}
+
+void BufferPoolManager::assignPreparedLsn(BufferFrame& frame, Lsn lsn) {
+    if (walProvider_ == nullptr || !walProvider_->containsLsn(lsn)) {
+        throw std::invalid_argument("pageLSN must identify a record appended by the WAL provider");
+    }
+    if (isValidLsn(frame.pageLsn) && lsn < frame.pageLsn) {
+        throw std::invalid_argument("pageLSN cannot move backward");
+    }
+    if (frame.walDependencyRetired) ++stats_.dependenciesRenewedAfterRetirement;
+    frame.pageLsn = lsn;
+    frame.walDependencyRetired = false;
+    frame.pendingWalPreparation = false;
+    if (frame.dirty && !isValidLsn(frame.recLsn)) frame.recLsn = lsn;
+}
+
+void BufferPoolManager::validateWalDependency(const BufferFrame& frame, bool forWrite) const {
+    if (frame.pendingWalPreparation && (!frame.dirty || forWrite)) {
+        throw std::logic_error("Pending WAL write intent is not prepared for persistence");
+    }
+    if (frame.walDependencyRetired && frame.dirty && !frame.pendingWalPreparation) {
+        throw std::logic_error("Dirty frame cannot use a retired WAL dependency");
+    }
+    if (isValidLsn(frame.pageLsn) && !frame.walDependencyRetired
+        && (walProvider_ == nullptr || !walProvider_->containsLsn(frame.pageLsn))) {
+        ++stats_.liveMissingWalRejected;
+        throw std::logic_error("Buffer frame pageLSN is unknown to its WAL provider");
+    }
+    if ((!frame.dirty && isValidLsn(frame.recLsn))
+        || (isValidLsn(frame.recLsn) && (!isValidLsn(frame.pageLsn) || frame.recLsn > frame.pageLsn))
+        || (frame.dirty && walProvider_ != nullptr && !frame.pendingWalPreparation
+            && (!isValidLsn(frame.pageLsn) || !isValidLsn(frame.recLsn)))) {
+        throw std::logic_error("Buffer frame recLSN is inconsistent with dirty state");
+    }
+    if (isValidLsn(frame.recLsn)
+        && (walProvider_ == nullptr || !walProvider_->containsLsn(frame.recLsn))) {
+        ++stats_.liveMissingWalRejected;
+        throw std::logic_error("Buffer frame recLSN is unknown to its WAL provider");
+    }
+    if (frame.walDependencyRetired && isValidLsn(frame.pageLsn)
+        && walProvider_ != nullptr && !walProvider_->containsLsn(frame.pageLsn)) {
+        ++stats_.historicalMissingWalAccepted;
     }
 }
 
@@ -88,7 +133,8 @@ void BufferPoolManager::ensureWalDurable(Lsn pageLsn) {
 }
 
 void BufferPoolManager::ensureWalDurableBeforePageWrite(const BufferFrame& frame) {
-    ensureWalDurable(frame.pageLsn);
+    validateWalDependency(frame, true);
+    if (!frame.walDependencyRetired) ensureWalDurable(frame.pageLsn);
 }
 
 void BufferPoolManager::installPage(
@@ -123,6 +169,8 @@ void BufferPoolManager::installPage(
     frame.valid = true;
     frame.pageLsn = INVALID_LSN;
     frame.recLsn = INVALID_LSN;
+    frame.walDependencyRetired = false;
+    frame.pendingWalPreparation = false;
     const auto [position, inserted] = pageTable_.emplace(pageId, frameId);
     static_cast<void>(position);
     if (!inserted) throw std::logic_error("Page already exists in buffer page table");
@@ -253,7 +301,10 @@ void BufferPoolManager::flushAll() {
     }
     Lsn maximumPageLsn = INVALID_LSN;
     for (const auto& frame : frames_) {
-        if (!frame.valid || !frame.dirty || !isValidLsn(frame.pageLsn)) continue;
+        if (!frame.valid || !frame.dirty) continue;
+        // Validate EVERY dependency before any write, not just the maximum.
+        validateWalDependency(frame, true);
+        if (!isValidLsn(frame.pageLsn)) continue;
         if (!isValidLsn(maximumPageLsn) || frame.pageLsn > maximumPageLsn) {
             maximumPageLsn = frame.pageLsn;
         }
@@ -369,6 +420,7 @@ std::span<std::byte, database_format::PAGE_SIZE> BufferPoolManager::mutableData(
     std::lock_guard lock(metadataLatch_);
     auto& frame = requireGuardFrame(frameId, pageId);
     frame.dirty = true;
+    if (walProvider_ != nullptr) frame.pendingWalPreparation = true;
     return frame.data;
 }
 
@@ -421,12 +473,25 @@ std::optional<Lsn> BufferPoolManager::recLsn(PageId pageId) const noexcept {
     return frameId.has_value() ? std::optional<Lsn>(frames_[*frameId].recLsn) : std::nullopt;
 }
 
+std::optional<bool> BufferPoolManager::walDependencyRetired(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
+    const auto frameId = frameIdForPage(pageId);
+    return frameId ? std::optional<bool>(frames_[*frameId].walDependencyRetired) : std::nullopt;
+}
+
+std::optional<bool> BufferPoolManager::pendingWalPreparation(PageId pageId) const noexcept {
+    std::lock_guard lock(metadataLatch_);
+    const auto frameId = frameIdForPage(pageId);
+    return frameId ? std::optional<bool>(frames_[*frameId].pendingWalPreparation) : std::nullopt;
+}
+
 std::vector<DirtyPageEntry> BufferPoolManager::dirtyPageTableSnapshot() const {
     std::lock_guard lock(metadataLatch_);
     std::vector<DirtyPageEntry> result;
     result.reserve(pageTable_.size());
     for (const auto& frame : frames_) {
         if (!frame.valid || !frame.dirty) continue;
+        validateWalDependency(frame, true);
         if (!isValidLsn(frame.recLsn) || !isValidLsn(frame.pageLsn)) {
             throw std::logic_error("Dirty page recovery metadata is not fully prepared");
         }
@@ -449,14 +514,7 @@ void BufferPoolManager::setPageLsn(FrameId frameId, PageId pageId, Lsn pageLsn) 
     if (!isValidLsn(pageLsn)) {
         throw std::invalid_argument("WritePageGuard cannot assign INVALID_LSN");
     }
-    if (walProvider_ == nullptr || !walProvider_->containsLsn(pageLsn)) {
-        throw std::invalid_argument("pageLSN must identify a record appended by the WAL provider");
-    }
-    if (isValidLsn(frame.pageLsn) && pageLsn < frame.pageLsn) {
-        throw std::invalid_argument("pageLSN cannot move backward");
-    }
-    frame.pageLsn = pageLsn;
-    if (frame.dirty && !isValidLsn(frame.recLsn)) frame.recLsn = pageLsn;
+    assignPreparedLsn(frame, pageLsn);
 }
 
 void BufferPoolManager::validate() const {
@@ -478,6 +536,7 @@ void BufferPoolManager::validate() const {
         if (!frame.valid) {
             if (frame.pageId != INVALID_PAGE_ID || frame.pinCount != 0 || frame.dirty
                 || isValidLsn(frame.pageLsn) || isValidLsn(frame.recLsn)
+                || frame.walDependencyRetired || frame.pendingWalPreparation
                 || !freeSet.contains(frameId) || replacer_.isTracked(frameId)) {
                 throw std::logic_error("Invalid/free buffer frame has live state");
             }
@@ -498,15 +557,7 @@ void BufferPoolManager::validate() const {
             || (frame.pinCount == 0 && !replacer_.isEvictable(frameId))) {
             throw std::logic_error("Buffer pin count disagrees with replacer evictability");
         }
-        if (isValidLsn(frame.pageLsn)
-            && (walProvider_ == nullptr || !walProvider_->containsLsn(frame.pageLsn))) {
-            throw std::logic_error("Buffer frame pageLSN is unknown to its WAL provider");
-        }
-        if ((!frame.dirty && isValidLsn(frame.recLsn))
-            || (isValidLsn(frame.recLsn) && !isValidLsn(frame.pageLsn))
-            || (isValidLsn(frame.recLsn) && frame.recLsn > frame.pageLsn)) {
-            throw std::logic_error("Buffer frame recLSN is inconsistent with dirty state");
-        }
+        validateWalDependency(frame, false);
     }
     for (const auto& [pageId, frameId] : pageTable_) {
         if (frameId >= frames_.size() || !frames_[frameId].valid
@@ -530,6 +581,44 @@ void BufferPoolManager::noteGuardWriteIntent(FrameId frameId, PageId pageId) {
     auto& frame = requireGuardFrame(frameId, pageId);
     if (recoveryHook_ != nullptr) recoveryHook_->notePageWriteIntent(pageId, frame.data);
     frame.dirty = true;
+    if (walProvider_ != nullptr) frame.pendingWalPreparation = true;
+}
+
+void BufferPoolManager::retireCheckpointCoveredDependencies() {
+    std::lock_guard lock(metadataLatch_);
+    ++stats_.retirementReconciliationCalls;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        if (diskManager_.writebackStats().pending()) {
+            throw std::logic_error("Frame retirement requires synchronized physical writebacks");
+        }
+        // Preflight BEFORE any retirement, while live WAL must still exist.
+        validate();
+        for (const auto& frame : frames_) {
+            if (!frame.valid) continue;
+            if (frame.pendingWalPreparation) {
+                throw std::logic_error("Frame retirement requires a prepared checkpoint boundary");
+            }
+            if (!frame.dirty && !frame.walDependencyRetired && isValidLsn(frame.pageLsn)
+                && (!isValidLsn(walProvider_->durableLsn()) || walProvider_->durableLsn() < frame.pageLsn)) {
+                throw std::logic_error("Frame retirement requires durable WAL");
+            }
+        }
+        for (auto& frame : frames_) {
+            if (!frame.valid) continue;
+            if (frame.dirty) { ++stats_.dirtyDependenciesPreserved; continue; }
+            if (!frame.walDependencyRetired && isValidLsn(frame.pageLsn)) {
+                frame.walDependencyRetired = true;
+                ++stats_.cleanDependenciesRetired;
+            }
+        }
+    } catch (...) {
+        ++stats_.retirementReconciliationFailures;
+        throw;
+    }
+    stats_.retirementDurationNs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count());
 }
 
 void BufferPoolManager::resetStats() noexcept {

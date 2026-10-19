@@ -97,7 +97,9 @@ read-only and unlogged contexts are excluded. See
 ## Publication, restart, and retention
 
 Fuzzy publication appends BEGIN, snapshots the DPT/live ATT, appends END, fsyncs WAL
-through END, then writes and fsyncs the inactive control slot. Segment rotation and
+through END, then writes and fsyncs the inactive control slot. Eligible clean
+frames then [retire their historical WAL dependency](frame-wal-dependency-retirement.md),
+while dirty/pending images cannot retire. Segment rotation and
 reclamation follow publication. It does not call `flushAll()` or write dirty database
 pages. It conditionally fsyncs already-written database state **before** BEGIN/control
 publication. Pinned frames are allowed because only frame recovery metadata is

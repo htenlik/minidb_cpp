@@ -1,9 +1,14 @@
 # Bounded buffer pool and LRU-K
 
+[Clean dependency retirement](frame-wal-dependency-retirement.md) separates
+historical PageLSN identity from live retained-WAL obligations. Only a durable
+checkpoint authorizes retirement; new writes become pending and then establish
+fresh dependencies. Persistent bytes and guard PageLSN diagnostics are preserved.
+
 Clean after writeback does not imply database-fsynced. The
 [physical durability frontier](physical-writeback-durability.md) lives in DiskManager,
-so evicted writes remain covered. The separate [volatile clean-frame PageLSN
-retirement defect](buffer-wal-retention.md) remains unresolved.
+so evicted writes remain covered. [Buffer WAL retention](buffer-wal-retention.md)
+explains why historical PageLSNs need not remain live dependencies forever.
 
 The synchronized fixed-capacity BufferPoolManager and latched guards are the active backend
 for PageAllocator, TupleStore,

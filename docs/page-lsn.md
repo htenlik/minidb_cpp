@@ -1,5 +1,10 @@
 # Persistent PageLSN and selective REDO
 
+A persistent PageLSN is historical identity, not a promise that its originating
+record is retained forever. [Checkpoint-authorized frame retirement](frame-wal-dependency-retirement.md)
+preserves both page bytes and historical volatile LSNs, while new dirty writes
+establish fresh live WAL dependencies and maintain monotonic assignment.
+
 For reclaimed pages, a larger numeric PageLSN alone is not a skip proof. The
 [lineage validator](crash-safe-page-reclamation.md#transitive-physical-lineage)
 requires the exact retained transition and full after-image. Opaque reuse has no
