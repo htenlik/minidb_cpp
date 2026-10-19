@@ -3,6 +3,8 @@
 A separate [PAGE_RECLAIM system primitive](crash-safe-page-reclamation.md) can publish
 certified unreferenced pages independently. It is not connected to reservation-loser
 cleanup: user rollback still truncates and free-list reuse ownership remains unresolved.
+The [inactive owned rollback protocol](owned-rollback-protocol.md) adds analysis-only
+codecs; it does not connect these reservations to production cleanup.
 
 MiniDB++ logs transaction-owned APPENDED reservations before physical extension.
 This records provenance, not transaction-local reclamation. SQL still permits only
