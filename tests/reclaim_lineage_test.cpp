@@ -278,10 +278,25 @@ void interruptedClrReplay() {
 void frameDiagnostic() {
     test::TemporaryDatabase db("frame_retention_diagnostic");test::ReclaimFixture f(db.path().string());f.initialize();
     static_cast<void>(f.reclaim(30));static_cast<void>(f.reuse(true));f.pool.flushAll();
+    const auto original = *f.pool.residentPageCopy(30);
+    const auto historical = *f.pool.pageLsn(30);
+    std::cout << "before: resident=" << f.pool.isResident(30) << " dirty=" << *f.pool.isDirty(30)
+              << " recLSN=" << *f.pool.recLsn(30) << " frameLSN=" << historical
+              << " persistentLSN=" << readPersistentPageLsn(original)
+              << " retained=" << f.log.containsLsn(historical) << '\n';
     CheckpointControl control(db.path().string()+".ckpt");CheckpointManager checkpoints(f.recovery,f.pool,f.disk,f.log,control,{});
     for(unsigned c=0;c<4;++c)static_cast<void>(checkpoints.checkpoint());
     require(checkpoints.stats().walBytesReclaimed>0,"No reclaimed history in diagnostic");
-    f.pool.validate(); // Intentionally reports the separate, unfixed invariant.
+    std::cout << "after: dirty=" << *f.pool.isDirty(30) << " recLSN=" << *f.pool.recLsn(30)
+              << " frameLSN=" << *f.pool.pageLsn(30)
+              << " persistentLSN=" << readPersistentPageLsn(*f.pool.residentPageCopy(30))
+              << " retained=" << f.log.containsLsn(historical)
+              << " generation=" << checkpoints.stats().checkpointsCompleted
+              << " deleted=" << checkpoints.stats().segmentsReclaimed
+              << " pendingPhysical=" << f.disk.writebackStats().pending() << '\n';
+    require(original == *f.pool.residentPageCopy(30), "Checkpoint changed resident bytes");
+    require(!f.log.containsLsn(historical), "Diagnostic did not physically reclaim old record");
+    f.pool.validate();
 }
 }
 int main(int argc,char** argv) {

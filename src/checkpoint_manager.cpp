@@ -130,6 +130,9 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
             });
             const auto controlAfter = control_.stats();
             recoveryFailPoint("fuzzy_checkpoint_after_control_sync");
+            recoveryFailPoint("checkpoint_before_frame_retirement");
+            bufferPool_.retireCheckpointCoveredDependencies();
+            recoveryFailPoint("checkpoint_after_frame_retirement");
 
             Lsn retentionFloor = beginLsn;
             Lsn oldestRecLsn = INVALID_LSN;
@@ -251,6 +254,9 @@ CheckpointId CheckpointManager::checkpointExclusive(CheckpointMode mode) {
         });
         const auto controlAfter = control_.stats();
         recoveryFailPoint("checkpoint_after_control_sync");
+        recoveryFailPoint("checkpoint_before_frame_retirement");
+        bufferPool_.retireCheckpointCoveredDependencies();
+        recoveryFailPoint("checkpoint_after_frame_retirement");
 
         const auto checkpointElapsed = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
