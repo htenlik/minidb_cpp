@@ -79,7 +79,8 @@ def check_cache(args):
         if "=" in line and not line.startswith(("#", "//")):
             key, value = line.split("=", 1)
             entries[key.split(":", 1)[0]] = value
-    if Path(entries.get("CMAKE_HOME_DIRECTORY", "")).resolve() != ROOT:
+    source = entries.get("CMAKE_HOME_DIRECTORY")
+    if not source or Path(source).resolve() != ROOT:
         raise ValueError("Build cache belongs to another source tree; choose its matching directory")
     if entries.get("CMAKE_CONFIGURATION_TYPES"):
         raise ValueError("Use a single-configuration Makefiles or Ninja build directory")

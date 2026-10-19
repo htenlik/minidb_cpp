@@ -81,6 +81,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(verify.check_cache(args))
         args.build_dir.mkdir()
         cache = args.build_dir / "CMakeCache.txt"
+        cache.write_text("CMAKE_BUILD_TYPE:STRING=Release\n")
+        with self.assertRaises(ValueError):
+            verify.check_cache(args)
         for source, config in ((self.root, "Debug"), (self.root / "other", "Release")):
             cache.write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={source}\nCMAKE_BUILD_TYPE:STRING={config}\n")
             with self.assertRaises(ValueError):
