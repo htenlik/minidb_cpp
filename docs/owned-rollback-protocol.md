@@ -1,11 +1,12 @@
 # Owned rollback WAL analysis (inactive)
 
-The owned rollback extension currently provides codecs and a **side-effect-free
-history validator only**. Production emits ordinary BEGIN, uses CLR UNDO and
+The owned rollback extension provides codecs, a side-effect-free history validator,
+and an **internal test-authorized cleanup executor**. Production emits ordinary BEGIN, uses CLR UNDO and
 global truncation, and retains its exclusive writer gate. There is no public
-protocol switch. Recovery rejects owned records in its recovery window before
-tail repair, page REDO, CLR generation or physical cleanup. This is not an owned
-rollback implementation or a production activation gate being declared passed.
+protocol switch. Default recovery rejects owned records in its recovery window before
+tail repair, page REDO, CLR generation or physical cleanup. Only a private friend
+harness defined in the tests can bind an exclusive lifecycle lease and exercise
+owned BEGIN generation/recovery. This is not production activation.
 
 ## Prototype-compatible bytes
 
@@ -31,7 +32,10 @@ lastLSN. A system PAGE_RECLAIM has TransactionId=0 and never becomes that user's
 prevLSN. The intent explicitly names its immediately following record boundary;
 `cleanupReclaimLsn()` is the single checked calculation. It does **not** append,
 reserve a WAL position, or complete a missing record. An intent-only scanned tail
-remains unfinished evidence. Restart completion of that tail is future work.
+remains unfinished evidence to analysis. The authorized executor can complete that
+exact WAL tail only after validating owner, UNDO endpoint, materialization and
+unchanged target/page-0 preconditions. It forces the associated type-14 record
+before physical REDO. An occupied/different/non-tail association is corruption.
 
 Decoders check identity, exact length/version/flags/reserved fields, legal page
 counts/IDs, backward references, overflow and nested reclaim encoding. Encoders
@@ -85,24 +89,83 @@ records an absence claim, not a physical reclaim. It must not be confused with
 progress missing its required intent for a materialized page.
 
 `AbortRecorded` means a complete terminal WAL record was supplied. The analyzer
-cannot observe WAL fsync and does not label it durable. The future executor must
+cannot observe WAL fsync and does not label it durable. The executor must
 establish physical absence, exclusive lifecycle authority, logical image restoration,
 page-0 synchronization and free-list completion **before** recording/forcing ABORT.
 The validator neither issues certificates nor authorizes PAGE_RECLAIM alongside a
 live transaction. It only checks that an explicitly associated proposed history is
-structurally valid; physical reclamation remains disabled.
+structurally valid; production owned physical cleanup remains disabled.
 
-## Remaining execution boundary
+## Internal physical execution
 
-Future work must bind an exclusive lease, preflight ownership-scoped unpinned
-invalidation, complete/force user CLRs and data sync, recover interrupted intents,
-publish each free page exactly once, and force final ABORT only after all progress
-is durable. Page-0 updates must preserve unrelated metadata and PageLSN. Cleanup
-must block checkpoints and retain its full required WAL until complete; current
-writeback/retirement protections must not be replaced or bypassed.
+Both live and startup cleanup require the same private exclusive gate/lease
+binding. No public constructor flag, SQL/CLI option or environment activation
+exists. Existing `PageReclaimer::reclaim()` and its idle/certificate checks are
+unchanged; the executor reuses the same type-14 codec, canonical Free Page builder,
+two-page REDO, preconditions and transitive later-state validation.
 
-This analysis does not certify physical CLR after-images, free-list membership,
-reachability, tail completion or crash recovery for the new protocol. Those are
-execution-stage proof obligations. Legacy recovery and its truncation/winner guards
-are unchanged. No multiple-writer allocation, epochs, deferred release publication,
-new page format, SQL, or wire changes are included.
+The bounded contract excludes raw administrative append/write/reuse during a live
+transaction. A target needs a validated owner BEGIN/reservation/chain, completed
+user UNDO, exclusive authority, physical presence, no conflicting owner, no catalog
+reference and no existing free-list membership. Its bytes must match the canonical
+zero append result or an exact reconstructed same-owner WAL after-image. This does
+not rely on a volatile confirmation, CRC alone, pins, transaction count or an ID
+suffix. A physical suffix coverage check additionally rejects unreserved growth;
+independently committed reservations can account for unrelated higher pages but
+never authorize reclaiming them. Opaque/unlogged changed bytes fail closed.
+
+```text
+validate exclusive lease and pins -> prepare/force latest user WAL
+  -> invalidate only touched/reserved frames and explicitly rebuilt page 0
+  -> ordinary CLR UNDO of existing pages -> database fsync
+  -> append/force CLEANUP_BEGIN (original BEGIN LSN + reservation count)
+  -> each APPENDED reservation:
+       absent: record absence, never extend the file
+       present: prove bytes/ownership/nonmembership
+          -> append/force INTENT -> append/force associated PAGE_RECLAIM
+          -> write Free Page and page-0 head -> database fsync
+       append/force PROGRESS
+  -> database fsync -> append/force ABORT
+```
+
+Preexisting free-list reuse/release remains ordinary before-image/CLR work. User
+page-0 compensation completes before new head publication. An appended page released
+inside its transaction is unlinked by that compensation before orphan cleanup;
+surviving duplicate membership is rejected. A completed progress record is verified
+against canonical free membership or physical absence when an unfinished cleanup
+resumes. Already-recorded reclaims are replayed, never blindly appended again.
+Completed historical absence may coexist with a page only if a later independently
+validated append reservation accounts for that new physical identity.
+
+Live invalidation does not discard a historical page-count suffix. Unrelated resident
+bytes, dirty state and PageLSN remain intact. Pins are conservatively rejected through
+the existing completion rule, and unrelated dirty page-0 state cannot be discarded.
+Startup has no resident frames. A failure poisons the live rollback until restart;
+new transactions/checkpoints cannot advance over incomplete cleanup. Fuzzy ATT
+retains BEGIN/lastLSN at safe statement boundaries. Authorized startup also audits
+retained owned history against the checkpoint ATT, rejecting omitted live owners.
+This extra retained-WAL audit is not enabled on ordinary production recovery.
+
+Legacy truncating UNDO and winner guards remain. Directed testing exposed a separate
+legacy REDO defect: an old appended-page byte-range update could patch a later Free
+Page while retaining its newer PageLSN, causing selective REDO to skip required
+restoration. Appended deltas now reconstruct from their defined zero-page base (both
+delta encodings), not a later physical incarnation. Existing-page deltas and all WAL
+bytes remain unchanged. The minimal legacy reproduction also fails against the
+unchanged pre-executor library; the directed test covers all modes/stores/REDO policies.
+
+The directed executor checks 600 bounded rollback cycles, absent/uninitialized
+appends, mixed reuse/release, metadata restoration, higher committed resident pages,
+repeated startup interruptions, checkpoint blocking and malformed authority/history.
+The crash target has 504 hard-exit prefixes across three update modes, two WAL stores,
+both REDO policies and both reclaim write orders, with two restarts per prefix.
+Another 18 cases interrupt the recovery-only intent-tail append/force itself,
+each with two hard exits and two successful restarts, checking one reclaim record.
+There is no 30,000-event owned integration model or SQL/index activation claim here.
+
+Remaining integration work includes the full owned model, table/index/catalog and
+disconnect scenarios, extended retention/reuse histories and activation review.
+Shared allocation, multiple writers, epochs, deferred release publication, new
+page/checkpoint formats, SQL and wire changes are not included. Raw byte-identical
+administrative ABA cannot be detected without generations; it is excluded by the
+exclusive lifecycle contract, not claimed as supported concurrency.
