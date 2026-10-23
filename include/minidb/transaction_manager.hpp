@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 namespace minidb {
+namespace test { class OwnedSqlTestAccess; }
 class CheckpointManager;
 using SessionId = std::uint64_t;
 inline constexpr SessionId LOCAL_SESSION_ID = 0;
@@ -36,6 +37,7 @@ struct ExplicitTransactionStats {
 // Session state is serialized per session; queries from different sessions are
 // independent. Only a holder of the exclusive database lease touches recovery.
 class TransactionManager {
+    friend class test::OwnedSqlTestAccess;
     struct SessionContext;
 public:
     class SessionGuard {
