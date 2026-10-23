@@ -161,10 +161,11 @@ The crash target has 504 hard-exit prefixes across three update modes, two WAL s
 both REDO policies and both reclaim write orders, with two restarts per prefix.
 Another 18 cases interrupt the recovery-only intent-tail append/force itself,
 each with two hard exits and two successful restarts, checking one reclaim record.
-There is no 30,000-event owned integration model or SQL/index activation claim here.
+These are the executor-level tests, separate from the integration gate below.
 
-Remaining integration work includes the full owned model, table/index/catalog and
-disconnect scenarios, extended retention/reuse histories and activation review.
+The separate [integration gate](owned-rollback-integration.md) exercises the full
+owned model, table/index/catalog, disconnect and retention/reuse paths. It records
+test admission and verification results; production activation still requires review.
 Shared allocation, multiple writers, epochs, deferred release publication, new
 page/checkpoint formats, SQL and wire changes are not included. Raw byte-identical
 administrative ABA cannot be detected without generations; it is excluded by the
