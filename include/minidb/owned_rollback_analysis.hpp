@@ -4,7 +4,6 @@
 
 namespace minidb {
 
-enum class RollbackProtocol : std::uint8_t { LegacyTruncate, OwnedAppend };
 enum class OwnedCleanupPhase : std::uint8_t {
     OwnedActive, Undoing, LogicalUndoComplete, CleanupStarted,
     ReservationCleanupInProgress, CleanupComplete, AbortRecorded, CommitRecorded,
