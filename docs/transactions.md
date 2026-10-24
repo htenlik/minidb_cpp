@@ -39,7 +39,8 @@ any allocation. With serial ownership that is also the pre-first-mutation bounda
 The WAL BEGIN is materialized by the first logged change or physical append reservation.
 An append forces BEGIN plus PAGE_RESERVE before extension; later appends log distinct
 reservations while preserving the original BEGIN boundary. Provenance survives statement
-boundaries but free-list reuse/release is not covered. Rollback still truncates; see
+boundaries; preexisting free-list reuse/release is restored by CLR UNDO. New SQL
+writers emit BEGIN_OWNED and retain physical extent on rollback; see
 [durable-page-reservation.md](durable-page-reservation.md). Each successful mutating
 statement prepares the latest resident touched pages without committing or forcing them.
 Eviction may prepare and force updates sooner under STEAL.
@@ -64,8 +65,10 @@ if its bytes reached the filesystem before an interrupted force completed.
 
 ROLLBACK uses the same CLR traversal as startup loser UNDO. It prepares and forces
 pending transaction WAL, invalidates touched buffers, follows the transaction chain,
-forces a full-page CLR before each compensation write, syncs pages, repeats safe
-truncate-to-BEGIN-page-count cleanup, and forces ABORT before returning success. A crash
+forces a full-page CLR before each compensation write, syncs pages, completes
+owned appended-page cleanup and forces ABORT before returning success. Legacy
+BEGIN histories retain safe truncate-to-BEGIN cleanup. See
+[production authority and cleanup](owned-rollback-activation.md). A crash
 during rollback resumes via CLR `undoNextLSN`. Delta compensation during live rollback
 uses the retained original page as its base: an earlier committed NO-FORCE winner might
 still be absent from disk. No unrelated winner history is replayed over live buffers.
@@ -90,7 +93,7 @@ crash instead leaves startup recovery to finish the loser. Shutdown never commit
 
 `CREATE TABLE` is permitted inside a READ WRITE transaction. Its catalog entries, metadata, heap,
 index, and allocator changes use existing recovery hooks; rollback removes the created
-table and restores the page-count/free-list state. This does not imply support for
+table and restores logical ownership/free-list state without shrinking owned extents. This does not imply support for
 unimplemented ALTER, DROP, or other DDL.
 
 ## Checkpoints and reclamation

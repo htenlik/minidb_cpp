@@ -23,7 +23,7 @@ DatabaseServer::DatabaseServer(std::string databasePath, ServerConfig config)
                   config.walSegmentBytes),
       checkpointControl_(checkpointPathForDatabase(databasePath)) {
     recoveryStats_ = RecoveryManager(
-        diskManager_, logManager_, &checkpointControl_).recover();
+        diskManager_, logManager_, &checkpointControl_).recoverAtStartup();
     recovery_ = std::make_unique<RecoveryCoordinator>(
         diskManager_, logManager_, recoveryStats_.nextTransactionId,
         config.walUpdateMode);

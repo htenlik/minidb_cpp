@@ -9,6 +9,7 @@
 #include "minidb/page_reclaim.hpp"
 #include "minidb/page_allocator.hpp"
 #include "minidb/reclaim_lineage.hpp"
+#include "minidb/owned_rollback_cleanup.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -114,7 +115,8 @@ void undoTransactions(
     const std::function<LogRecord(Lsn)>& readRecord,
     const std::function<void(PageId, DiskManager::Page&)>& readUndoBase,
     RecoveryStats& stats,
-    bool liveRollback = false) {
+    bool liveRollback = false,
+    const std::function<void(RecoveryTransactionEntry&)>& finishOwned = {}) {
     const auto undoStart = std::chrono::steady_clock::now();
     struct Work {
         Lsn target;
@@ -145,6 +147,25 @@ void undoTransactions(
         if (record.transactionId != transactionId) {
             throw WalError(WalErrorKind::CorruptRecord,
                            "UNDO chain crosses transaction ownership");
+        }
+        if (record.type == LogRecordType::BeginOwned || record.type == LogRecordType::RollbackCleanupBegin
+            || record.type == LogRecordType::RollbackCleanupIntent || record.type == LogRecordType::RollbackCleanupProgress) {
+            if (transaction.rollbackProtocol != RollbackProtocol::OwnedAppend || !finishOwned)
+                throw WalError(WalErrorKind::CorruptRecord,"Owned UNDO lacks private lifecycle authority");
+            if (!isValidLsn(transaction.cleanupBeginLsn)) {
+                if (record.type != LogRecordType::BeginOwned || record.lsn != transaction.beginLsn)
+                    throw WalError(WalErrorKind::CorruptRecord,"Owned cleanup has no verified UNDO endpoint");
+                recoveryFailPoint("owned_before_cleanup_begin");
+                disk.sync();++stats.databaseSyncCalls;
+                transaction.cleanupBeginLsn=log.append({LogRecordType::RollbackCleanupBegin,transactionId,
+                    transactionLastLsn,encodeCleanupBegin({transaction.beginLsn,transaction.reservations.size()})});
+                transactionLastLsn=transaction.cleanupBeginLsn;
+                stats.undoWalBytes+=wal_record_layout::HEADER_SIZE+owned_rollback_layout::CLEANUP_SIZE;
+                recoveryFailPoint("owned_after_cleanup_begin_append");
+                log.flushUpTo(transaction.cleanupBeginLsn);recoveryFailPoint("owned_after_cleanup_begin_force");
+            }
+            nextUndoLsn=INVALID_LSN;
+            continue; // all user-page UNDO must finish before allocator cleanup
         }
         if (record.type == LogRecordType::Begin) {
             if (transaction.clrCount != 0) recoveryFailPoint("recovery_after_final_clr");
@@ -198,7 +219,7 @@ void undoTransactions(
         ++stats.undoUserRecordsVisited;
         const auto identity = pageUpdateIdentity(record);
         nextUndoLsn = record.prevLsn;
-        // Appended pages are removed by the idempotent final truncation.
+        // Legacy appends truncate; owned appends are reclaimed after user UNDO.
         if (!identity.beforePageExisted) {
             work.push({nextUndoLsn, transactionId, index});
             continue;
@@ -238,6 +259,9 @@ void undoTransactions(
             ::_exit(86);
         }
         work.push({nextUndoLsn, transactionId, index});
+    }
+    for (auto* transaction : losers) {
+        if (transaction->rollbackProtocol == RollbackProtocol::OwnedAppend) finishOwned(*transaction);
     }
     stats.undoNs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -331,6 +355,23 @@ void recoveryFailPoint(std::string_view name) {
     if (configured != nullptr && name == configured) ::_exit(86);
 }
 
+RecoveryStats RecoveryManager::recoverAtStartup() {
+    // DatabaseServer has not constructed a pool, SQL engine or listener yet.
+    // No session can be admitted until this constructor phase completes.
+    DatabaseAccessGate gate;
+    auto lease = gate.acquireExclusive();
+    ownedGate_ = &gate;
+    ownedLease_ = &lease;
+    try {
+        auto result = recover();
+        ownedGate_ = nullptr; ownedLease_ = nullptr;
+        return result;
+    } catch (...) {
+        ownedGate_ = nullptr; ownedLease_ = nullptr;
+        throw; // construction fails; no normal operations may resume
+    }
+}
+
 RecoveryStats RecoveryManager::recover() {
     analysisTransactions_.clear();
     recoveredTransactions_.clear();
@@ -404,7 +445,55 @@ RecoveryStats RecoveryManager::recover() {
         }
     }
     stats.walBytesSkipped = scanStart - logManager_.oldestRetainedLsn();
+    // Test-authorized owned recovery additionally audits retained ownership at
+    // the checkpoint boundary. A malformed empty ATT must not hide a live owned
+    // BEGIN just because the optimized REDO scan would start after it.
+    if (ownedGate_!=nullptr && checkpoint.slot.has_value()) {
+        OwnedRollbackCleanup::requireAuthority(ownedGate_,ownedLease_);
+        const auto retained=logManager_.scan();
+        const auto first=std::find_if(retained.records.begin(),retained.records.end(),[](const auto& r) {
+            return r.type==LogRecordType::BeginOwned;
+        });
+        const auto boundary=std::find_if(first,retained.records.end(),[&](const auto& r){return r.lsn>=analysisBoundary;});
+        if (first!=boundary) {
+            const auto prefix=std::span<const LogRecord>(retained.records).subspan(
+                static_cast<std::size_t>(first-retained.records.begin()),static_cast<std::size_t>(boundary-first));
+            const auto snapshot=analyzeOwnedRollbackHistory(prefix);
+            for (const auto& [id,owner] : snapshot) if (owner.protocol==RollbackProtocol::OwnedAppend
+                && owner.phase!=OwnedCleanupPhase::AbortRecorded && owner.phase!=OwnedCleanupPhase::CommitRecorded) {
+                const auto att=checkpointAtt.find(id);
+                if (owner.phase!=OwnedCleanupPhase::OwnedActive || att==checkpointAtt.end()
+                    || att->second.beginLsn!=owner.beginLsn || att->second.lastLsn!=owner.lastLsn)
+                    throw WalError(WalErrorKind::CorruptRecord,"Checkpoint omitted required owned cleanup history");
+            }
+        }
+    }
     auto scan = logManager_.scanFrom(scanStart);
+    // Parsing a committed owned history is not permission to initiate cleanup.
+    // Production startup supplies authority at the pre-admission boundary.
+    const bool containsOwned=std::any_of(scan.records.begin(), scan.records.end(), [](const auto& record) {
+            return isOwnedRollbackRecord(record.type);
+        });
+    Lsn ownedBegin=INVALID_LSN;
+    for (const auto& r : scan.records) if (r.type==LogRecordType::BeginOwned) {
+        ownedBegin=r.lsn;break;
+    }
+    const auto ownedHistory=[&]() {
+        const auto first=std::find_if(scan.records.begin(),scan.records.end(),[&](const auto& r){return r.lsn==ownedBegin;});
+        return std::span<const LogRecord>(scan.records).subspan(static_cast<std::size_t>(first-scan.records.begin()));
+    };
+    std::map<TransactionId,OwnedRollbackAnalysis> ownedAnalysis;
+    if (isValidLsn(ownedBegin)) ownedAnalysis=analyzeOwnedRollbackHistory(ownedHistory());
+    if (containsOwned) {
+        if (ownedGate_ != nullptr && ownedLease_ != nullptr) {
+            OwnedRollbackCleanup::requireAuthority(ownedGate_,ownedLease_);
+        } else if (ownedAnalysis.empty() || std::any_of(ownedAnalysis.begin(),ownedAnalysis.end(),[](const auto& item) {
+            return item.second.protocol == RollbackProtocol::OwnedAppend
+                && item.second.phase != OwnedCleanupPhase::CommitRecorded;
+        })) {
+            throw WalError(WalErrorKind::CorruptRecord,"Owned cleanup requires startup lifecycle authority");
+        }
+    }
     stats.walBytesScanned = scan.fileBytes - scanStart;
     if (scan.truncatedTail) {
         stats.repairedTail = true;
@@ -417,6 +506,18 @@ RecoveryStats RecoveryManager::recover() {
     }
     scan.truncatedTail = false;
     scan.fileBytes = scan.validBytes;
+    // One interrupted intent can add one system record after the complete
+    // transaction/conflict analysis, before REDO. Preserve indexed pointers.
+    if (isValidLsn(ownedBegin)) scan.records.reserve(scan.records.size()+1);
+    std::map<Lsn,std::pair<TransactionId,CleanupIntentPayload>> reclaimOwners;
+    for (const auto& [id,owner] : ownedAnalysis) for (const auto& [page,entry] : owner.reservations) {
+        static_cast<void>(page);
+        if (owner.beginLsn<analysisBoundary && !checkpointAtt.contains(id)) continue;
+        if (isValidLsn(entry.intentLsn)) {
+            const auto intent=decodeCleanupIntent(logManager_.readRecordAt(entry.intentLsn));
+            reclaimOwners.emplace(intent.reclaimLsn,std::pair{id,intent});
+        }
+    }
     std::map<TransactionId, AnalyzedTransaction> transactions;
     std::size_t activeTransactionCount = 0;
     std::map<PageId, TransactionId> activePageOwners;
@@ -450,8 +551,15 @@ RecoveryStats RecoveryManager::recover() {
             checkedAtt = true;
         }
         if (record.type == LogRecordType::PageReclaim) {
-            static_cast<void>(decodePageReclaim(record));
-            if (activeTransactionCount != 0) {
+            const auto payload=decodePageReclaim(record);
+            const auto association=reclaimOwners.find(record.lsn);
+            if (association!=reclaimOwners.end()) {
+                const auto owner=transactions.find(association->second.first);
+                if (activeTransactionCount!=1 || owner==transactions.end()
+                    || owner->second.status!=TransactionStatus::Aborting
+                    || !isValidLsn(owner->second.cleanupBeginLsn) || payload!=association->second.second.reclaim)
+                    throw WalError(WalErrorKind::CorruptRecord,"Unverified owned reclaim association");
+            } else if (activeTransactionCount != 0) {
                 throw WalError(WalErrorKind::CorruptRecord, "Reclaim overlaps a live user transaction");
             }
             redo.push_back(&record); ++stats.reclaimRecords;
@@ -521,13 +629,16 @@ RecoveryStats RecoveryManager::recover() {
         validateTransactionRecordPayload(record);
         highestTailTransactionId = std::max(highestTailTransactionId, record.transactionId);
         auto found = transactions.find(record.transactionId);
-        if (record.type == LogRecordType::Begin) {
+        if (record.type == LogRecordType::Begin || record.type == LogRecordType::BeginOwned) {
             if (found != transactions.end()) {
                 throw WalError(WalErrorKind::CorruptRecord, "Transaction has duplicate BEGIN records");
             }
             AnalyzedTransaction transaction;
             transaction.transactionId = record.transactionId;
-            transaction.startPageCount = decodeBeginLogPayload(record.payload).startPageCount;
+            transaction.rollbackProtocol=record.type==LogRecordType::BeginOwned
+                ? RollbackProtocol::OwnedAppend : RollbackProtocol::LegacyTruncate;
+            transaction.startPageCount = record.type==LogRecordType::BeginOwned
+                ? decodeOwnedBegin(record).startPageCount : decodeBeginLogPayload(record.payload).startPageCount;
             transaction.beginLsn = record.lsn;
             transaction.lastLsn = record.lsn;
             transaction.undoNextLsn = record.lsn;
@@ -542,7 +653,16 @@ RecoveryStats RecoveryManager::recover() {
             || record.prevLsn != found->second.lastLsn) {
             throw WalError(WalErrorKind::CorruptRecord, "WAL transaction chain is malformed");
         }
-        if (record.type == LogRecordType::PageReserve) {
+        if (record.type==LogRecordType::RollbackCleanupBegin || record.type==LogRecordType::RollbackCleanupIntent
+            || record.type==LogRecordType::RollbackCleanupProgress) {
+            // The complete BEGIN-rooted Stage-1 state machine was validated
+            // before any REDO. No cleanup record is a DPT page update.
+            if (found->second.rollbackProtocol!=RollbackProtocol::OwnedAppend || !ownedAnalysis.contains(record.transactionId))
+                throw WalError(WalErrorKind::CorruptRecord,"Cleanup has no validated owned history");
+            found->second.status=TransactionStatus::Aborting;
+            found->second.undoNextLsn=INVALID_LSN;
+            if (record.type==LogRecordType::RollbackCleanupBegin) found->second.cleanupBeginLsn=record.lsn;
+        } else if (record.type == LogRecordType::PageReserve) {
             const auto payload = decodePageReserveLogPayload(record.payload);
             auto& transaction = found->second;
             if (transaction.status != TransactionStatus::Active
@@ -685,14 +805,21 @@ RecoveryStats RecoveryManager::recover() {
         stats.loserLastUndoNextLsn = losers.front()->undoNextLsn;
         // Allocation ownership is deliberately not redesigned here. Multiple
         // losers are supported only on preallocated, disjoint physical pages.
-        const auto minimumStart = (*std::min_element(losers.begin(), losers.end(),
+        const auto ownedAllocating=std::count_if(losers.begin(),losers.end(),[](const auto* t) {
+            return t->rollbackProtocol==RollbackProtocol::OwnedAppend && !t->reservations.empty();
+        });
+        if (ownedAllocating!=0 && losers.size()!=1)
+            throw WalError(WalErrorKind::CorruptRecord,"Owned allocation cleanup requires a single allocating loser");
+        std::vector<RecoveryTransactionEntry*> legacyLosers;
+        for (auto* t:losers) if(t->rollbackProtocol==RollbackProtocol::LegacyTruncate) legacyLosers.push_back(t);
+        const auto minimumStart = legacyLosers.empty() ? std::uint64_t{INVALID_PAGE_ID} : (*std::min_element(legacyLosers.begin(), legacyLosers.end(),
             [](const auto* left, const auto* right) { return left->startPageCount < right->startPageCount; }))
             ->startPageCount;
         for (const auto& [id, transaction] : transactions) {
             static_cast<void>(id);
             const bool unfinished = transaction.status == TransactionStatus::Active
                 || transaction.status == TransactionStatus::Aborting;
-            if (losers.size() > 1 && unfinished
+            if (losers.size() > 1 && unfinished && transaction.rollbackProtocol==RollbackProtocol::LegacyTruncate
                 && transaction.startPageCount != diskManager_.pageCount()) {
                 throw WalError(WalErrorKind::CorruptRecord, "Interleaved allocation history is unsupported");
             }
@@ -709,6 +836,20 @@ RecoveryStats RecoveryManager::recover() {
                     }
                 }
             }
+        }
+    }
+    if (isValidLsn(ownedBegin) && ownedGate_ != nullptr) {
+        const auto before=scan.records.size();
+        OwnedRollbackCleanup::completeIntentTail(diskManager_,logManager_,scan,ownedBegin,ownedGate_,ownedLease_);
+        if (scan.records.size()!=before) {
+            const auto& completed=scan.records.back();
+            recordsByLsn.emplace(completed.lsn,&completed);
+            redo.push_back(&completed);++stats.reclaimRecords;
+            ownedAnalysis=analyzeOwnedRollbackHistory(ownedHistory());
+            std::sort(redo.begin(),redo.end(),[](const auto* a,const auto* b){return a->lsn<b->lsn;});
+            stats.lsnIndexEntries=stats.recoveryLsnIndexEntries=recordsByLsn.size();
+            stats.recoveryLsnIndexBytes=recordsByLsn.size()*sizeof(decltype(recordsByLsn)::value_type)
+                + recordsByLsn.bucket_count()*sizeof(void*);
         }
     }
     stats.analysisWinners = stats.committedTransactions;
@@ -739,6 +880,11 @@ RecoveryStats RecoveryManager::recover() {
     for (const auto* record : redo) {
         if (record->type == LogRecordType::PageReclaim) {
             const auto value = decodePageReclaim(*record);
+            const auto association=reclaimOwners.find(record->lsn);
+            if (association!=reclaimOwners.end()) {
+                OwnedRollbackCleanup::validateReclaimEvidence(diskManager_,*record,
+                    ownedAnalysis.at(association->second.first),ownedHistory());
+            }
             const auto prior = reclaimedHistory.find(value.page);
             if (prior != reclaimedHistory.end() && (crc32c(prior->second) != value.beforeCrc
                 || std::equal(free_page_layout::MAGIC.begin(), free_page_layout::MAGIC.end(), prior->second.begin()))) {
@@ -883,10 +1029,12 @@ RecoveryStats RecoveryManager::recover() {
             DiskManager::Page page{};
             const auto proven=lineage.afterImage(update.pageId,record->lsn);
             if(proven)page=*proven;
-            else if (update.pageId < diskManager_.pageCount()) {
+            else if (update.beforePageExisted && update.pageId < diskManager_.pageCount()) {
                 diskManager_.readPhysicalPage(update.pageId, page);
                 ++stats.recoveryPageReads;
             }
+            // Appended-page deltas are cumulative from a zero page, never
+            // from a later Free/typed incarnation retaining a newer PageLSN.
             if(!proven)applyPageDeltaAfter(page, update);
             diskManager_.writePhysicalPage(update.pageId, page);
             ++stats.legacyRedoRecords;
@@ -905,7 +1053,7 @@ RecoveryStats RecoveryManager::recover() {
 
             DiskManager::Page current{};
             const bool pageExists = pageId < diskManager_.pageCount();
-            const bool needsCurrentPage = record->type == LogRecordType::PageDeltaUpdateV2
+            const bool needsCurrentPage = (record->type == LogRecordType::PageDeltaUpdateV2 && beforePageExisted)
                 || (redoPolicy_ == RedoPolicy::PageLsnSelectiveRedo
                     && pageExists && beforePageExisted);
             if (pageExists && needsCurrentPage) {
@@ -987,7 +1135,9 @@ RecoveryStats RecoveryManager::recover() {
             [&](PageId pageId, DiskManager::Page& page) {
                 diskManager_.readPhysicalPage(pageId, page);
                 ++stats.recoveryPageReads;
-            }, stats);
+            }, stats, false, [&](RecoveryTransactionEntry& t) {
+                OwnedRollbackCleanup::finish(diskManager_,logManager_,t,ownedGate_,ownedLease_,stats);
+            });
     } else {
         diskManager_.sync();
         ++stats.databaseSyncCalls;
@@ -1109,6 +1259,7 @@ std::uint64_t RecoveryCoordinator::peakTransactionRecoveryBytes(TransactionId id
 
 TransactionId RecoveryCoordinator::beginTransaction() {
     std::lock_guard lock(contextsMutex_);
+    if (rollbackActive_) throw std::logic_error("Rollback requires restart/completion");
     if (allocatorSystemOperation_) throw std::logic_error("Allocator system operation requires restart/completion");
     if (nextTransactionId_ == INVALID_TRANSACTION_ID
         || nextTransactionId_ == std::numeric_limits<TransactionId>::max()) {
@@ -1127,10 +1278,54 @@ TransactionId RecoveryCoordinator::beginTransaction() {
     return id;
 }
 
+TransactionId RecoveryCoordinator::beginOwnedTransaction(const TransactionManager& manager,
+    std::uint64_t session, const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease) {
+    OwnedRollbackCleanup::requireAuthority(&gate, &lease);
+    std::lock_guard lock(contextsMutex_);
+    if (!contexts_.empty() || ownedTransactionId_ != INVALID_TRANSACTION_ID)
+        throw std::logic_error("Owned writer requires an idle exclusive recovery context");
+    const auto id = beginTransaction();
+    contexts_.at(id).rollbackProtocol = RollbackProtocol::OwnedAppend;
+    ownedGate_ = &gate; ownedLease_ = &lease;
+    ownedManager_ = &manager; ownedSession_ = session; ownedTransactionId_ = id;
+    return id;
+}
+
+void RecoveryCoordinator::requireOwnedAuthority(const RecoveryTransactionContext& context) const {
+    if (context.rollbackProtocol != RollbackProtocol::OwnedAppend) return;
+    OwnedRollbackCleanup::requireAuthority(ownedGate_, ownedLease_);
+    if (ownedManager_ != nullptr && ownedTransactionId_ != context.transactionId)
+        throw std::logic_error("Owned writer authority belongs to another recovery transaction");
+}
+
+void RecoveryCoordinator::requireOwnedTransaction(TransactionId id, const TransactionManager& manager,
+    std::uint64_t session, const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease) const {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    if (ownedManager_ != &manager || ownedSession_ != session || ownedTransactionId_ != id
+        || ownedGate_ != &gate || ownedLease_ != &lease || found == contexts_.end()
+        || found->second.rollbackProtocol != RollbackProtocol::OwnedAppend
+        || found->second.status != RecoveryTransactionStatus::Active)
+        throw std::logic_error("Writer session does not own the bound recovery transaction");
+    requireOwnedAuthority(found->second);
+}
+
+void RecoveryCoordinator::finishOwnedTransaction(TransactionId id, const TransactionManager& manager,
+    std::uint64_t session) {
+    std::lock_guard lock(contextsMutex_);
+    if (ownedManager_ != &manager || ownedSession_ != session || ownedTransactionId_ != id
+        || contexts_.contains(id) || rollbackActive_)
+        throw std::logic_error("Cannot release unfinished owned writer authority");
+    OwnedRollbackCleanup::requireAuthority(ownedGate_, ownedLease_);
+    ownedGate_ = nullptr; ownedLease_ = nullptr; ownedManager_ = nullptr;
+    ownedSession_ = 0; ownedTransactionId_ = INVALID_TRANSACTION_ID;
+}
+
 void RecoveryCoordinator::bindTransaction(TransactionId id) {
     std::lock_guard lock(contextsMutex_);
     const auto found = contexts_.find(id);
     if (found == contexts_.end()) throw std::logic_error("Unknown recovery transaction");
+    requireOwnedAuthority(found->second);
     if (rollbackActive_) throw std::logic_error("Rollback is in progress");
     if (active_ != nullptr && !active_->safeBoundary && active_->transactionId != id) {
         throw std::logic_error("Cannot switch a physically mutating transaction");
@@ -1213,6 +1408,7 @@ void RecoveryCoordinator::notePageWriteIntent(
     if (active_ == nullptr) {
         throw std::logic_error("Page mutation requires an active statement transaction");
     }
+    requireOwnedAuthority(*active_);
     if (pageId == INVALID_PAGE_ID) throw std::invalid_argument("Write intent has invalid PageId");
     for (const auto& [id, context] : contexts_) {
         if (id != active_->transactionId
@@ -1311,6 +1507,7 @@ void RecoveryCoordinator::notePhysicalPageAppend(PageId pageId) {
     if (active_ == nullptr || active_->status != TransactionStatus::Active) {
         throw std::logic_error("Append confirmation lacks active owner");
     }
+    requireOwnedAuthority(*active_);
     const auto found = active_->reservations.find(pageId);
     const auto durable = logManager_.durableLsn();
     if (found == active_->reservations.end() || found->second.materializedInRuntime
@@ -1321,10 +1518,13 @@ void RecoveryCoordinator::notePhysicalPageAppend(PageId pageId) {
 }
 
 void RecoveryCoordinator::ensureBeginLogged(RecoveryTransactionContext& context) {
+    requireOwnedAuthority(context);
     if (isValidLsn(context.beginLsn)) return;
-    const auto payload = encodeBeginLogPayload(BeginLogPayload{context.startPageCount});
+    const bool owned=context.rollbackProtocol==RollbackProtocol::OwnedAppend;
+    const auto payload = owned ? encodeOwnedBegin({context.startPageCount})
+        : encodeBeginLogPayload(BeginLogPayload{context.startPageCount});
     context.beginLsn = logManager_.append(LogRecord{
-        LogRecordType::Begin,
+        owned ? LogRecordType::BeginOwned : LogRecordType::Begin,
         context.transactionId,
         INVALID_LSN,
         payload,
@@ -1363,6 +1563,7 @@ Lsn RecoveryCoordinator::preparePageForWrite(
         if (candidate.pages.contains(pageId)) { context = &candidate; break; }
     }
     if (context == nullptr) return INVALID_LSN;
+    requireOwnedAuthority(*context);
     const auto found = context->pages.find(pageId);
     if (found == context->pages.end()) return INVALID_LSN;
     auto& state = found->second;
@@ -1533,6 +1734,7 @@ void RecoveryCoordinator::prepareStatement() {
 }
 
 void RecoveryCoordinator::commitStatement() {
+    if (active_ != nullptr) requireOwnedAuthority(*active_);
     prepareStatement();
     std::lock_guard lock(contextsMutex_);
     if (!isValidLsn(active_->beginLsn)) {
@@ -1560,6 +1762,14 @@ void RecoveryCoordinator::commitStatement() {
 
 void RecoveryCoordinator::rollbackStatement() {
     if (active_ == nullptr) throw std::logic_error("No statement transaction is active");
+    const bool owned=active_->rollbackProtocol==RollbackProtocol::OwnedAppend;
+    if (owned) {
+        requireOwnedAuthority(*active_);
+        if (contexts_.size()!=1) throw std::logic_error("Live owned rollback requires an exclusive transaction context");
+        requireNoPins();
+        if (bufferPool_!=nullptr && !active_->pages.contains(0) && bufferPool_->isDirty(0).value_or(false))
+            throw std::logic_error("Owned cleanup cannot discard unrelated dirty metadata");
+    }
     // Log the final resident states before invalidation. In particular, the
     // transaction may have failed midway through its most recent SQL statement.
     prepareStatement();
@@ -1589,7 +1799,13 @@ void RecoveryCoordinator::rollbackStatement() {
             static_cast<void>(state);
             bufferPool_->discardPageForRecovery(pageId);
         }
-        bufferPool_->discardPagesAtOrAboveForRecovery(static_cast<PageId>(startPageCount));
+        if (!owned) bufferPool_->discardPagesAtOrAboveForRecovery(static_cast<PageId>(startPageCount));
+        else {
+            for (const auto& [page,reservation] : active_->reservations) {
+                static_cast<void>(reservation);bufferPool_->discardPageForRecovery(page);
+            }
+            bufferPool_->discardPageForRecovery(0); // explicitly rebuilt by cleanup publication
+        }
     }
     std::lock_guard undoLock(contextsMutex_);
     lastRollbackStats_.loserTransactions = 1;
@@ -1602,10 +1818,12 @@ void RecoveryCoordinator::rollbackStatement() {
                 throw std::logic_error("Rollback page has no original before-image");
             }
             page = found->second.before;
-        }, lastRollbackStats_, true);
+        }, lastRollbackStats_, true, [&](RecoveryTransactionEntry& t) {
+            OwnedRollbackCleanup::finish(diskManager_,logManager_,t,ownedGate_,ownedLease_,lastRollbackStats_);
+        });
     stats_.walTotalBytesGenerated += lastRollbackStats_.undoWalBytes
         + wal_record_layout::HEADER_SIZE;
-    stats_.rollbackDatabaseWrites += lastRollbackStats_.undoPageWrites;
+    stats_.rollbackDatabaseWrites += lastRollbackStats_.undoPageWrites + lastRollbackStats_.reclaimPageWrites;
     diskManager_.reloadDatabaseHeader();
     std::lock_guard lock(contextsMutex_);
     stats_.pageReservationsAborted += active_->reservations.size();

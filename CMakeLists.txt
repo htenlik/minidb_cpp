@@ -17,6 +17,9 @@ add_library(minidb_core
     src/disk_manager.cpp
     src/lru_k_replacer.cpp
     src/log_manager.cpp
+    src/owned_rollback_log.cpp
+    src/owned_rollback_analysis.cpp
+    src/owned_rollback_cleanup.cpp
     src/page_allocator.cpp
     src/page_reclaim.cpp
     src/reclaim_lineage.cpp
@@ -206,6 +209,32 @@ add_test(NAME row_test COMMAND row_test)
 add_executable(wal_codec_test tests/wal_codec_test.cpp)
 target_link_libraries(wal_codec_test PRIVATE minidb_core)
 add_test(NAME wal_codec_test COMMAND wal_codec_test)
+
+add_executable(owned_rollback_codec_test tests/owned_rollback_codec_test.cpp)
+target_link_libraries(owned_rollback_codec_test PRIVATE minidb_core)
+add_test(NAME owned_rollback_codec_test COMMAND owned_rollback_codec_test)
+add_executable(owned_rollback_cleanup_test tests/owned_rollback_cleanup_test.cpp)
+target_link_libraries(owned_rollback_cleanup_test PRIVATE minidb_core)
+add_test(NAME owned_rollback_cleanup_test COMMAND owned_rollback_cleanup_test)
+add_test(NAME owned_rollback_cleanup_crash_test COMMAND owned_rollback_cleanup_test --crash)
+set_tests_properties(owned_rollback_cleanup_crash_test PROPERTIES TIMEOUT 300)
+add_executable(owned_rollback_model_test tests/owned_rollback_model_test.cpp)
+target_link_libraries(owned_rollback_model_test PRIVATE minidb_core)
+add_test(NAME owned_rollback_model_test COMMAND owned_rollback_model_test)
+set_tests_properties(owned_rollback_model_test PROPERTIES TIMEOUT 600)
+add_executable(owned_rollback_sql_test tests/owned_rollback_sql_test.cpp)
+target_link_libraries(owned_rollback_sql_test PRIVATE minidb_network)
+add_test(NAME owned_rollback_sql_test COMMAND owned_rollback_sql_test)
+set_tests_properties(owned_rollback_sql_test PROPERTIES TIMEOUT 300)
+add_test(NAME owned_rollback_sql_crash_test COMMAND owned_rollback_sql_test --crash)
+set_tests_properties(owned_rollback_sql_crash_test PROPERTIES TIMEOUT 300)
+add_test(NAME owned_rollback_sql_tcp_test COMMAND owned_rollback_sql_test --tcp)
+set_tests_properties(owned_rollback_sql_tcp_test PROPERTIES TIMEOUT 90)
+add_executable(production_owned_rollback_test tests/production_owned_rollback_test.cpp)
+target_link_libraries(production_owned_rollback_test PRIVATE minidb_network)
+add_test(NAME production_owned_rollback_test COMMAND production_owned_rollback_test)
+add_test(NAME production_owned_rollback_crash_test COMMAND production_owned_rollback_test --crash)
+set_tests_properties(production_owned_rollback_crash_test PROPERTIES TIMEOUT 180)
 
 add_executable(log_manager_test tests/log_manager_test.cpp)
 target_link_libraries(log_manager_test PRIVATE minidb_core)

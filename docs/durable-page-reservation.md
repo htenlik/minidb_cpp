@@ -1,12 +1,14 @@
 # Durable appended-page reservations
 
 A separate [PAGE_RECLAIM system primitive](crash-safe-page-reclamation.md) can publish
-certified unreferenced pages independently. It is not connected to reservation-loser
-cleanup: user rollback still truncates and free-list reuse ownership remains unresolved.
+certified unreferenced pages independently. The [owned rollback protocol](owned-rollback-protocol.md)
+also associates it with validated reservation-loser cleanup after user UNDO. See
+[production activation](owned-rollback-activation.md) for the private lifecycle bridge.
 
 MiniDB++ logs transaction-owned APPENDED reservations before physical extension.
 This records provenance, not transaction-local reclamation. SQL still permits only
-one exclusive writer; rollback still truncates to the existing BEGIN page count.
+one exclusive writer. New SQL BEGIN_OWNED rollback retains extent and reclaims
+eligible appends; legacy BEGIN rollback retains its original truncation semantics.
 Free-list reuse/release ownership and overlapping allocating writers are unresolved.
 
 ## Persistent encoding
@@ -82,7 +84,7 @@ completion does. Snapshots are owned values, not frame pointers or a persistent 
 | MATERIALIZED | runtime callback after successful append only; no separate WAL record |
 | INITIALIZED | valid page bytes/PAGE_UPDATE may provide evidence; no lifecycle record |
 | COMMITTED | existing durable transaction COMMIT, not proof every reservation materialized |
-| ABORTED | existing durable ABORT after legacy UNDO/truncation |
+| ABORTED | durable ABORT after protocol-selected UNDO and physical cleanup |
 
 Recovery reconstructs reservation maps and terminal owner state from retained WAL.
 It sets materializedInRuntime=false: this means **unknown after restart**, not that
@@ -132,5 +134,6 @@ is measured; its expected extra first force is not presented as measured perform
 Reservations alone do not solve loser-owned page reclamation, exactly-once free-list
 insertion, shared page-0 metadata, deferred releases or cross-transaction reuse.
 `T1 append; T2 append/COMMIT; T1 ROLLBACK` remains unsupported. The separate allocation
-audit branch/red tests remain unmerged. There is no non-truncating rollback, multi-writer
-SQL, free-list redesign, page-format change, WAL epoch scheme or torn-page repair here.
+audit branch/red tests remain unmerged. Owned non-truncating rollback is bounded by
+single-writer lifecycle authority; it adds no multi-writer SQL, free-list redesign,
+page-format change, WAL epoch scheme or torn-page repair.

@@ -4,6 +4,7 @@
 #include <atomic>
 #include "minidb/checkpoint_types.hpp"
 #include "minidb/recovery_log.hpp"
+#include "minidb/database_access_gate.hpp"
 
 #include <array>
 #include <cstdint>
@@ -15,6 +16,11 @@
 
 namespace minidb {
 
+namespace test { class OwnedRollbackTestAccess; }
+class OwnedRollbackCleanup;
+class TransactionManager;
+namespace net { class DatabaseServer; }
+
 class BufferPoolManager;
 class CheckpointControl;
 class LogManager;
@@ -25,6 +31,7 @@ enum class RedoPolicy : std::uint8_t {
 };
 
 enum class RecoveryTransactionStatus : std::uint8_t { Active, Committed, Aborting, Aborted };
+enum class RollbackProtocol : std::uint8_t { LegacyTruncate, OwnedAppend };
 
 struct PageReservationEntry {
     PageId pageId = INVALID_PAGE_ID;
@@ -47,6 +54,8 @@ struct RecoveryTransactionEntry {
     std::uint64_t clrCount = 0;
     bool hasDurableCommit = false;
     bool hasDurableAbort = false;
+    RollbackProtocol rollbackProtocol = RollbackProtocol::LegacyTruncate;
+    Lsn cleanupBeginLsn = INVALID_LSN;
     std::map<PageId, PageReservationEntry> reservations;
 };
 
@@ -187,6 +196,8 @@ struct TransactionRuntimeStats {
 };
 
 class RecoveryManager {
+    friend class test::OwnedRollbackTestAccess;
+    friend class net::DatabaseServer;
 public:
     RecoveryManager(
         DiskManager& diskManager,
@@ -207,6 +218,11 @@ public:
     }
 
 private:
+    // Only DatabaseServer's pre-admission constructor boundary (or tests) binds
+    // startup authority. Ordinary raw recovery has no implicit cleanup privilege.
+    [[nodiscard]] RecoveryStats recoverAtStartup();
+    const DatabaseAccessGate* ownedGate_ = nullptr;
+    const DatabaseAccessGate::Lease* ownedLease_ = nullptr;
     DiskManager& diskManager_;
     LogManager& logManager_;
     CheckpointControl* checkpointControl_;
@@ -218,6 +234,13 @@ private:
 
 class RecoveryCoordinator final : public PageRecoveryHook {
     friend class PageReclaimer;
+    friend class test::OwnedRollbackTestAccess;
+    friend class TransactionManager;
+    [[nodiscard]] TransactionId beginOwnedTransaction(const TransactionManager& manager,
+        std::uint64_t session, const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease);
+    void requireOwnedTransaction(TransactionId id, const TransactionManager& manager,
+        std::uint64_t session, const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease) const;
+    void finishOwnedTransaction(TransactionId id, const TransactionManager& manager, std::uint64_t session);
     // Synchronous non-undoable system operations require an idle coordinator.
     // A failed operation remains poisoned until restart, preventing checkpoints.
     void beginAllocatorSystemOperation();
@@ -312,7 +335,13 @@ private:
     std::atomic<bool> rollbackActive_{false};
     TransactionRuntimeStats stats_{};
     RecoveryStats lastRollbackStats_{};
+    const DatabaseAccessGate* ownedGate_ = nullptr;
+    const DatabaseAccessGate::Lease* ownedLease_ = nullptr;
+    const TransactionManager* ownedManager_ = nullptr;
+    std::uint64_t ownedSession_ = 0;
+    TransactionId ownedTransactionId_ = INVALID_TRANSACTION_ID;
 
+    void requireOwnedAuthority(const RecoveryTransactionContext& context) const;
     void ensureBeginLogged(RecoveryTransactionContext& context);
     [[nodiscard]] Lsn appendTransactionRecord(
         RecoveryTransactionContext& context,

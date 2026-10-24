@@ -72,6 +72,7 @@ private:
 };
 
 class SqlEngine {
+    friend class ::minidb::test::OwnedSqlTestAccess;
 public:
     explicit SqlEngine(
         Catalog& catalog,

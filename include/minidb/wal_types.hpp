@@ -39,6 +39,10 @@ enum class LogRecordType : std::uint16_t {
     FuzzyCheckpointEnd = 12,
     PageReserve = 13,
     PageReclaim = 14,
+    BeginOwned = 15,
+    RollbackCleanupBegin = 16,
+    RollbackCleanupIntent = 17,
+    RollbackCleanupProgress = 18,
 };
 
 enum class WalUpdateMode : std::uint8_t {
@@ -64,7 +68,12 @@ enum class WalUpdateMode : std::uint8_t {
 [[nodiscard]] constexpr bool isValidLogRecordType(LogRecordType type) noexcept {
     const auto value = static_cast<std::uint16_t>(type);
     return value >= static_cast<std::uint16_t>(LogRecordType::Begin)
-        && value <= static_cast<std::uint16_t>(LogRecordType::PageReclaim);
+        && value <= static_cast<std::uint16_t>(LogRecordType::RollbackCleanupProgress);
+}
+
+[[nodiscard]] constexpr bool isOwnedRollbackRecord(LogRecordType type) noexcept {
+    return type == LogRecordType::BeginOwned || type == LogRecordType::RollbackCleanupBegin
+        || type == LogRecordType::RollbackCleanupIntent || type == LogRecordType::RollbackCleanupProgress;
 }
 
 class WalFlushProvider {

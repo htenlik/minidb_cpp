@@ -155,12 +155,19 @@ void sqlSteadyStateAndReadOnly() {
         auto& sql = server.sqlEngine();
         static_cast<void>(sql.execute("CREATE TABLE t (id UINT32 PRIMARY KEY, value VARCHAR(64))"));
         const auto original = server.diskManager().pageCount();
+        std::uint64_t highWater = original;
         for (int cycle = 0; cycle < 100; ++cycle) {
             static_cast<void>(sql.execute("BEGIN"));
             static_cast<void>(sql.execute("INSERT INTO t VALUES (1, 'rollback')"));
             require(server.diskManager().pageCount() > original, "Cycle did not append heap/index pages");
+            if (cycle == 0) highWater = server.diskManager().pageCount();
             static_cast<void>(sql.execute("ROLLBACK"));
-            require(server.diskManager().pageCount() == original, "Equivalent rollback workload grew extent");
+            require(server.diskManager().pageCount() == highWater
+                && server.recoveryCoordinator().lastRollbackStats().pagesTruncated == 0,
+                "Equivalent owned rollback workload grew/truncated extent");
+            std::vector<PageId> expected;
+            for (auto page = original; page < highWater; ++page) expected.insert(expected.begin(), static_cast<PageId>(page));
+            require(server.pageAllocator().freePageIds() == expected, "Rollback lost reusable pages");
             server.catalog().validate(); server.pageAllocator().validate(); server.bufferPool().validate();
             require(std::get<sql::SelectResult>(sql.execute("SELECT * FROM t")).rows.empty(), "Rollback left a row");
         }
@@ -176,7 +183,7 @@ void sqlSteadyStateAndReadOnly() {
         static_cast<void>(sql.execute("COMMIT"));
         const auto records = server.logManager().scan().records;
         require(std::count_if(records.begin() + static_cast<std::ptrdiff_t>(previous), records.end(), [](const auto& r) {
-            return r.type == LogRecordType::Begin;
+            return r.type == LogRecordType::BeginOwned;
         }) == 1, "Explicit transaction with several inserts duplicated BEGIN");
     }
     net::DatabaseServer reopened(db.path().string(), settings);
