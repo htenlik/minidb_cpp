@@ -259,7 +259,10 @@ void scannerAndInactiveRecovery() {
         test::TemporaryDatabase db("owned_codec_scanner");
         const auto h=completed();
         {LogManager log(walPathForDatabase(db.path().string()),4096,LogOpenMode::EagerValidated,mode,512);
-         for(const auto& r:h.records)require(log.append(r)==r.lsn,"Real append LSN changed");log.flushAll();}
+         for(const auto& r:h.records) {
+             require(log.append(r)==r.lsn,"Real append LSN changed");
+         }
+         log.flushAll();}
         {LogManager log(walPathForDatabase(db.path().string()),4096,LogOpenMode::DeferredRecovery,mode,512);
          const auto scan=log.scan();require(scan.records==h.records && !scan.truncatedTail,"Real scanner round trip");
          require(analyzeOwnedRollbackHistory(scan.records).at(7).phase==OwnedCleanupPhase::AbortRecorded,"Scanner analysis");

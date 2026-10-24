@@ -217,7 +217,8 @@ void tcpLifetime() {
                     f.pool.flushAll(); f.log.flushAll(); f.disk.sync();
                     require(::write(replies[1], &signal, 1) == 1, "TCP STEAL ACK missing");
                     // Parent SIGKILLs a real server with live worker/transaction.
-                    static_cast<void>(::read(commands[0], &signal, 1)); ::_exit(99);
+                    require(::read(commands[0], &signal, 1) == 1, "TCP crash wait interrupted");
+                    ::_exit(99);
                 }
                 serving.join(); f.validate();
                 require(f.rows().rows == expected.rows
