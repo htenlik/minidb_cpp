@@ -20,7 +20,7 @@ are errors. Relative build paths resolve from the repository root.
 - FAST/FOCUSED build only selected executable targets, resolving CTest aliases.
   The helper checks CTest registration and rejects missing or empty selections.
 - FULL builds all targets and runs CTest without include/exclude filters. Future
-  registered tests are included automatically; no hard-coded 94-test ceiling.
+  registered tests are included automatically; there is no fixed test-count ceiling.
 - No tests are skipped because a Git SHA was previously verified. There are no
   retries, automatic benchmark repetitions, test disabling, or seed reductions.
 - `--dry-run` prints commands without executing tools or writing files/logs.
@@ -50,7 +50,7 @@ python3 scripts/dev-verify.py --profile FAST --area network --build-dir build-re
 | Area | FAST membership |
 | --- | --- |
 | buffer-wal | `buffer_pool_manager_test`, `buffer_pool_wal_test`, `dirty_page_table_test` |
-| allocator-recovery | `page_allocator_test`, `wal_codec_test`, `recovery_log_test`, `clr_codec_test`, `checkpoint_codec_test`, `fuzzy_checkpoint_codec_test`, `page_lsn_test` |
+| allocator-recovery | `page_allocator_test`, `wal_codec_test`, `recovery_log_test`, `clr_codec_test`, `checkpoint_codec_test`, `fuzzy_checkpoint_codec_test`, `page_lsn_test`, `owned_rollback_codec_test` |
 | sql-parser | `sql_lexer_test`, `sql_parser_test`, `sql_parser_robustness_test`, `sql_semantics_test` |
 | network | `wire_protocol_test`, `tcp_transport_test` |
 
@@ -70,9 +70,9 @@ python3 scripts/dev-verify.py --profile FOCUSED --area network --build-dir build
 | Area | Total tests | Integration emphasis |
 | --- | ---: | --- |
 | buffer-wal | 14 | Frame retirement, physical writeback, reclaim lineage, CLR/UNDO, fuzzy checkpoints, concurrent buffer/readers, SQL storage integration |
-| allocator-recovery | 22 | Reservation/append crashes, reclamation, pageLSN/segmented recovery, checkpoints, transaction rollback, legacy migration |
-| sql-parser | 11 | Executor/random execution, schema tuple codec, Table/Catalog, transaction and recovery integration |
-| network | 8 | Protocol/stress, concurrent sessions/TCP, explicit TCP transactions and recovery integration |
+| allocator-recovery | 25 | Reservation/append crashes, owned cleanup and directed cleanup crashes, reclamation, pageLSN/segmented recovery, checkpoints, transaction rollback, legacy migration |
+| sql-parser | 13 | Executor/random execution, schema tuple codec, Table/Catalog, owned SQL integration and default production rollback |
+| network | 10 | Protocol/stress, concurrent sessions/TCP, explicit transactions, owned TCP cleanup and default production startup/cleanup crashes |
 
 The `FAST`/`INTEGRATION` lists in [the helper](../scripts/dev-verify.py) are
 authoritative. Inspect the exact targets and anchored test-name regex with:
@@ -86,10 +86,35 @@ the complete 20,000-event model. Allocator FOCUSED includes this expensive test;
 the helper neither splits nor trims it. Other directed binaries also include
 hard-crash matrices; FOCUSED is not a promise of subsecond execution.
 
+Owned coverage follows the boundary being changed: allocator recovery selects
+`owned_rollback_cleanup_test` and `owned_rollback_cleanup_crash_test`; SQL selects
+`owned_rollback_sql_test` and `production_owned_rollback_test`; network selects
+`owned_rollback_sql_tcp_test` and `production_owned_rollback_crash_test`. The last
+target also tests default server startup recovery, not just TCP transport.
+
+These CTest modes reuse executables; build the right-hand target, not the mode name:
+
+| CTest name | Build target |
+| --- | --- |
+| `owned_rollback_cleanup_crash_test` | `owned_rollback_cleanup_test` |
+| `owned_rollback_sql_tcp_test` | `owned_rollback_sql_test` |
+| `production_owned_rollback_crash_test` | `production_owned_rollback_test` |
+
+The helper preserves the existing frame-retirement aliases as well. The longer
+`owned_rollback_model_test` and `owned_rollback_sql_crash_test` stay in FULL, not
+FAST/FOCUSED. If investigating them separately, use this explicit selection;
+do not repeat it when the same configuration was already covered by FULL:
+
+```sh
+cmake --build build-retirement-final --parallel 2 --target owned_rollback_model_test owned_rollback_sql_test
+ctest --test-dir build-retirement-final --parallel 1 --output-on-failure --no-tests=error \
+  -R '^(owned_rollback_model_test|owned_rollback_sql_crash_test)$'
+```
+
 ## FULL
 
 Run once on the final source candidate before merging. This is the complete
-registered Release regression: currently **94 tests**, including all model modes,
+registered Release regression: currently **103 targets**, including all model modes,
 the embedded page-reclaim model, and existing benchmark correctness tests.
 Those registered tests run once; the helper launches no additional benchmarks.
 

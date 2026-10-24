@@ -16,6 +16,7 @@ FAST = {
     "allocator-recovery": (
         "page_allocator_test", "wal_codec_test", "recovery_log_test", "clr_codec_test",
         "checkpoint_codec_test", "fuzzy_checkpoint_codec_test", "page_lsn_test",
+        "owned_rollback_codec_test",
     ),
     "sql-parser": ("sql_lexer_test", "sql_parser_test", "sql_parser_robustness_test", "sql_semantics_test"),
     "network": ("wire_protocol_test", "tcp_transport_test"),
@@ -33,20 +34,26 @@ INTEGRATION = {
         "runtime_clr_rollback_test", "multi_transaction_recovery_test", "reclaim_lineage_test",
         "checkpoint_test", "fuzzy_checkpoint_test", "segmented_wal_recovery_test",
         "page_lsn_recovery_test", "legacy_wal_migration_test", "explicit_transaction_test",
+        "owned_rollback_cleanup_test", "owned_rollback_cleanup_crash_test",
     ),
     "sql-parser": (
         "sql_executor_test", "sql_executor_random_test", "schema_tuple_test", "table_test",
         "catalog_test", "explicit_transaction_test", "transaction_recovery_test",
+        "owned_rollback_sql_test", "production_owned_rollback_test",
     ),
     "network": (
         "network_protocol_test", "network_stress_test", "concurrent_tcp_test",
         "concurrent_sessions_test", "explicit_tcp_transaction_test", "transaction_recovery_test",
+        "owned_rollback_sql_tcp_test", "production_owned_rollback_crash_test",
     ),
 }
 # CTest names are not always executable/build-target names.
 ALIASES = {
     "frame_wal_retirement_original_test": "reclaim_lineage_test",
     "frame_wal_retirement_concurrency_test": "frame_wal_retirement_test",
+    "owned_rollback_cleanup_crash_test": "owned_rollback_cleanup_test",
+    "owned_rollback_sql_tcp_test": "owned_rollback_sql_test",
+    "production_owned_rollback_crash_test": "production_owned_rollback_test",
 }
 
 

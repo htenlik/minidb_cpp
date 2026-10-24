@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -68,6 +69,79 @@ class WorkflowTests(unittest.TestCase):
                 result = verify.main(["--profile", "FAST", "--area", "network", "--build-dir", "new-build", "--dry-run"])
         self.assertEqual(result, 0)
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_owned_profile_membership(self):
+        self.assertIn("owned_rollback_codec_test", verify.FAST["allocator-recovery"])
+        expected = {
+            "allocator-recovery": {"owned_rollback_cleanup_test", "owned_rollback_cleanup_crash_test"},
+            "sql-parser": {"owned_rollback_sql_test", "production_owned_rollback_test"},
+            "network": {"owned_rollback_sql_tcp_test", "production_owned_rollback_crash_test"},
+        }
+        for area, names in expected.items():
+            with self.subTest(area=area):
+                self.assertTrue(names <= set(verify.INTEGRATION[area]))
+                self.assertTrue(names.isdisjoint(verify.FAST[area]))
+        slow = {"owned_rollback_model_test", "owned_rollback_sql_crash_test"}
+        for area in verify.FAST:
+            self.assertTrue(slow.isdisjoint(verify.selected_tests(self.args("FOCUSED", area))))
+
+    def test_owned_names_and_existing_aliases_match_cmake(self):
+        # Read the actual source definition, not the temporary runtime ROOT.
+        cmake = (Path(SPEC.origin).resolve().parents[1] / "CMakeLists.txt").read_text()
+        registered = dict(re.findall(r"add_test\(NAME\s+(\w+)\s+COMMAND\s+(\w+)", cmake))
+        expected_aliases = {
+            "owned_rollback_cleanup_crash_test": "owned_rollback_cleanup_test",
+            "owned_rollback_sql_tcp_test": "owned_rollback_sql_test",
+            "production_owned_rollback_crash_test": "production_owned_rollback_test",
+        }
+        for name, executable in expected_aliases.items():
+            self.assertEqual(verify.ALIASES.get(name), executable)
+        for area in verify.FAST:
+            for profile in ("FAST", "FOCUSED"):
+                args = self.args(profile, area)
+                build = verify.commands(args, True)[0]
+                targets = set(build[build.index("--target") + 1:])
+                for name in verify.selected_tests(args):
+                    if "owned_rollback" not in name and name not in verify.ALIASES:
+                        continue
+                    with self.subTest(profile=profile, area=area, name=name):
+                        self.assertIn(name, registered)
+                        self.assertEqual(verify.ALIASES.get(name, name), registered[name])
+                        self.assertIn(registered[name], targets)
+                        self.assertRegex(cmake, r"add_executable\(" + re.escape(registered[name]) + r"\s")
+                        if name != registered[name]:
+                            self.assertNotIn(name, targets)
+
+    def test_each_owned_selection_requires_correct_registration(self):
+        for area in ("allocator-recovery", "sql-parser", "network"):
+            args = self.args("FOCUSED", area)
+            names = set(verify.selected_tests(args))
+            for missing in sorted(name for name in names if "owned_rollback" in name):
+                # A similarly spelled name must not satisfy an exact selection.
+                inventory = names - {missing} | {missing + "_typo"}
+                output = json.dumps({"tests": [{"name": name} for name in inventory]})
+                with self.subTest(area=area, missing=missing), \
+                        patch.object(verify, "check_cache", return_value=True), \
+                        patch.object(verify, "git_state", return_value=self.state), \
+                        patch.object(verify, "run_command", return_value=(0, output)) as run, \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    code = verify.main(["--profile", "FOCUSED", "--area", area, "--build-dir", "build-test"])
+                    self.assertEqual(code, 2)
+                    self.assertFalse(any("--output-on-failure" in call.args[1] for call in run.call_args_list))
+
+    def test_full_accepts_future_registered_tests_without_filters(self):
+        output = json.dumps({"tests": [{"name": "future_model_test"}]})
+        with patch.object(verify, "check_cache", return_value=True), \
+                patch.object(verify, "git_state", return_value=self.state), \
+                patch.object(verify, "run_command", return_value=(0, output)) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(verify.main(["--profile", "FULL", "--area", "all", "--build-dir", "build-test"]), 0)
+        self.assertEqual(len(run.call_args_list), 3)
+        command = run.call_args_list[-1].args[1]
+        self.assertEqual(command[0], "ctest")
+        self.assertNotIn("-R", command)
+        self.assertNotIn("-E", command)
 
     def test_release_is_manual(self):
         with patch.object(verify.subprocess, "run", side_effect=AssertionError("Executed release checklist")):
