@@ -6,9 +6,12 @@ page-0 writes without flushing still-dirty buffer frames or changing persistent 
 
 The internal [PageReclaimer system operation](crash-safe-page-reclamation.md) publishes
 certified unreferenced pages through one WAL-backed two-page transformation. It has no
-production eligibility issuer or SQL/rollback call site yet; ordinary PageAllocator
-release and global truncating rollback remain unchanged. It requires idle exclusive
-ownership and synchronously persists both effects before permitting checkpoints.
+production generic eligibility issuer: its standalone certificate API still requires
+idle exclusive ownership. [Production owned rollback](owned-rollback-activation.md)
+instead uses private lifecycle authority and reservation proof to associate the same
+PAGE_RECLAIM codec/REDO with cleanup intents. Ordinary PageAllocator release is
+unchanged; new SQL rollback retains extent, while legacy BEGIN still truncates.
+Cleanup synchronously persists both reclaim effects before completion/checkpoints.
 
 ## Active and legacy paths
 
@@ -147,8 +150,10 @@ Selective REDO additionally skips a committed v2 update when the disk PageLSN is
 or newer. Recovery owns TransactionId-keyed contexts, interleaved-chain analysis,
 and reverse-LSN multi-loser UNDO. Fuzzy checkpoints can snapshot live ATT between
 statements and retain every active BEGIN. This is a recovery substrate, not multiple
-production writers; global allocation truncation and physical conflicts still require
-one exclusive SQL writer. There is no archive/PITR, fine-grained locks, MVCC, or torn-page protection. Restartable physical CLR
+production writers. Owned appended-page cleanup does not solve shared page-0/free-list
+publication or physical write conflicts; one exclusive SQL writer remains mandatory.
+Legacy BEGIN retains global truncation. There is no archive/PITR, fine-grained locks,
+MVCC, or torn-page protection. Restartable physical CLR
 handling remains inside recovery; page-owning layers do not interpret it. See [wal.md](wal.md),
 [wal-segments.md](wal-segments.md), [fuzzy-checkpoints.md](fuzzy-checkpoints.md), [recovery.md](recovery.md),
 [checkpoints.md](checkpoints.md), and [page-lsn.md](page-lsn.md).

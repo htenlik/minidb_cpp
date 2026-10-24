@@ -3,8 +3,9 @@
 [Transitive reclaim/reuse recovery](crash-safe-page-reclamation.md#transitive-physical-lineage)
 uses existing types 2/8/9/10/5/14 only. It adds no WAL payload, allocation epoch or
 database format. Required retained records must establish full before/after lineage;
-an authoritative checkpoint may exclude completed older history. Owned rollback
-remains unmerged and inactive.
+an authoritative checkpoint may exclude completed older history. Production SQL uses
+[owned rollback](owned-rollback-activation.md); its additional lifecycle records are
+specified in [the owned protocol](owned-rollback-protocol.md).
 
 MiniDB++ uses a versioned sidecar write-ahead log with log sequence numbers (LSNs),
 buffered append and `fsync` durability, safe scanning, write-ahead ordering, implicit
@@ -17,7 +18,7 @@ documented in [wal-adaptive.md](wal-adaptive.md). This protocol is not ARIES;
 A bounded pool can evict dirty frames (the storage pressure behind a STEAL-style
 design), while logical success need not force every data page immediately (the
 motivation behind NO-FORCE). Those choices require log-before-data ordering plus
-REDO/UNDO in a serial, statement-scoped recovery model.
+REDO/UNDO in a single-writer, implicit or explicit transaction-scoped recovery model.
 
 For database path `database.db`, active WAL now lives in `database.db.wal.d/`.
 `database.db.wal` remains the readable legacy-v1 migration source. Exact segment and
@@ -71,7 +72,13 @@ Each record has a fixed 48-byte header followed immediately by its opaque payloa
 Stable record type IDs are `1 BEGIN`, `2 PAGE_UPDATE`, `3 COMMIT`, `4 ABORT`,
 `5 COMPENSATION`, `6 CHECKPOINT_BEGIN`, `7 CHECKPOINT_END`,
 `8 PAGE_DELTA_UPDATE`, `9 PAGE_UPDATE_V2`, `10 PAGE_DELTA_UPDATE_V2`,
-`11 FUZZY_CHECKPOINT_BEGIN`, `12 FUZZY_CHECKPOINT_END`, `13 PAGE_RESERVE`, and `14 PAGE_RECLAIM`.
+`11 FUZZY_CHECKPOINT_BEGIN`, `12 FUZZY_CHECKPOINT_END`, `13 PAGE_RESERVE`,
+`14 PAGE_RECLAIM`, `15 BEGIN_OWNED`, `16 ROLLBACK_CLEANUP_BEGIN`,
+`17 ROLLBACK_CLEANUP_INTENT`, and `18 ROLLBACK_CLEANUP_PROGRESS`.
+Types 15–18 use the exact versioned payloads in
+[owned-rollback-protocol.md](owned-rollback-protocol.md#prototype-compatible-bytes).
+Normal SQL writers emit type 15 lazily; legacy type 1 remains valid for old histories
+and direct bootstrap/migration transactions. Older binaries reject unsupported types.
 Type 14 has a 48-byte payload and system TransactionId zero/invalid prevLSN; it describes
 two independently redoable allocator after-states and is not a user UNDO target. See
 [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md). Other user records
@@ -86,8 +93,8 @@ sharp/fuzzy checkpoint records; type 5 is the physical restartable-UNDO CLR desc
 [clr-restartable-undo.md](clr-restartable-undo.md). Fuzzy payload layouts are
 in [fuzzy-checkpoints.md](fuzzy-checkpoints.md).
 `TransactionId` is `uint64_t`, with zero reserved
-as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. BEGIN is
-16 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
+as invalid/system. Recovery validates exact per-transaction `prevLSN` chains. Legacy BEGIN is
+16 bytes, BEGIN_OWNED is 24 bytes, PAGE_UPDATE is 8208 bytes, and COMMIT/ABORT payloads are empty; see
 [recovery.md](recovery.md).
 
 On database-format-v2 active pages, `full-page` emits type 9, `byte-range` emits type 10,

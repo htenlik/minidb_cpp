@@ -1,8 +1,10 @@
 # Durable BEGIN before physical page extension
 
-MiniDB++ retains one database-wide exclusive SQL writer and the existing 16-byte
-BEGIN payload containing `startPageCount`. Appended-page provenance is now recorded by
-[durable reservations](durable-page-reservation.md); rollback remains truncating.
+MiniDB++ retains one database-wide exclusive SQL writer. Both legacy BEGIN and current
+SQL BEGIN_OWNED capture `startPageCount` before allocation. Appended-page provenance
+is recorded by [durable reservations](durable-page-reservation.md). Current
+[owned rollback](owned-rollback-activation.md) retains and reclaims eligible appended
+extent; only legacy BEGIN rollback truncates. The original 16-byte BEGIN is unchanged.
 
 ## Original crash window
 
@@ -18,7 +20,7 @@ Normal transactional extension now follows:
 ```text
 bound ACTIVE recovery context, original startPageCount retained
     -> prepareForPhysicalPageAppend(expectedPageId)
-    -> append existing-format BEGIN once, if needed
+    -> append protocol-selected BEGIN/BEGIN_OWNED once, if needed
     -> append PAGE_RESERVE once for the expected PageId
     -> flushUpTo(reservation LSN), making BEGIN durable in the same force
     -> return from recovery hook
@@ -41,7 +43,8 @@ but no duplicate BEGIN or separate BEGIN fsync. It may flush buffered updates to
 but it does not force database pages.
 Failure before successful force prevents extension. An all-zero appended page is a
 physical mutation even if no PAGE_UPDATE is generated: its durable BEGIN now permits
-startup/live rollback to truncate it safely under exclusive-writer ownership.
+startup/live rollback to identify it under exclusive-writer ownership: legacy BEGIN
+truncates it, while BEGIN_OWNED validates its reservation and reclaims it for reuse.
 
 No blanket eager BEGIN was added to SQL BEGIN or write intent. Existing-page updates
 still materialize BEGIN lazily during update preparation; read-only/zero-change scopes
@@ -82,18 +85,21 @@ allocator operations safe.
 
 ## Recovery, checkpoints and compatibility
 
-An abandoned append now has a durable BEGIN. Existing CLR UNDO follows its chain and
-truncates to the original boundary, then forces ABORT. That remains a global-file
-operation and is safe only with the existing exclusive writer restriction. Existing
+An abandoned append has a durable protocol-specific BEGIN and reservation. CLR UNDO
+restores existing pages, then protocol-specific cleanup completes before forced ABORT.
+Legacy BEGIN still truncates globally to its original boundary; BEGIN_OWNED uses
+restartable owned reclamation without shrinking extent. Both require the existing
+exclusive writer restriction. Existing
 PageLSN assignment, selective REDO, WAL modes, legacy histories and database formats
 are unchanged. Live fuzzy ATT captures the newly materialized BEGIN only after a
 successful statement is prepared; half-completed append remains checkpoint-unsafe.
 
 The unsupported overlapping history remains:
 `T1 allocates P101; T2 allocates/commits P102; T1 rolls back`.
-Durable BEGIN does not provide per-page ownership or prevent legacy truncation from
+Durable BEGIN alone does not provide per-page ownership or prevent legacy truncation from
 destroying P102. The separate audit branch and its red interleaved test are preserved
-unchanged and are not part of this branch's CTest suite.
+unchanged outside main's CTest suite. Current owned cleanup also does not authorize
+overlapping production allocators.
 
 ## Verification and cost
 
@@ -122,8 +128,9 @@ not free. No timing threshold or universal speed claim is made.
 
 ## Remaining boundary
 
-Free-list reuse/release provenance, restartable allocator
-compensation, safe shared-free-list publication and overlapping allocation rollback
-remain separate work. This fix is not a power-loss/torn-page recovery guarantee,
+Owned appended cleanup now has a restartable protocol; free-list reuse/release remains
+ordinary user before-image/CLR work, not a complete cross-transaction provenance
+scheme. Safe shared-free-list publication and overlapping allocation rollback remain
+unsupported. The extension boundary is not a power-loss/torn-page recovery guarantee,
 allocation epoch protocol, multi-writer implementation, or replacement for the
 existing writer gate.

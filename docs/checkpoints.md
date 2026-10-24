@@ -131,8 +131,10 @@ Production `LogManager` uses deferred recovery. Segmented discovery validates th
 retained manifest, headers, chain, and record boundaries; reclaimed historical files
 are not read. Recovery then selects a cross-valid control slot and invokes strict CRC/length/
 logical-LSN scanner from either `recoveryStartOffset` or the oldest retained LSN. A partial final record
-is truncated. Tail winners retain ascending full-page REDO; the one possible tail loser
-retains reverse before-image UNDO and appended-page truncation.
+is truncated. Tail winners retain ascending physical REDO; losers follow restartable
+CLR UNDO and durable BEGIN-selected cleanup: legacy truncation or
+[owned appended-page reclamation](owned-rollback-protocol.md). Fuzzy ATT supports
+the [validated multi-transaction recovery boundary](multi-transaction-recovery.md).
 
 The next transaction ID is
 `max(checkpoint.nextTransactionId, highest tail TransactionId + 1)`. Quiescence means no

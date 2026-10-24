@@ -84,8 +84,10 @@ copies every range's after bytes, and writes the resulting physical page. Loser 
 walks update records backward and derives the original bytes for each update. Recovery
 records that logical before state in a canonical full-page CLR and installs the CLR LSN;
 it does not restore the historical `beforePageLsn` as final page metadata.
-Newly appended loser pages are removed by truncating to
-the page count recorded in `BEGIN`, as in full-page mode.
+Appended-page deltas reconstruct from their original zero-page base, not a later
+Free Page incarnation. Legacy BEGIN losers truncate to the recorded page count;
+current SQL BEGIN_OWNED uses [owned reclamation](owned-rollback-protocol.md), as in
+full-page mode. The durable transaction type selects cleanup, not the update encoding.
 
 Before any dirty STEAL write, the coordinator appends the selected update encoding and
 the buffer pool forces WAL through the returned volatile page LSN. Commit remains

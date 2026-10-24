@@ -44,7 +44,8 @@ nonboundary references, cycles, duplicate BEGIN and records after a terminal rec
 CLR targets must identify the next uncompensated existing-page update of the same
 transaction/page; `undoNextLSN` must equal that update's `prevLSN`. Skipping or
 repeating existing-page compensation is corruption. Appended-page updates can be
-skipped because legacy rollback removes them through final truncation.
+skipped: legacy rollback removes them through final truncation, while BEGIN_OWNED
+uses [validated appended-page cleanup](owned-rollback-protocol.md).
 
 `RecoveryManager::analysisTransactions()` exposes the classified value-only table;
 `recoveredTransactions()` exposes terminal entries after UNDO. Winners' updates and
@@ -104,8 +105,9 @@ selects the globally largest outstanding original/CLR target; unique LSNs make
 ordering deterministic. Each transaction owns its CLR `prevLSN`, current undo target
 and completion state. A CLR jumps to its `undoNextLSN`; an existing-page update emits
 the unchanged full compensated-page CLR, forces WAL, installs CLR PageLSN and
-writes/syncs the page. Newly appended pages retain the old truncation protocol.
-Reaching BEGIN synchronizes and forces that transaction's ABORT independently.
+writes/syncs the page. Reaching legacy BEGIN truncates appended pages, synchronizes
+and forces that transaction's ABORT. BEGIN_OWNED instead completes restartable owned
+cleanup before ABORT; no suffix truncation is used for new SQL writers.
 
 Restart can therefore find finished losers, partially compensated losers and untouched
 losers together. Durable CLR progress is REDO-able and not logically undone twice.
@@ -123,20 +125,22 @@ reservation/page-update ownership conflicts remain rejected. This does not exten
 the supported allocation concurrency boundary or track free-list reuse ownership.
 
 Global `startPageCount` truncation is **not transaction-local allocation ownership**.
-Multiple-loser histories are accepted only when unfinished transaction boundaries equal
+Legacy multiple-loser histories are accepted only when unfinished transaction boundaries equal
 the existing preallocated page count. Recovery rejects conflicting simultaneously
 active physical page ownership and loser truncation that would remove a winner page.
 Earlier completed allocating winners remain supported; their historical start counts
 do not constrain later preallocated losers.
 The primary synthetic histories use disjoint, preallocated pages, never shared page
-0 or interleaved allocation. A single production writer retains legacy appended-page
-rollback. No PageAllocator redesign, arbitrary same-page multi-writer recovery,
+0 or interleaved allocation. Current SQL uses [owned rollback](owned-rollback-activation.md)
+under one uninterrupted exclusive writer lease; its cleanup does not permit independent
+overlapping allocators or multiple allocating losers. No shared PageAllocator redesign,
+arbitrary same-page multi-writer recovery,
 fine-grained locking, deadlock detection or MVCC is claimed.
 
 Operations still lack general power-loss/torn-page/multi-file atomicity. Safe tested
 process-crash boundaries and restartable CLR progress do not make arbitrary concurrent
-allocation safe. Before multiple writers: design allocation ownership and durable
-reclamation rollback, page/logical write-conflict control and deadlock handling,
+allocation safe. Before multiple writers: design cross-transaction reuse/release
+ownership and shared free-list publication, page/logical write-conflict control and deadlock handling,
 WAL appender synchronization, isolation semantics, and a broader adversarial recovery
 test matrix. Recovery generalization alone is not sufficient admission control.
 

@@ -147,5 +147,6 @@ Separate TSan tests cover historical readers/checkpoints plus existing buffer,
 session and TCP paths. [Benchmarks](benchmarking.md#frame-dependency-retirement-experiment)
 compare identical prior-baseline workloads. Shadow loss models unsynchronized
 writes, **not** hardware power cuts, torn pages or arbitrary external file writers.
-Owned rollback, shared allocator publication and multiple production writers
-remain unresolved and disabled.
+[Production owned rollback](owned-rollback-activation.md) is active under the same
+single-writer boundary. Shared-allocator publication and multiple production writers
+remain unsupported; frame retirement supplies neither capability.

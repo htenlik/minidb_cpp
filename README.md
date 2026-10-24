@@ -239,8 +239,9 @@ ctest --test-dir build --output-on-failure
 The suite covers byte-level format validation, deterministic state models, randomized
 differential tests, malformed and fuzz-like inputs, real reopen boundaries, TCP
 integration, and subprocess crash recovery. The current clean Release verification runs
-77 CTest tests. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
+103 CTest targets. Focused AddressSanitizer and UndefinedBehaviorSanitizer builds are also
 used during release verification.
+For incremental verification profiles, see [the development workflow](docs/development-workflow.md).
 
 ## Documentation
 
@@ -281,7 +282,7 @@ used during release verification.
 ## Future work
 
 - Finer-grained physiological/logical WAL and recovery experiments
-- Transaction-safe allocation ownership and broader recovery experiments
+- Broader free-list reuse/release provenance and shared-allocator publication
 - Multiple writers, finer-grained locking, and isolation
 - Additional indexes and query-planning functionality
 

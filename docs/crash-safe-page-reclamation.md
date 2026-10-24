@@ -2,8 +2,11 @@
 
 `PageReclaimer` is a restricted, synchronous allocator system operation. It inserts
 one certified unreferenced physical page into the existing LIFO free list. It is not
-called by SQL, ordinary `releasePage()`, or loser rollback. User rollback still uses
-BEGIN.startPageCount truncation. There is still exactly one production SQL writer.
+called through its standalone certificate API by SQL, ordinary `releasePage()`, or
+loser rollback; there is no production generic eligibility issuer.
+[Owned SQL rollback](owned-rollback-activation.md) has a separate private authority
+path that uses the same PAGE_RECLAIM codec/REDO after user UNDO. Only legacy BEGIN
+rollback still truncates to startPageCount. There is exactly one production SQL writer.
 
 ## Publication audit
 
@@ -227,8 +230,10 @@ The independent `reclaim_lineage_test --frame-diagnostic` now passes through
 [checkpoint-authorized clean-frame dependency retirement](frame-wal-dependency-retirement.md).
 It keeps the original logical history and real segment deletion, while historical
 PageLSNs and page bytes remain unchanged. This bookkeeping repair does not change
-the transitive lineage proof or activate owned rollback.
+the transitive lineage proof; owned rollback activation is documented separately.
 
-Torn-page repair, ownership epochs, automated loser reclamation, owned rollback
-activation and multi-writer publication remain out of scope. Both unmerged allocation
-branches remain preserved; production still uses legacy truncating rollback.
+Torn-page repair, ownership epochs, generic reclamation eligibility and multi-writer
+publication remain unsupported. Protected experimental branches remain preserved.
+Current production owned cleanup is described in
+[owned-rollback-activation.md](owned-rollback-activation.md), not authorized by this
+standalone certificate API.
