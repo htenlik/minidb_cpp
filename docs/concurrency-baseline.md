@@ -46,11 +46,12 @@ chain. Exclusive access proves that at most one WAL-producing user transaction e
 Writer ownership is checked at recovery boundaries; diagnostics are cached snapshots,
 not concurrent reads of mutable recovery state.
 
-The existing transaction-wide startPageCount/truncation remains safe precisely because
-no other writer can append/reuse pages concurrently. Recovery can analyze interleaved
-chains and resume multiple synthetic losers on disjoint preallocated pages. This does
-not enable production multiple writers or transaction-local allocation rollback;
-see [multi-transaction-recovery.md](multi-transaction-recovery.md).
+New SQL writers use [owned rollback](owned-rollback-activation.md): they reclaim proven
+appended pages without truncating extent. Legacy BEGIN still uses startPageCount
+truncation. Both protocols depend on exclusive lifecycle ownership; shared page-0 and
+free-list publication do not support overlapping allocators. Recovery can analyze
+interleaved chains and resume multiple synthetic losers on disjoint preallocated pages,
+not multiple production writers; see [multi-transaction-recovery.md](multi-transaction-recovery.md).
 
 COMMIT retains exclusion through WAL force and cleanup. ROLLBACK/disconnect retain it
 through CLR compensation, database synchronization, and durable ABORT. READ ONLY

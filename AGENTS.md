@@ -22,6 +22,7 @@ Do not alter or merge these experimental branches without explicit approval:
 - `feature/nontruncating-transaction-rollback`
 - `feature/transaction-owned-allocation`
 
-The portfolio-focused freeze plan is isolated prototype reevaluation, final
-correctness review, behavior-preserving cleanup, then release. New features or
-owned-rollback activation require separate authorization.
+Functional feature freeze is active; [production owned rollback](docs/owned-rollback-activation.md)
+is active. Next: correctness/architecture review, small behavior-preserving refactors,
+dead-code/redundancy cleanup, documentation/demo polish, then final portfolio release.
+Do not add unapproved functionality.

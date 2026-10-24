@@ -65,8 +65,8 @@ BEGIN -> U1 -> U2 -> CLR(U2) -> CLR(U1) -> ABORT
 Recovery analysis includes each CLR in the transaction's `lastLSN`. REDO treats a CLR
 as page-affecting physical WAL. UNDO begins at the loser `lastLSN`; an update produces
 a CLR and continues at the update's `prevLSN`, while a CLR is not inverted and instead
-jumps directly to its `undoNextLSN`. Only after traversal and idempotent appended-page
-truncation complete does recovery append and force ABORT.
+jumps directly to its `undoNextLSN`. Only after traversal and protocol-specific
+appended-page cleanup complete does recovery append and force ABORT.
 
 For each existing-page compensation the exact durability order is:
 
@@ -80,11 +80,14 @@ For each existing-page compensation the exact durability order is:
 A crash before the CLR is forced may repeat the original compensation. A crash after
 the force but before the page write is repaired by CLR REDO. If the page write reached
 disk, selective REDO skips it when `PageLSN >= C`. A crash after the final CLR but
-before ABORT follows its terminating `undoNextLSN` and only completes ABORT.
+before ABORT follows its terminating `undoNextLSN` and completes any remaining
+protocol-specific allocation cleanup before ABORT.
 
 Updates to pages appended after BEGIN do not emit meaningless page CLRs. Recovery skips
-their page inverses and truncates to BEGIN's `startPageCount`. Truncation to the same
-count is idempotent, so a crash after truncation but before ABORT safely repeats it.
+their page inverses. Legacy BEGIN then truncates to its `startPageCount`; truncation
+to the same count is idempotent. Current SQL BEGIN_OWNED instead completes
+[restartable reservation cleanup](owned-rollback-protocol.md#internal-physical-execution),
+retains physical extent and forces ABORT only after cleanup is complete.
 
 ## Checkpoints, DPT, and segments
 

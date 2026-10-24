@@ -60,7 +60,9 @@ check traverses the list, so release is O(F) for F free pages. This explicit cor
 tradeoff can be revisited if allocation metadata later provides constant-time ownership
 state.
 
-Physical files are never truncated. Reclamation means PageId reuse. Index metadata
+PageAllocator itself never truncates the file; reclamation means PageId reuse.
+[Owned SQL rollback](owned-rollback-activation.md) also retains reusable extent;
+legacy BEGIN recovery can still truncate its appended suffix. Index metadata
 pages remain owned for the lifetime of their index; ordinary tree deletion reclaims
 only eliminated leaf/internal/root nodes.
 

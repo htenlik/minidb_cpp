@@ -79,6 +79,7 @@ interrupts default startup intent-tail completion. Existing TCP/concurrency,
 Stage-2/3 models and legacy raw-coordinator tests remain required.
 
 SQL-specific old truncation assertions now require retained extent plus exact
-reusable membership. Raw legacy truncation coverage remains unchanged. Final
-Release, sanitizers, fresh-checkout and exact-revision Linux CI are merge gates;
-no claim of feature freeze is made until both branch and merged main CI succeed.
+reusable membership. Raw legacy truncation coverage remains unchanged. Functional
+feature freeze is active. Release, sanitizers, fresh-checkout and exact-revision
+Linux CI remain verification gates; use [the workflow](development-workflow.md)
+for incremental selections and the distinction between FULL and RELEASE.

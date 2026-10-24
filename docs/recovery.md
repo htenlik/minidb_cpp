@@ -43,7 +43,9 @@ CRC32C described in [wal.md](wal.md) enclose these payloads.
 
 The page count is captured before an allocation is possible. An in-memory transaction
 context is created at implicit statement start or explicit BEGIN, but WAL BEGIN is
-appended lazily only when a changed page must be logged. A successful zero-change update/delete and a semantic
+appended lazily when a changed page must be logged or an append is reserved. New SQL
+writers use the separate [BEGIN_OWNED payload](owned-rollback-protocol.md#prototype-compatible-bytes).
+A successful zero-change update/delete and a semantic
 failure before mutation therefore emit no transaction WAL.
 
 ### PAGE_UPDATE payload (8208 bytes)
@@ -84,8 +86,9 @@ An entirely unlogged read-only ID may be reused after restart; see
 ## Runtime mutation and durability path
 
 Type 14 PAGE_RECLAIM is an independent non-undoable system operation affecting a Free
-Page and page 0. It requires idle exclusive ownership, synchronous data fsync and
-independent two-target REDO, not user DPT filtering. It does not replace truncating
+Page and page 0. Its standalone certificate API requires idle exclusive ownership;
+owned cleanup has separate private lifecycle authority. Both require synchronous data
+fsync and independent two-target REDO, not user DPT filtering. It does not replace truncating
 legacy user rollback. Owned cleanup associates its existing type-14 operation with
 a forced cleanup intent after user UNDO. See [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
 
