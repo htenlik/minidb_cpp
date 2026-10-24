@@ -2,6 +2,7 @@
 #include "minidb/persistent_bplus_tree.hpp"
 #include "minidb/sql_error.hpp"
 #include "minidb/table.hpp"
+#include "minidb/owned_rollback_log.hpp"
 #include "test_utils.hpp"
 
 #include <chrono>
@@ -95,9 +96,10 @@ void semantics(minidb::WalUpdateMode mode) {
         auto prev = minidb::INVALID_LSN;
         for (const auto& record : records) {
             if (record.transactionId != id) continue;
-            if (record.type == minidb::LogRecordType::Begin) {
+            require(record.type != minidb::LogRecordType::Begin, "SQL writer emitted legacy BEGIN");
+            if (record.type == minidb::LogRecordType::BeginOwned) {
                 ++begins;
-                require(minidb::decodeBeginLogPayload(record.payload).startPageCount == startPages,
+                require(minidb::decodeOwnedBegin(record).startPageCount == startPages,
                         "Transaction page boundary changed");
             }
             require(record.prevLsn == prev && record.type != minidb::LogRecordType::Commit,
@@ -233,13 +235,22 @@ void thousandStatementsAndStructures() {
         const auto bytes = server.sqlEngine().transactionManager().transactionWalBytes();
         const auto touched = server.sqlEngine().transactionManager().touchedPageCount();
         const auto started = std::chrono::steady_clock::now();
+        const auto materializedPages = server.diskManager().pageCount();
         exec(server, terminal);
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - started).count();
         const bool committed = std::string_view(terminal) == "COMMIT";
         require(rows(server, "SELECT * FROM t").size() == (committed ? 1000U : 0U),
                 "1,000-statement terminal state mismatch");
-        if (!committed) require(server.diskManager().pageCount() == emptyPages, "Appended pages not truncated");
+        if (!committed) {
+            require(server.diskManager().pageCount() == materializedPages
+                && server.recoveryCoordinator().lastRollbackStats().pagesTruncated == 0,
+                "Owned SQL rollback truncated extent");
+            std::vector<minidb::PageId> expected;
+            for (auto page = emptyPages; page < materializedPages; ++page)
+                expected.insert(expected.begin(), static_cast<minidb::PageId>(page));
+            require(server.pageAllocator().freePageIds() == expected, "Owned rollback lost/duplicated appended pages");
+        }
         std::cout << "1000 statements " << terminal << ": wal=" << bytes << " touched=" << touched
                   << " terminal_ns=" << ns << " clr_bytes="
                   << (committed ? 0 : server.recoveryCoordinator().lastRollbackStats().undoWalBytes) << '\n';

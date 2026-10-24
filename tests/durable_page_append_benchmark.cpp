@@ -105,7 +105,13 @@ void allocationHeavyInsert(WalUpdateMode mode) {
         reserves += statistics.pageReservationsLogged; reservationBytes += statistics.reservationWalBytes;
         forces += server.logManager().stats().fsyncCalls; totalBytes += server.logManager().stats().bytesAppended;
         const auto records = server.logManager().scanFrom(walStart).records;
-        begins += static_cast<std::uint64_t>(std::count_if(records.begin(), records.end(), [](const auto& r) { return r.type == LogRecordType::Begin; }));
+        const auto ownedBegins = std::count_if(records.begin(), records.end(), [](const auto& r) {
+            return r.type == LogRecordType::BeginOwned;
+        });
+        test::require(ownedBegins == 1 && std::none_of(records.begin(), records.end(), [](const auto& r) {
+            return r.type == LogRecordType::Begin;
+        }), "SQL allocation benchmark requires exactly one owned BEGIN and no legacy BEGIN");
+        begins += static_cast<std::uint64_t>(ownedBegins);
         test::require(statistics.pageReservationsLogged >= ROWS
             && statistics.reservationWalBytes == statistics.pageReservationsLogged * 72U,
             "INSERT workload did not exercise allocation/accounting");

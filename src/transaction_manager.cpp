@@ -20,7 +20,10 @@ std::shared_ptr<TransactionManager::SessionContext> TransactionManager::sessionC
     std::lock_guard lock(sessionsMutex_);
     if (stopped_ && !sessions_.contains(session)) throw AccessCancelled();
     auto& context = sessions_[session];
-    if (!context) context = std::make_shared<SessionContext>();
+    if (!context) {
+        context = std::make_shared<SessionContext>();
+        context->sessionId = session;
+    }
     return context;
 }
 std::shared_ptr<TransactionManager::SessionContext> TransactionManager::findSession(SessionId session) const {
@@ -55,6 +58,7 @@ void TransactionManager::requireWriter(const SessionContext& session) const {
         throw std::logic_error("Recovery mutation requires the exclusive database lease");
     }
     if (recovery_) {
+        recovery_->requireOwnedTransaction(session.writerId, *this, session.sessionId, gate_, *session.lease);
         const auto entries = recovery_->transactionSnapshot();
         if (std::none_of(entries.begin(), entries.end(), [&](const auto& entry) {
                 return entry.transactionId == session.writerId;
@@ -62,6 +66,11 @@ void TransactionManager::requireWriter(const SessionContext& session) const {
             throw std::logic_error("Recovery transaction is missing for writer session");
         }
     }
+}
+void TransactionManager::finishWriter(SessionContext& session) {
+    if (!recovery_ || session.writerId == INVALID_TRANSACTION_ID) return;
+    try { recovery_->finishOwnedTransaction(session.writerId, *this, session.sessionId); }
+    catch (...) { failed_ = true; gate_.shutdown(); throw; }
 }
 void TransactionManager::begin(SessionId session, AccessMode mode) {
     auto guard = lockSession(session);
@@ -74,14 +83,16 @@ void TransactionManager::begin(SessionId session, AccessMode mode) {
     auto lease = mode == AccessMode::ReadOnly ? gate_.acquireShared(cancellation(context))
                                              : gate_.acquireExclusive(cancellation(context));
     requireSession(session);
-    if (mode == AccessMode::ReadWrite) {
-        assert(!recovery_->hasActiveStatement());
-        if (recovery_->hasActiveStatement()) throw std::logic_error("SQL admits only one physical writer");
-        context.writerId = recovery_->beginTransaction();
-        recovery_->bindTransaction(context.writerId);
-        context.initialWalBytes = recovery_->stats().walTotalBytesGenerated;
-    }
-    context.lease.emplace(std::move(lease));
+    context.lease.emplace(std::move(lease)); // stable address for the entire writer scope
+    try {
+        if (mode == AccessMode::ReadWrite) {
+            assert(!recovery_->hasActiveStatement());
+            if (recovery_->hasActiveStatement()) throw std::logic_error("SQL admits only one physical writer");
+            context.writerId = recovery_->beginOwnedTransaction(*this, session, gate_, *context.lease);
+            recovery_->bindTransaction(context.writerId);
+            context.initialWalBytes = recovery_->stats().walTotalBytesGenerated;
+        }
+    } catch (...) { context.lease.reset(); throw; }
     context.explicitMode = mode;
     ++activeCount_;
     { std::lock_guard lock(statsMutex_); ++stats_.explicitTransactionsBegun; }
@@ -103,6 +114,7 @@ void TransactionManager::safeBoundary(SessionContext& session) noexcept {
 }
 void TransactionManager::endExplicit(SessionContext& context) {
     const bool wasWriter = context.explicitMode == AccessMode::ReadWrite;
+    if (wasWriter) finishWriter(context); // terminal WAL/cleanup completed before lease release
     context.explicitMode.reset();
     context.writerId = INVALID_TRANSACTION_ID;
     --activeCount_;
@@ -176,7 +188,7 @@ void TransactionManager::beginMutation(SessionId session) {
         if (recovery_) {
             assert(!recovery_->hasActiveStatement());
             if (recovery_->hasActiveStatement()) throw std::logic_error("SQL admits only one physical writer");
-            context.writerId = recovery_->beginTransaction();
+            context.writerId = recovery_->beginOwnedTransaction(*this, session, gate_, *context.lease);
             recovery_->bindTransaction(context.writerId);
         }
     }
@@ -197,7 +209,7 @@ void TransactionManager::completeMutation(SessionId session) {
         }
         if (checkpoints_) static_cast<void>(checkpoints_->onStatementCommitted(&*context.lease));
     }
-    if (!context.explicitMode) { context.writerId = INVALID_TRANSACTION_ID; context.lease.reset(); }
+    if (!context.explicitMode) { finishWriter(context); context.writerId = INVALID_TRANSACTION_ID; context.lease.reset(); }
 }
 void TransactionManager::failMutation(SessionId session) {
     auto guard = lockSession(session); requireSession(session);
@@ -213,6 +225,7 @@ void TransactionManager::failMutation(SessionId session) {
             catch (...) { failed_ = true; gate_.shutdown(); throw; }
             safeBoundary(context);
         }
+        finishWriter(context);
         context.writerId = INVALID_TRANSACTION_ID; context.lease.reset();
     }
 }
@@ -254,6 +267,7 @@ void TransactionManager::closeSession(SessionId session, SessionCloseReason reas
         try { recovery_->rollbackTransaction(context->writerId); }
         catch (...) { failed_ = true; gate_.shutdown(); throw; }
         safeBoundary(*context);
+        finishWriter(*context);
     }
     context->closed = true;
     context->lease.reset();

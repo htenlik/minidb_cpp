@@ -237,9 +237,13 @@ void OwnedRollbackCleanup::finish(DiskManager& disk, LogManager& log, RecoveryTr
         recoveryFailPoint("owned_after_progress_append");log.flushUpTo(entry.progressLsn);
         recoveryFailPoint("owned_after_progress_force");
     }
-    disk.sync();++stats.databaseSyncCalls;recoveryFailPoint("owned_before_abort_append");
+    disk.sync();++stats.databaseSyncCalls;
+    recoveryFailPoint("recovery_after_database_sync");
+    recoveryFailPoint("recovery_before_abort_append");recoveryFailPoint("owned_before_abort_append");
     const auto abort=log.append({LogRecordType::Abort,transaction.transactionId,transaction.lastLsn,{}});
-    recoveryFailPoint("owned_after_abort_append");log.flushUpTo(abort);recoveryFailPoint("owned_after_abort_force");
+    recoveryFailPoint("recovery_after_abort_append");recoveryFailPoint("owned_after_abort_append");
+    log.flushUpTo(abort);recoveryFailPoint("owned_after_abort_force");
+    recoveryFailPoint("recovery_after_abort_fsync");recoveryFailPoint("recovery_after_abort_sync");
     transaction.lastLsn=abort;transaction.undoNextLsn=INVALID_LSN;
     transaction.status=RecoveryTransactionStatus::Aborted;transaction.hasDurableAbort=true;
     ++stats.abortedTransactions;stats.durableAbortObserved=true;

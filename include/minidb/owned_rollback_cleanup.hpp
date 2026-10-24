@@ -5,7 +5,7 @@
 namespace minidb {
 
 // Not an activation API or certificate issuer. Only the two recovery entry
-// points can invoke this executor, under their private test-only lease binding.
+// points can invoke this executor, under their private lifecycle lease binding.
 // Ordinary PageReclaimer authorization and production admission are untouched.
 class OwnedRollbackCleanup {
     friend class RecoveryManager;

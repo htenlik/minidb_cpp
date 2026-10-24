@@ -292,7 +292,7 @@ void scannerAndInactiveRecovery() {
       file.write(reinterpret_cast<const char*>(header.data()),header.size());
       file.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));}
      rejects([&]{static_cast<void>(scanWalFile(path));});}
-    // Production still emits legacy BEGIN; runtime confirmation differs from
+    // Raw unleased coordinator use retains legacy BEGIN; confirmation differs from
     // restart analysis's unknown materialization (without an activation flag).
     test::TemporaryDatabase db("owned_inactive_production");DiskManager disk(db.path().string());
     LogManager log(walPathForDatabase(db.path().string()));RecoveryCoordinator recovery(disk,log);
@@ -300,7 +300,7 @@ void scannerAndInactiveRecovery() {
     {auto page=pool.newPageWrite();require(page.has_value(),"Production append");}
     const auto runtime=recovery.transactionSnapshot().front();
     require(runtime.reservations.at(1).materializedInRuntime,"Append confirmation missing");
-    const auto scan=log.scan();require(scan.records.front().type==LogRecordType::Begin,"Production activated owned BEGIN");
+    const auto scan=log.scan();require(scan.records.front().type==LogRecordType::Begin,"Raw coordinator changed legacy BEGIN");
     const auto analyzed=analyzeOwnedRollbackHistory(scan.records).at(runtime.transactionId);
     require(!analyzed.reservations.at(1).reservation.materializedInRuntime,"Restart fabricated materialization");
     recovery.rollbackStatement();require(disk.pageCount()==1,"Legacy rollback semantics changed");

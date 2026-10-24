@@ -1,5 +1,6 @@
 #include "minidb/database_server.hpp"
 #include "minidb/recovery_log.hpp"
+#include "minidb/page_reclaim.hpp"
 #include "minidb/sql_error.hpp"
 #include "test_utils.hpp"
 
@@ -14,8 +15,11 @@ using minidb::test::require;
 void verifyTransactionChains(const std::vector<minidb::LogRecord>& records) {
     std::unordered_map<minidb::TransactionId, minidb::Lsn> previous;
     for (const auto& record : records) {
+        if (record.type == minidb::LogRecordType::PageReclaim) {
+            static_cast<void>(minidb::decodePageReclaim(record)); continue;
+        }
         minidb::validateTransactionRecordPayload(record);
-        if (record.type == minidb::LogRecordType::Begin) {
+        if (record.type == minidb::LogRecordType::Begin || record.type == minidb::LogRecordType::BeginOwned) {
             require(!previous.contains(record.transactionId),
                     "Transaction WAL chain has duplicate BEGIN");
         } else {

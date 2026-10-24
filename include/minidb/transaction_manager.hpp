@@ -89,6 +89,7 @@ public:
 
 private:
     struct SessionContext {
+        SessionId sessionId = LOCAL_SESSION_ID;
         std::recursive_mutex mutex;
         std::optional<AccessMode> explicitMode;
         std::optional<DatabaseAccessGate::Lease> lease;
@@ -120,6 +121,7 @@ private:
     [[nodiscard]] std::shared_ptr<SessionContext> sessionContext(SessionId session);
     [[nodiscard]] std::shared_ptr<SessionContext> findSession(SessionId session) const;
     void requireWriter(const SessionContext& session) const;
+    void finishWriter(SessionContext& session);
     void captureWriterStats(TransactionId id);
     void finishRollback(SessionContext& session);
     void endExplicit(SessionContext& session);

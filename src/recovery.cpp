@@ -355,6 +355,23 @@ void recoveryFailPoint(std::string_view name) {
     if (configured != nullptr && name == configured) ::_exit(86);
 }
 
+RecoveryStats RecoveryManager::recoverAtStartup() {
+    // DatabaseServer has not constructed a pool, SQL engine or listener yet.
+    // No session can be admitted until this constructor phase completes.
+    DatabaseAccessGate gate;
+    auto lease = gate.acquireExclusive();
+    ownedGate_ = &gate;
+    ownedLease_ = &lease;
+    try {
+        auto result = recover();
+        ownedGate_ = nullptr; ownedLease_ = nullptr;
+        return result;
+    } catch (...) {
+        ownedGate_ = nullptr; ownedLease_ = nullptr;
+        throw; // construction fails; no normal operations may resume
+    }
+}
+
 RecoveryStats RecoveryManager::recover() {
     analysisTransactions_.clear();
     recoveredTransactions_.clear();
@@ -452,16 +469,11 @@ RecoveryStats RecoveryManager::recover() {
         }
     }
     auto scan = logManager_.scanFrom(scanStart);
-    // Production remains legacy-only. The private test binding is the only
-    // route past this guard, before tail repair/REDO/CLR/physical mutation.
+    // Parsing a committed owned history is not permission to initiate cleanup.
+    // Production startup supplies authority at the pre-admission boundary.
     const bool containsOwned=std::any_of(scan.records.begin(), scan.records.end(), [](const auto& record) {
             return isOwnedRollbackRecord(record.type);
         });
-    if (containsOwned) {
-        if (ownedGate_==nullptr || ownedLease_==nullptr)
-            throw WalError(WalErrorKind::CorruptRecord, "Owned rollback execution is not enabled");
-        OwnedRollbackCleanup::requireAuthority(ownedGate_,ownedLease_);
-    }
     Lsn ownedBegin=INVALID_LSN;
     for (const auto& r : scan.records) if (r.type==LogRecordType::BeginOwned) {
         ownedBegin=r.lsn;break;
@@ -472,6 +484,16 @@ RecoveryStats RecoveryManager::recover() {
     };
     std::map<TransactionId,OwnedRollbackAnalysis> ownedAnalysis;
     if (isValidLsn(ownedBegin)) ownedAnalysis=analyzeOwnedRollbackHistory(ownedHistory());
+    if (containsOwned) {
+        if (ownedGate_ != nullptr && ownedLease_ != nullptr) {
+            OwnedRollbackCleanup::requireAuthority(ownedGate_,ownedLease_);
+        } else if (ownedAnalysis.empty() || std::any_of(ownedAnalysis.begin(),ownedAnalysis.end(),[](const auto& item) {
+            return item.second.protocol == RollbackProtocol::OwnedAppend
+                && item.second.phase != OwnedCleanupPhase::CommitRecorded;
+        })) {
+            throw WalError(WalErrorKind::CorruptRecord,"Owned cleanup requires startup lifecycle authority");
+        }
+    }
     stats.walBytesScanned = scan.fileBytes - scanStart;
     if (scan.truncatedTail) {
         stats.repairedTail = true;
@@ -816,7 +838,7 @@ RecoveryStats RecoveryManager::recover() {
             }
         }
     }
-    if (isValidLsn(ownedBegin)) {
+    if (isValidLsn(ownedBegin) && ownedGate_ != nullptr) {
         const auto before=scan.records.size();
         OwnedRollbackCleanup::completeIntentTail(diskManager_,logManager_,scan,ownedBegin,ownedGate_,ownedLease_);
         if (scan.records.size()!=before) {
@@ -1256,10 +1278,54 @@ TransactionId RecoveryCoordinator::beginTransaction() {
     return id;
 }
 
+TransactionId RecoveryCoordinator::beginOwnedTransaction(const TransactionManager& manager,
+    std::uint64_t session, const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease) {
+    OwnedRollbackCleanup::requireAuthority(&gate, &lease);
+    std::lock_guard lock(contextsMutex_);
+    if (!contexts_.empty() || ownedTransactionId_ != INVALID_TRANSACTION_ID)
+        throw std::logic_error("Owned writer requires an idle exclusive recovery context");
+    const auto id = beginTransaction();
+    contexts_.at(id).rollbackProtocol = RollbackProtocol::OwnedAppend;
+    ownedGate_ = &gate; ownedLease_ = &lease;
+    ownedManager_ = &manager; ownedSession_ = session; ownedTransactionId_ = id;
+    return id;
+}
+
+void RecoveryCoordinator::requireOwnedAuthority(const RecoveryTransactionContext& context) const {
+    if (context.rollbackProtocol != RollbackProtocol::OwnedAppend) return;
+    OwnedRollbackCleanup::requireAuthority(ownedGate_, ownedLease_);
+    if (ownedManager_ != nullptr && ownedTransactionId_ != context.transactionId)
+        throw std::logic_error("Owned writer authority belongs to another recovery transaction");
+}
+
+void RecoveryCoordinator::requireOwnedTransaction(TransactionId id, const TransactionManager& manager,
+    std::uint64_t session, const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease) const {
+    std::lock_guard lock(contextsMutex_);
+    const auto found = contexts_.find(id);
+    if (ownedManager_ != &manager || ownedSession_ != session || ownedTransactionId_ != id
+        || ownedGate_ != &gate || ownedLease_ != &lease || found == contexts_.end()
+        || found->second.rollbackProtocol != RollbackProtocol::OwnedAppend
+        || found->second.status != RecoveryTransactionStatus::Active)
+        throw std::logic_error("Writer session does not own the bound recovery transaction");
+    requireOwnedAuthority(found->second);
+}
+
+void RecoveryCoordinator::finishOwnedTransaction(TransactionId id, const TransactionManager& manager,
+    std::uint64_t session) {
+    std::lock_guard lock(contextsMutex_);
+    if (ownedManager_ != &manager || ownedSession_ != session || ownedTransactionId_ != id
+        || contexts_.contains(id) || rollbackActive_)
+        throw std::logic_error("Cannot release unfinished owned writer authority");
+    OwnedRollbackCleanup::requireAuthority(ownedGate_, ownedLease_);
+    ownedGate_ = nullptr; ownedLease_ = nullptr; ownedManager_ = nullptr;
+    ownedSession_ = 0; ownedTransactionId_ = INVALID_TRANSACTION_ID;
+}
+
 void RecoveryCoordinator::bindTransaction(TransactionId id) {
     std::lock_guard lock(contextsMutex_);
     const auto found = contexts_.find(id);
     if (found == contexts_.end()) throw std::logic_error("Unknown recovery transaction");
+    requireOwnedAuthority(found->second);
     if (rollbackActive_) throw std::logic_error("Rollback is in progress");
     if (active_ != nullptr && !active_->safeBoundary && active_->transactionId != id) {
         throw std::logic_error("Cannot switch a physically mutating transaction");
@@ -1342,6 +1408,7 @@ void RecoveryCoordinator::notePageWriteIntent(
     if (active_ == nullptr) {
         throw std::logic_error("Page mutation requires an active statement transaction");
     }
+    requireOwnedAuthority(*active_);
     if (pageId == INVALID_PAGE_ID) throw std::invalid_argument("Write intent has invalid PageId");
     for (const auto& [id, context] : contexts_) {
         if (id != active_->transactionId
@@ -1440,6 +1507,7 @@ void RecoveryCoordinator::notePhysicalPageAppend(PageId pageId) {
     if (active_ == nullptr || active_->status != TransactionStatus::Active) {
         throw std::logic_error("Append confirmation lacks active owner");
     }
+    requireOwnedAuthority(*active_);
     const auto found = active_->reservations.find(pageId);
     const auto durable = logManager_.durableLsn();
     if (found == active_->reservations.end() || found->second.materializedInRuntime
@@ -1450,9 +1518,9 @@ void RecoveryCoordinator::notePhysicalPageAppend(PageId pageId) {
 }
 
 void RecoveryCoordinator::ensureBeginLogged(RecoveryTransactionContext& context) {
+    requireOwnedAuthority(context);
     if (isValidLsn(context.beginLsn)) return;
     const bool owned=context.rollbackProtocol==RollbackProtocol::OwnedAppend;
-    if (owned) OwnedRollbackCleanup::requireAuthority(ownedGate_,ownedLease_);
     const auto payload = owned ? encodeOwnedBegin({context.startPageCount})
         : encodeBeginLogPayload(BeginLogPayload{context.startPageCount});
     context.beginLsn = logManager_.append(LogRecord{
@@ -1495,6 +1563,7 @@ Lsn RecoveryCoordinator::preparePageForWrite(
         if (candidate.pages.contains(pageId)) { context = &candidate; break; }
     }
     if (context == nullptr) return INVALID_LSN;
+    requireOwnedAuthority(*context);
     const auto found = context->pages.find(pageId);
     if (found == context->pages.end()) return INVALID_LSN;
     auto& state = found->second;
@@ -1665,6 +1734,7 @@ void RecoveryCoordinator::prepareStatement() {
 }
 
 void RecoveryCoordinator::commitStatement() {
+    if (active_ != nullptr) requireOwnedAuthority(*active_);
     prepareStatement();
     std::lock_guard lock(contextsMutex_);
     if (!isValidLsn(active_->beginLsn)) {
@@ -1694,7 +1764,7 @@ void RecoveryCoordinator::rollbackStatement() {
     if (active_ == nullptr) throw std::logic_error("No statement transaction is active");
     const bool owned=active_->rollbackProtocol==RollbackProtocol::OwnedAppend;
     if (owned) {
-        OwnedRollbackCleanup::requireAuthority(ownedGate_,ownedLease_);
+        requireOwnedAuthority(*active_);
         if (contexts_.size()!=1) throw std::logic_error("Live owned rollback requires an exclusive transaction context");
         requireNoPins();
         if (bufferPool_!=nullptr && !active_->pages.contains(0) && bufferPool_->isDirty(0).value_or(false))

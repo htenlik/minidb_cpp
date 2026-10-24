@@ -230,6 +230,11 @@ add_test(NAME owned_rollback_sql_crash_test COMMAND owned_rollback_sql_test --cr
 set_tests_properties(owned_rollback_sql_crash_test PROPERTIES TIMEOUT 300)
 add_test(NAME owned_rollback_sql_tcp_test COMMAND owned_rollback_sql_test --tcp)
 set_tests_properties(owned_rollback_sql_tcp_test PROPERTIES TIMEOUT 90)
+add_executable(production_owned_rollback_test tests/production_owned_rollback_test.cpp)
+target_link_libraries(production_owned_rollback_test PRIVATE minidb_network)
+add_test(NAME production_owned_rollback_test COMMAND production_owned_rollback_test)
+add_test(NAME production_owned_rollback_crash_test COMMAND production_owned_rollback_test --crash)
+set_tests_properties(production_owned_rollback_crash_test PROPERTIES TIMEOUT 180)
 
 add_executable(log_manager_test tests/log_manager_test.cpp)
 target_link_libraries(log_manager_test PRIVATE minidb_core)
