@@ -1,9 +1,9 @@
-# Owned rollback integration gate (production inactive)
+# Owned rollback pre-activation integration record
 
-This gate exercises the [internal owned cleanup protocol](owned-rollback-protocol.md),
-not a production feature switch. Ordinary BEGIN and startup recovery remain legacy
-by default. The production exclusive-writer rule, WAL/page/checkpoint formats,
-and protected experimental branches are unchanged.
+This records the pre-activation candidate's [internal cleanup protocol](owned-rollback-protocol.md)
+verification. At that revision SQL/startup owned execution was inactive by default.
+For current production wiring see [owned rollback activation](owned-rollback-activation.md).
+The exclusive-writer rule, WAL/page/checkpoint formats and protected branches remain unchanged.
 
 ## Test admission
 

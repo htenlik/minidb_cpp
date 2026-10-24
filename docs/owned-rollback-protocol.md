@@ -1,12 +1,10 @@
-# Owned rollback WAL analysis (inactive)
+# Owned rollback protocol
 
-The owned rollback extension provides codecs, a side-effect-free history validator,
-and an **internal test-authorized cleanup executor**. Production emits ordinary BEGIN, uses CLR UNDO and
-global truncation, and retains its exclusive writer gate. There is no public
-protocol switch. Default recovery rejects owned records in its recovery window before
-tail repair, page REDO, CLR generation or physical cleanup. Only a private friend
-harness defined in the tests can bind an exclusive lifecycle lease and exercise
-owned BEGIN generation/recovery. This is not production activation.
+The extension provides codecs, a side-effect-free history validator and an owned
+cleanup executor. [Production SQL activation](owned-rollback-activation.md) binds
+real writer leases and emits BEGIN_OWNED; legacy BEGIN retains CLR/truncating UNDO.
+The exclusive writer gate remains. There is no public protocol switch. Owned
+cleanup requires private startup/session authority; test fixtures remain separate.
 
 ## Prototype-compatible bytes
 
@@ -94,11 +92,11 @@ establish physical absence, exclusive lifecycle authority, logical image restora
 page-0 synchronization and free-list completion **before** recording/forcing ABORT.
 The validator neither issues certificates nor authorizes PAGE_RECLAIM alongside a
 live transaction. It only checks that an explicitly associated proposed history is
-structurally valid; production owned physical cleanup remains disabled.
+structurally valid; execution separately proves lifecycle authority.
 
 ## Internal physical execution
 
-Both live and startup cleanup require the same private exclusive gate/lease
+Both live and startup cleanup require a private exclusive gate/lease
 binding. No public constructor flag, SQL/CLI option or environment activation
 exists. Existing `PageReclaimer::reclaim()` and its idle/certificate checks are
 unchanged; the executor reuses the same type-14 codec, canonical Free Page builder,
@@ -144,7 +142,7 @@ Startup has no resident frames. A failure poisons the live rollback until restar
 new transactions/checkpoints cannot advance over incomplete cleanup. Fuzzy ATT
 retains BEGIN/lastLSN at safe statement boundaries. Authorized startup also audits
 retained owned history against the checkpoint ATT, rejecting omitted live owners.
-This extra retained-WAL audit is not enabled on ordinary production recovery.
+This retained-WAL audit is enabled at the authorized production startup boundary.
 
 Legacy truncating UNDO and winner guards remain. Directed testing exposed a separate
 legacy REDO defect: an old appended-page byte-range update could patch a later Free
@@ -165,7 +163,7 @@ These are the executor-level tests, separate from the integration gate below.
 
 The separate [integration gate](owned-rollback-integration.md) exercises the full
 owned model, table/index/catalog, disconnect and retention/reuse paths. It records
-test admission and verification results; production activation still requires review.
+test admission and verification results for the pre-activation candidate.
 Shared allocation, multiple writers, epochs, deferred release publication, new
 page/checkpoint formats, SQL and wire changes are not included. Raw byte-identical
 administrative ABA cannot be detected without generations; it is excluded by the

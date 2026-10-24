@@ -19,6 +19,7 @@ Its design emphasizes explicit binary formats and visible storage-engine boundar
 - CRC32C-protected, segmented write-ahead log with safe segment reclamation
 - Autocommit and explicit serial `BEGIN` / `COMMIT` / `ROLLBACK` transactions
 - STEAL / NO-FORCE physical REDO and restartable CLR-based UNDO
+- Ownership-scoped, non-truncating SQL rollback with reusable appended pages
 - Persistent PageLSNs with database-format-v2 selective REDO and v1 migration
 - Sharp and opt-in fuzzy checkpoints with DPT/recLSN-bounded startup recovery
 - Subprocess crash-injection, randomized differential, corruption, and sanitizer tests

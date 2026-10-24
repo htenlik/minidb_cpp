@@ -9,7 +9,8 @@ LSNs while new dirty writes stay strict. No hardware torn-write repair is added.
 Reclaimed-page REDO uses a [transitive physical lineage validator](crash-safe-page-reclamation.md#transitive-physical-lineage)
 to prove later full-page states through reuse and CLRs. For these targets, selected
 delta REDO uses the proven transaction base, not an unrelated current representation.
-Transaction classification and legacy truncating rollback are unchanged.
+Legacy truncating rollback is unchanged. New SQL writers use the
+[owned protocol and private lifecycle authority](owned-rollback-activation.md).
 
 Each mutating statement is an implicit atomic recovery unit unless grouped by SQL
 `BEGIN`/`COMMIT`/`ROLLBACK`. An explicit scope is one recovery unit spanning all its
@@ -33,7 +34,7 @@ type at one interception point, but produces large WAL records.
 All integers are little-endian. The ordinary WAL record header, length validation, and
 CRC32C described in [wal.md](wal.md) enclose these payloads.
 
-### BEGIN payload (16 bytes)
+### Legacy BEGIN payload (16 bytes)
 
 | Offset | Width | Field |
 | ---: | ---: | --- |
@@ -59,7 +60,8 @@ failure before mutation therefore emit no transaction WAL.
 A page whose ID is below the BEGIN page count existed before the transaction. This
 includes a free-list page reused for another purpose, so rollback restores its exact
 Free Page encoding. A newly appended page has flag bit 0 clear and a canonical all-zero
-before-image; loser cleanup removes it by truncating the file to the BEGIN page count.
+before-image. Legacy loser cleanup truncates to the BEGIN count; BEGIN_OWNED
+cleanup validates its APPENDED reservation and reclaims it without suffix truncation.
 Unknown flags, invalid IDs, wrong page size, nonzero reserved fields, and a nonzero new-
 page before-image are rejected.
 
@@ -84,12 +86,13 @@ An entirely unlogged read-only ID may be reused after restart; see
 Type 14 PAGE_RECLAIM is an independent non-undoable system operation affecting a Free
 Page and page 0. It requires idle exclusive ownership, synchronous data fsync and
 independent two-target REDO, not user DPT filtering. It does not replace truncating
-user rollback. See [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
+legacy user rollback. Owned cleanup associates its existing type-14 operation with
+a forced cleanup intent after user UNDO. See [crash-safe-page-reclamation.md](crash-safe-page-reclamation.md).
 
 Physical append first forces transaction BEGIN plus a type-13 PAGE_RESERVE. Recovery
 reconstructs appended-page provenance, but reservations neither enter DPT nor perform
 physical REDO. UNDO and CLR target validation follow their prevLSN without a page CLR.
-Global BEGIN-boundary truncation is unchanged; multi-writer allocation is unsupported.
+BEGIN-boundary truncation remains for legacy histories only; multi-writer allocation is unsupported.
 See [durable-page-reservation.md](durable-page-reservation.md) for exact bytes/lifecycle.
 
 ```text
@@ -137,7 +140,7 @@ DiskManager transaction-agnostic. Catalog and free-list root changes cannot bypa
 After all guards release, rollback prepares and forces the transaction's outstanding
 WAL, discards touched buffers, and invokes the same `undoTransactions` CLR scheduler as
 startup recovery. Each compensated page follows WAL-before-data ordering, and ABORT is
-forced only after compensation and truncation are durable. Live delta rollback uses
+forced only after compensation and the protocol-selected cleanup are durable. Live delta rollback uses
 the retained original image as its base to preserve earlier NO-FORCE winner contents.
 No unlogged page-restoration path remains. Interrupted SQL ROLLBACK resumes at startup.
 An explicit scope retains original images across statement boundaries; statement
@@ -176,13 +179,13 @@ has one writer; synthetic multi-loser histories require disjoint preallocated pa
 - A loser has BEGIN/PAGE_UPDATE/CLR records but no terminal record. Multiple losers
   use a global reverse-LSN priority queue. Existing-page original images or delta before-ranges are applied,
   each original existing-page update is physically compensated by a forced type-5 CLR.
-  The compensated page receives the CLR LSN, while appended pages are truncated using
-  BEGIN's page count.
+  The compensated page receives the CLR LSN. Legacy appends use BEGIN-boundary
+  truncation; owned appends use restartable validated reclaim/progress records.
 
 Recovery runs REDO winners and durable CLRs, then follows every loser's WAL chain.
 An original update appends/forces a physical CLR before its compensated page is written;
 a CLR is REDO-able but never undone and redirects traversal through `undoNextLSN`.
-After each loser's work and safe idempotent appended-page truncation, recovery appends/fsyncs its ABORT.
+After each loser's work and durable protocol-specific appended-page cleanup, recovery appends/fsyncs its ABORT.
 See [clr-restartable-undo.md](clr-restartable-undo.md). Recovery does no tuple, tree,
 catalog, or SQL interpretation. Nonempty fuzzy ATT is checked against retained chains
 before forward analysis. See [multi-transaction-recovery.md](multi-transaction-recovery.md)
