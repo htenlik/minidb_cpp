@@ -53,6 +53,10 @@ void BufferPoolManager::flushVictimIfDirty(FrameId frameId) {
         throw std::logic_error("Selected buffer victim is not evictable");
     }
     if (!frame.dirty) return;
+    flushUnpinnedDirtyFrame(frame);
+}
+
+void BufferPoolManager::flushUnpinnedDirtyFrame(BufferFrame& frame) {
     prepareFrameForWrite(frame);
     ensureWalDurableBeforePageWrite(frame);
     recoveryFailPoint("after_page_update_wal_force");
@@ -277,14 +281,7 @@ bool BufferPoolManager::flushPage(PageId pageId) {
     auto& frame = frames_[found->second];
     if (frame.dirty) {
         if (frame.pinCount != 0) throw std::logic_error("Cannot flush a dirty pinned page; release guards first");
-        prepareFrameForWrite(frame);
-        ensureWalDurableBeforePageWrite(frame);
-        recoveryFailPoint("after_page_update_wal_force");
-        diskManager_.writePage(pageId, frame.data);
-        recoveryFailPoint("after_database_page_write");
-        frame.dirty = false;
-        frame.recLsn = INVALID_LSN;
-        ++stats_.physicalPageWrites;
+        flushUnpinnedDirtyFrame(frame);
     }
     return true;
 }
