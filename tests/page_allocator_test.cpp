@@ -94,6 +94,24 @@ void testAppendReleaseAndLifoReuse() {
     allocator.releasePage(second);
     require(allocator.freePageIds() == std::vector<minidb::PageId>({second, first}),
             "Released pages were not linked in LIFO order");
+
+    // Independent golden Free Page: next=INVALID_PAGE_ID, then next=1.
+    minidb::DiskManager::Page expected{};
+    const std::array<std::byte, 20> prefix{
+        std::byte{'M'}, std::byte{'D'}, std::byte{'B'}, std::byte{'F'},
+        std::byte{'R'}, std::byte{'E'}, std::byte{'E'}, std::byte{'P'},
+        std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{32}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF},
+    };
+    std::copy(prefix.begin(), prefix.end(), expected.begin());
+    require(minidb::test::readPageCopy(storage, first) == expected,
+            "Free-list tail differed from complete golden page");
+    expected[16] = std::byte{1};
+    expected[17] = expected[18] = expected[19] = std::byte{0};
+    require(minidb::test::readPageCopy(storage, second) == expected,
+            "Free-list head differed from complete golden page");
+
     require(allocator.allocatePage() == second, "Allocator did not reuse the free-list head");
     require(allocator.allocatePage() == first, "Allocator did not reuse the remaining page");
     require(storage.diskManager.pageCount() == pageCount, "Reuse unexpectedly grew the database file");
