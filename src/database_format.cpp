@@ -1,43 +1,12 @@
 #include "minidb/database_format.hpp"
 
+#include "minidb/byte_codec.hpp"
+
 #include <algorithm>
 #include <stdexcept>
 #include <string>
 
 namespace minidb::database_format {
-namespace {
-
-void writeUint32LittleEndian(
-    std::span<std::byte> output,
-    std::size_t offset,
-    std::uint32_t value) {
-    for (std::size_t index = 0; index < FORMAT_VERSION_SIZE; ++index) {
-        output[offset + index] =
-            static_cast<std::byte>((value >> (index * 8U)) & 0xFFU);
-    }
-}
-
-std::uint32_t readUint32LittleEndian(
-    std::span<const std::byte> input,
-    std::size_t offset) {
-    std::uint32_t value = 0;
-    for (std::size_t index = 0; index < FORMAT_VERSION_SIZE; ++index) {
-        value |= std::to_integer<std::uint32_t>(input[offset + index]) << (index * 8U);
-    }
-    return value;
-}
-
-std::uint64_t readUint64LittleEndian(
-    std::span<const std::byte> input,
-    std::size_t offset) {
-    std::uint64_t value = 0;
-    for (std::size_t index = 0; index < PAGE_LSN_SIZE; ++index) {
-        value |= std::to_integer<std::uint64_t>(input[offset + index]) << (index * 8U);
-    }
-    return value;
-}
-
-} // namespace
 
 DatabaseHeader makeCurrentDatabaseHeader() noexcept {
     return {};
@@ -52,14 +21,14 @@ void serializeDatabaseHeader(
 
     std::fill(metadataPage.begin(), metadataPage.end(), std::byte{0});
     std::copy(MAGIC.begin(), MAGIC.end(), metadataPage.begin() + MAGIC_OFFSET);
-    writeUint32LittleEndian(metadataPage, FORMAT_VERSION_OFFSET, header.formatVersion);
-    writeUint32LittleEndian(metadataPage, PAGE_SIZE_OFFSET, header.pageSize);
-    writeUint32LittleEndian(metadataPage, HEADER_SIZE_OFFSET, header.headerSize);
-    writeUint32LittleEndian(
+    byte_codec::writeUint32(metadataPage, FORMAT_VERSION_OFFSET, header.formatVersion);
+    byte_codec::writeUint32(metadataPage, PAGE_SIZE_OFFSET, header.pageSize);
+    byte_codec::writeUint32(metadataPage, HEADER_SIZE_OFFSET, header.headerSize);
+    byte_codec::writeUint32(
         metadataPage,
         CATALOG_ROOT_PAGE_ID_OFFSET,
         header.catalogRootPageId);
-    writeUint32LittleEndian(
+    byte_codec::writeUint32(
         metadataPage,
         FREE_LIST_ROOT_PAGE_ID_OFFSET,
         header.freeListRootPageId);
@@ -74,11 +43,11 @@ DatabaseHeader deserializeDatabaseHeader(std::span<const std::byte> metadataPage
     }
 
     DatabaseHeader header{
-        readUint32LittleEndian(metadataPage, FORMAT_VERSION_OFFSET),
-        readUint32LittleEndian(metadataPage, PAGE_SIZE_OFFSET),
-        readUint32LittleEndian(metadataPage, HEADER_SIZE_OFFSET),
-        readUint32LittleEndian(metadataPage, CATALOG_ROOT_PAGE_ID_OFFSET),
-        readUint32LittleEndian(metadataPage, FREE_LIST_ROOT_PAGE_ID_OFFSET),
+        byte_codec::readUint32(metadataPage, FORMAT_VERSION_OFFSET),
+        byte_codec::readUint32(metadataPage, PAGE_SIZE_OFFSET),
+        byte_codec::readUint32(metadataPage, HEADER_SIZE_OFFSET),
+        byte_codec::readUint32(metadataPage, CATALOG_ROOT_PAGE_ID_OFFSET),
+        byte_codec::readUint32(metadataPage, FREE_LIST_ROOT_PAGE_ID_OFFSET),
     };
 
     if (header.formatVersion != LEGACY_VERSION
@@ -98,7 +67,7 @@ DatabaseHeader deserializeDatabaseHeader(std::span<const std::byte> metadataPage
             "Database header size " + std::to_string(header.headerSize)
             + " does not match the supported header size " + std::to_string(HEADER_SIZE) + ".");
     }
-    const auto encodedPageLsn = readUint64LittleEndian(metadataPage, PAGE_LSN_OFFSET);
+    const auto encodedPageLsn = byte_codec::readUint64(metadataPage, PAGE_LSN_OFFSET);
     if ((header.formatVersion == LEGACY_VERSION && encodedPageLsn != 0)
         || encodedPageLsn == std::numeric_limits<std::uint64_t>::max()) {
         throw std::runtime_error("Database metadata page has an invalid PageLSN encoding.");

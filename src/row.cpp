@@ -1,33 +1,11 @@
 #include "minidb/row.hpp"
 
+#include "minidb/byte_codec.hpp"
+
 #include <stdexcept>
 
 namespace minidb {
 namespace {
-
-void writeUint16LittleEndian(SerializedRow& output, std::size_t offset, std::uint16_t value) {
-    output[offset] = static_cast<std::byte>(value & 0xFFU);
-    output[offset + 1] = static_cast<std::byte>((value >> 8U) & 0xFFU);
-}
-
-void writeUint32LittleEndian(SerializedRow& output, std::size_t offset, std::uint32_t value) {
-    for (std::size_t i = 0; i < sizeof(value); ++i) {
-        output[offset + i] = static_cast<std::byte>((value >> (i * 8U)) & 0xFFU);
-    }
-}
-
-std::uint16_t readUint16LittleEndian(std::span<const std::byte> input, std::size_t offset) {
-    return static_cast<std::uint16_t>(std::to_integer<std::uint16_t>(input[offset]))
-        | static_cast<std::uint16_t>(std::to_integer<std::uint16_t>(input[offset + 1]) << 8U);
-}
-
-std::uint32_t readUint32LittleEndian(std::span<const std::byte> input, std::size_t offset) {
-    std::uint32_t value = 0;
-    for (std::size_t i = 0; i < sizeof(value); ++i) {
-        value |= std::to_integer<std::uint32_t>(input[offset + i]) << (i * 8U);
-    }
-    return value;
-}
 
 void writeString(SerializedRow& output, std::size_t offset, const std::string& value) {
     for (std::size_t i = 0; i < value.size(); ++i) {
@@ -54,10 +32,10 @@ SerializedRow serializeRow(const Row& row) {
     }
 
     SerializedRow output{};
-    writeUint32LittleEndian(output, row_layout::ID_OFFSET, row.id);
+    byte_codec::writeUint32(output, row_layout::ID_OFFSET, row.id);
     output[row_layout::USERNAME_LENGTH_OFFSET] = static_cast<std::byte>(row.username.size());
     writeString(output, row_layout::USERNAME_OFFSET, row.username);
-    writeUint16LittleEndian(
+    byte_codec::writeUint16(
         output,
         row_layout::EMAIL_LENGTH_OFFSET,
         static_cast<std::uint16_t>(row.email.size()));
@@ -76,13 +54,13 @@ Row deserializeRow(std::span<const std::byte> bytes) {
         throw std::invalid_argument("Serialized row contains an invalid username length.");
     }
 
-    const auto emailLength = readUint16LittleEndian(bytes, row_layout::EMAIL_LENGTH_OFFSET);
+    const auto emailLength = byte_codec::readUint16(bytes, row_layout::EMAIL_LENGTH_OFFSET);
     if (emailLength > row_layout::EMAIL_MAX_SIZE) {
         throw std::invalid_argument("Serialized row contains an invalid email length.");
     }
 
     return Row{
-        readUint32LittleEndian(bytes, row_layout::ID_OFFSET),
+        byte_codec::readUint32(bytes, row_layout::ID_OFFSET),
         readString(bytes, row_layout::USERNAME_OFFSET, usernameLength),
         readString(bytes, row_layout::EMAIL_OFFSET, emailLength),
     };
