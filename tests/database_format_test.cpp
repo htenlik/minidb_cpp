@@ -2,6 +2,7 @@
 #include "minidb/pager.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -115,6 +116,45 @@ void writeUint32LittleEndian(
 void createValidDatabase(const std::filesystem::path& path) {
     minidb::Pager pager(path.string());
     require(pager.pageCount() == 1, "New database did not contain exactly one metadata page");
+}
+
+void testHeaderGoldenBytesAndSizeValidation() {
+    // Independent fixed bytes: magic, version, 4096, 64, and two nontrivial roots.
+    const std::array<std::byte, 28> prefix{
+        std::byte{'M'}, std::byte{'I'}, std::byte{'N'}, std::byte{'I'},
+        std::byte{'D'}, std::byte{'B'}, std::byte{'+'}, std::byte{'+'},
+        std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0}, std::byte{0x10}, std::byte{0}, std::byte{0},
+        std::byte{0x40}, std::byte{0}, std::byte{0}, std::byte{0},
+        std::byte{0x78}, std::byte{0x56}, std::byte{0x34}, std::byte{0x12},
+        std::byte{0xF0}, std::byte{0xDE}, std::byte{0xBC}, std::byte{0x9A},
+    };
+    for (const auto version : {minidb::database_format::LEGACY_VERSION,
+                               minidb::database_format::CURRENT_VERSION}) {
+        const minidb::database_format::DatabaseHeader header{
+            version, 4096, 64, 0x12345678U, 0x9ABCDEF0U};
+        minidb::Pager::Page expected{};
+        std::copy(prefix.begin(), prefix.end(), expected.begin());
+        expected[8] = static_cast<std::byte>(version);
+        minidb::Pager::Page encoded{};
+        encoded.fill(std::byte{0xA5});
+        minidb::database_format::serializeDatabaseHeader(header, encoded);
+        require(encoded == expected, "Database header differed from complete golden page");
+        require(minidb::database_format::deserializeDatabaseHeader(expected) == header,
+                "Golden database header did not decode");
+    }
+
+    std::array<std::byte, minidb::database_format::PAGE_SIZE + 1> buffer{};
+    for (const auto size : {std::size_t{0}, buffer.size() - 2, buffer.size()}) {
+        const auto bytes = std::span(buffer).first(size);
+        requireInvalidArgument(
+            [&] { minidb::database_format::serializeDatabaseHeader({}, bytes); },
+            "Invalid metadata serialization size was accepted");
+        requireRuntimeErrorContaining(
+            [&] { static_cast<void>(minidb::database_format::deserializeDatabaseHeader(bytes)); },
+            "Database metadata page has an invalid size.",
+            "Invalid metadata deserialization size was accepted");
+    }
 }
 
 void testNewDatabaseMetadataLayout() {
@@ -283,6 +323,7 @@ void testMisalignedFileSizeIsRejected() {
 
 int main() {
     try {
+        testHeaderGoldenBytesAndSizeValidation();
         testNewDatabaseMetadataLayout();
         testExistingEmptyFileIsInitialized();
         testMetadataAndNormalPagePersist();

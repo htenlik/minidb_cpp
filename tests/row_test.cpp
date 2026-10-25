@@ -17,10 +17,13 @@ void require(bool condition, std::string_view message) {
 }
 
 template <typename Function>
-void requireInvalidArgument(Function&& function, std::string_view message) {
+void requireInvalidArgument(
+    Function&& function, std::string_view message, std::string_view expectedError = {}) {
     try {
         function();
-    } catch (const std::invalid_argument&) {
+    } catch (const std::invalid_argument& error) {
+        require(expectedError.empty() || error.what() == expectedError,
+                "Row validation diagnostic changed");
         return;
     }
     throw std::runtime_error(std::string(message));
@@ -56,6 +59,20 @@ void testBinaryLayoutIsDeterministic() {
             "Email length was not encoded");
     require(serialized[minidb::row_layout::EMAIL_OFFSET] == std::byte{'c'},
             "Email bytes were not stored at the documented offset");
+
+    // Literal offsets pin the entire legacy 294-byte encoding, including padding.
+    minidb::SerializedRow expected{};
+    expected[0] = std::byte{0x78};
+    expected[1] = std::byte{0x56};
+    expected[2] = std::byte{0x34};
+    expected[3] = std::byte{0x12};
+    expected[4] = std::byte{2};
+    expected[5] = std::byte{'a'};
+    expected[6] = std::byte{'b'};
+    expected[37] = std::byte{1};
+    expected[39] = std::byte{'c'};
+    require(serialized == expected, "Complete serialized row differed from golden bytes");
+    require(minidb::deserializeRow(expected) == row, "Golden row bytes did not decode");
 }
 
 void testBoundaryLengths() {
@@ -78,7 +95,8 @@ void testOversizedFieldsAreRejected() {
     };
     requireInvalidArgument(
         [&] { static_cast<void>(minidb::serializeRow(oversizedUsername)); },
-        "Oversized username was accepted");
+        "Oversized username was accepted",
+        "Username exceeds the maximum serialized size of 32 bytes.");
 
     const minidb::Row oversizedEmail{
         2,
@@ -87,7 +105,8 @@ void testOversizedFieldsAreRejected() {
     };
     requireInvalidArgument(
         [&] { static_cast<void>(minidb::serializeRow(oversizedEmail)); },
-        "Oversized email was accepted");
+        "Oversized email was accepted",
+        "Email exceeds the maximum serialized size of 255 bytes.");
 }
 
 void testRowsRemainIndependent() {
@@ -115,20 +134,28 @@ void testMalformedInputIsRejected() {
         std::span<const std::byte>(serialized.data(), serialized.size() - 1);
     requireInvalidArgument(
         [&] { static_cast<void>(minidb::deserializeRow(truncated)); },
-        "Incorrect serialized size was accepted");
+        "Incorrect serialized size was accepted",
+        "Serialized row has an invalid size.");
 
     serialized[minidb::row_layout::USERNAME_LENGTH_OFFSET] =
         static_cast<std::byte>(minidb::row_layout::USERNAME_MAX_SIZE + 1);
     requireInvalidArgument(
         [&] { static_cast<void>(minidb::deserializeRow(serialized)); },
-        "Invalid serialized username length was accepted");
+        "Invalid serialized username length was accepted",
+        "Serialized row contains an invalid username length.");
+    serialized[minidb::row_layout::EMAIL_LENGTH_OFFSET + 1] = std::byte{1};
+    requireInvalidArgument(
+        [&] { static_cast<void>(minidb::deserializeRow(serialized)); },
+        "Invalid username did not take priority over invalid email",
+        "Serialized row contains an invalid username length.");
 
     serialized = minidb::serializeRow(minidb::Row{1, "valid", "valid@example.com"});
     serialized[minidb::row_layout::EMAIL_LENGTH_OFFSET] = std::byte{0};
     serialized[minidb::row_layout::EMAIL_LENGTH_OFFSET + 1] = std::byte{1};
     requireInvalidArgument(
         [&] { static_cast<void>(minidb::deserializeRow(serialized)); },
-        "Invalid serialized email length was accepted");
+        "Invalid serialized email length was accepted",
+        "Serialized row contains an invalid email length.");
 }
 
 } // namespace
