@@ -138,6 +138,8 @@ private:
     [[nodiscard]] std::optional<BasicPageGuard> fetchPage(PageId pageId, bool writable);
     [[nodiscard]] std::optional<FrameId> availableFrame() const;
     void flushVictimIfDirty(FrameId frameId);
+    // Caller holds metadataLatch_; frame is valid, unpinned and initially dirty.
+    void flushUnpinnedDirtyFrame(BufferFrame& frame);
     void ensureWalDurable(Lsn pageLsn);
     void ensureWalDurableBeforePageWrite(const BufferFrame& frame);
     void validateWalDependency(const BufferFrame& frame, bool forWrite) const;

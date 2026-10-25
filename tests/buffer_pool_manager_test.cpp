@@ -230,6 +230,19 @@ void testNewPageFlushesAndReset() {
         const auto writes = pool.stats().physicalPageWrites;
         require(pool.flushPage(pageId) && pool.stats().physicalPageWrites == writes,
                 "flushing clean page performed physical write");
+        {
+            const auto pinned = pool.fetchPageRead(pageId);
+            require(pinned.has_value() && pool.pinCount(pageId) == 1
+                        && pool.flushPage(pageId) && pool.stats().physicalPageWrites == writes,
+                    "flushPage rejected or wrote a pinned clean page");
+        }
+        minidb::test::requireThrows<std::invalid_argument>(
+            [&] { static_cast<void>(pool.flushPage(0)); }, "flushPage accepted page zero");
+        for (const auto invalid : {minidb::INVALID_PAGE_ID, disk.pageCount()}) {
+            minidb::test::requireThrows<std::out_of_range>(
+                [&] { static_cast<void>(pool.flushPage(invalid)); },
+                "flushPage accepted an invalid page ID");
+        }
         require(!pool.flushPage(nonresidentPageId),
                 "flushPage loaded or accepted nonresident page");
         page = pool.fetchPageWrite(pageId);

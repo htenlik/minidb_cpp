@@ -17,6 +17,10 @@ struct BufferPoolTestAccess {
         function(pool.frames_.at(pool.pageTable_.at(page)));
     }
     static void retire(BufferPoolManager& pool) { pool.retireCheckpointCoveredDependencies(); }
+    static void flushVictim(BufferPoolManager& pool, FrameId frame) {
+        std::lock_guard lock(pool.metadataLatch_);
+        pool.flushVictimIfDirty(frame);
+    }
 };
 }
 
@@ -84,9 +88,28 @@ void directed() {
         {
             auto guard = requireReadPage(f.pool, 1, "historical read guard");
             require(guard.pageLsn() == old, "Read guard lost historical PageLSN");
+            test::requireThrows<std::logic_error>(
+                [&] { BufferPoolTestAccess::flushVictim(f.pool, guard.frameId()); },
+                "Pinned clean victim was accepted");
         }
         f.recovery.beginStatement();
+        { auto guard = requireWritePage(f.pool, 1, "historical no-op intent"); }
+        const auto noOpStats = f.pool.stats();
+        const auto noOpWal = f.log.lastAppendedLsn();
+        require(f.pool.flushPage(1) && !*f.pool.isDirty(1)
+            && f.pool.recLsn(1) == INVALID_LSN && !*f.pool.pendingWalPreparation(1)
+            && *f.pool.walDependencyRetired(1) && f.pool.pageLsn(1) == old,
+            "Single-page no-op changed historical identity or dirty metadata");
+        require(f.pool.stats().physicalPageWrites == noOpStats.physicalPageWrites + 1
+            && f.pool.stats().walFlushRequests == noOpStats.walFlushRequests
+            && f.log.lastAppendedLsn() == noOpWal,
+            "Single-page no-op skipped its physical write or generated/forced WAL");
+        f.recovery.commitStatement();
+        f.recovery.beginStatement();
         { auto guard = requireWritePage(f.pool, 1, "pending after retirement");
+          test::requireThrows<std::logic_error>(
+              [&] { BufferPoolTestAccess::flushVictim(f.pool, guard.frameId()); },
+              "Pinned dirty victim was accepted");
           require(*f.pool.pendingWalPreparation(1), "Write intent not pending");
           require(SlottedPageView(guard.data(), 1, f.disk.pageCount()).tryUpdate(0, TupleBytes(32, std::byte{19})), "Update failed"); }
         test::requireThrows<std::logic_error>([&] { static_cast<void>(f.pool.dirtyPageTableSnapshot()); }, "Pending intent entered DPT");
@@ -112,6 +135,9 @@ void negatives() {
     const auto corrupt = [&](auto mutation, auto restore, const char* message) {
         BufferPoolTestAccess::change(f.pool, 1, mutation);
         test::requireThrows<std::logic_error>([&] { f.pool.validate(); }, message);
+        test::requireThrows<std::logic_error>([&] { static_cast<void>(f.pool.flushPage(1)); }, message);
+        test::requireThrows<std::logic_error>(
+            [&] { BufferPoolTestAccess::flushVictim(f.pool, *f.pool.frameIdForPage(1)); }, message);
         test::requireThrows<std::logic_error>([&] { f.pool.flushAll(); }, message);
         require(f.pool.stats().physicalPageWrites == writes, "Corrupt dependency reached disk");
         BufferPoolTestAccess::change(f.pool, 1, restore);
@@ -141,7 +167,10 @@ void negatives() {
 
 void noOpAndMonotonicity() {
     test::TemporaryDatabase db("frame_retirement_noop");
-    test::WritebackFixture f(db.path().string()); f.initialize();
+    test::WritebackFixture f(db.path().string(), WalUpdateMode::Adaptive, WalStorageMode::Segmented, 1);
+    BufferPoolTestAccess::flushVictim(f.pool, 0); // An invalid/free frame is ignored.
+    require(f.pool.stats().physicalPageWrites == 0, "Invalid victim was written");
+    f.initialize();
     f.update(1, 8); f.pool.flushAll(); const auto old = *f.pool.pageLsn(1);
     // Keep a known older identity for the monotonicity test before reclamation.
     static_cast<void>(f.checkpoint());
@@ -150,6 +179,18 @@ void noOpAndMonotonicity() {
     f.recovery.commitStatement();
     require(!*f.pool.isDirty(1) && *f.pool.walDependencyRetired(1) && f.pool.pageLsn(1) == old,
         "No-op intent renewed/invalidated historical state");
+    f.recovery.beginStatement();
+    { auto guard = requireWritePage(f.pool, 1, "evicted no-op intent"); }
+    const auto before = f.pool.stats();
+    const auto walBefore = f.log.lastAppendedLsn();
+    { auto guard = requireReadPage(f.pool, 2, "evict no-op dirty page"); }
+    require(!f.pool.isResident(1)
+        && f.pool.stats().physicalPageWrites == before.physicalPageWrites + 1
+        && f.pool.stats().dirtyEvictions == before.dirtyEvictions + 1
+        && f.pool.stats().walFlushRequests == before.walFlushRequests
+        && f.log.lastAppendedLsn() == walBefore,
+        "No-op victim lost its physical write/eviction accounting or generated WAL");
+    f.recovery.commitStatement();
     f.update(1, 9); const auto latest = *f.pool.pageLsn(1);
     f.pool.flushAll(); static_cast<void>(f.checkpoint());
     require(f.log.containsLsn(old), "Monotonicity test needs retained older record");
@@ -158,6 +199,59 @@ void noOpAndMonotonicity() {
       test::requireThrows<std::invalid_argument>([&] { guard.setPageLsn(old); }, "Retirement allowed historical decrease"); }
     f.recovery.commitStatement(); require(f.pool.pageLsn(1) == latest, "No-op changed latest identity");
     checkResident(f);
+}
+
+void failedSinglePageWritesPreserveState() {
+    for (const bool eviction : {false, true}) {
+        test::TemporaryDatabase db("single_page_write_failure");
+        test::WritebackFixture f(db.path().string(), WalUpdateMode::Adaptive, WalStorageMode::Segmented, 1);
+        f.initialize(); f.update(1, 7);
+        const auto bytes = f.pool.residentPageCopy(1);
+        const auto lsn = f.pool.pageLsn(1), rec = f.pool.recLsn(1);
+        const auto before = f.pool.stats();
+        const auto epoch = f.disk.writebackStats().physicalWriteEpoch;
+        DiskManagerTestAccess::breakStream(f.disk);
+        test::requireThrows<std::runtime_error>([&] {
+            if (eviction) { auto guard = requireReadPage(f.pool, 2, "failed victim write"); }
+            else static_cast<void>(f.pool.flushPage(1));
+        }, "Single-page path ignored physical write failure");
+        require(f.pool.isResident(1) && !f.pool.isResident(2) && *f.pool.isDirty(1)
+            && f.pool.pageLsn(1) == lsn && f.pool.recLsn(1) == rec
+            && f.pool.residentPageCopy(1) == bytes && !*f.pool.pendingWalPreparation(1)
+            && f.pool.stats().physicalPageWrites == before.physicalPageWrites
+            && f.pool.stats().evictions == before.evictions
+            && f.disk.writebackStats().physicalWriteEpoch == epoch,
+            "Failed physical write cleared dirty/recLSN state, changed identity, or counted success");
+        f.pool.validate();
+    }
+}
+
+void singlePageCrashBoundaries() {
+    for (const auto mode : {WalUpdateMode::FullPage, WalUpdateMode::ByteRange, WalUpdateMode::Adaptive})
+      for (const bool eviction : {false, true})
+       for (const bool noOp : {false, true})
+       for (const auto* point : {"after_page_update_wal_force", "after_database_page_write"}) {
+        test::TemporaryDatabase db("single_page_flush_crash");
+        { test::WritebackFixture f(db.path().string(), mode); f.initialize(); }
+        const auto child = ::fork();
+        if (child == 0) {
+            try {
+                test::WritebackFixture f(db.path().string(), mode, WalStorageMode::Segmented, 1);
+                if (noOp) {
+                    f.recovery.beginStatement();
+                    auto guard = requireWritePage(f.pool, 1, "crash no-op intent");
+                } else f.update(1, 42, false);
+                ::setenv("MINIDB_FAILPOINT", point, 1);
+                if (eviction) { auto guard = requireReadPage(f.pool, 2, "crash victim eviction"); }
+                else static_cast<void>(f.pool.flushPage(1));
+                ::_exit(99);
+            } catch (...) { ::_exit(98); }
+        }
+        hardExit(child);
+        test::WritebackFixture f(db.path().string(), mode);
+        f.verify({0, 0, 0, 0, 0}, INVALID_PAGE_ID);
+        f.pool.validate();
+    }
 }
 
 void pendingWithoutPreparer() {
@@ -450,7 +544,9 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--model") model();
         else if (argc == 2 && std::string_view(argv[1]) == "--concurrency") concurrency();
-        else { directed(); negatives(); noOpAndMonotonicity(); pendingWithoutPreparer(); controlFallback(); activeTransaction(); reuseCycles(); reclamationFailures(); crashMatrix(); metadataLoss(); }
+        else { directed(); negatives(); noOpAndMonotonicity(); failedSinglePageWritesPreserveState();
+            singlePageCrashBoundaries(); pendingWithoutPreparer(); controlFallback(); activeTransaction();
+            reuseCycles(); reclamationFailures(); crashMatrix(); metadataLoss(); }
         std::cout << "Frame WAL retirement passed\n";
     } catch (const std::exception& e) { ::unsetenv("MINIDB_THROWPOINT"); std::cerr << e.what() << '\n'; return 1; }
 }
