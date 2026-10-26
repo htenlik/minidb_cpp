@@ -59,12 +59,6 @@ void TransactionManager::requireWriter(const SessionContext& session) const {
     }
     if (recovery_) {
         recovery_->requireOwnedTransaction(session.writerId, *this, session.sessionId, gate_, *session.lease);
-        const auto entries = recovery_->transactionSnapshot();
-        if (std::none_of(entries.begin(), entries.end(), [&](const auto& entry) {
-                return entry.transactionId == session.writerId;
-            })) {
-            throw std::logic_error("Recovery transaction is missing for writer session");
-        }
     }
 }
 void TransactionManager::finishWriter(SessionContext& session) {
