@@ -8,28 +8,6 @@ namespace {
 void require(bool valid, const char* message) {
     if (!valid) throw WalError(WalErrorKind::CorruptRecord, message);
 }
-struct UpdateIdentity { PageId page; bool existed; };
-bool isPageUpdateRecord(LogRecordType type) {
-    return type == LogRecordType::PageUpdate || type == LogRecordType::PageDeltaUpdate
-        || type == LogRecordType::PageUpdateV2 || type == LogRecordType::PageDeltaUpdateV2;
-}
-UpdateIdentity identity(const LogRecord& r) {
-    switch (r.type) {
-    case LogRecordType::PageUpdate: {
-        const auto v = decodePageUpdateLogPayload(r.payload); return {v.pageId, v.beforePageExisted};
-    }
-    case LogRecordType::PageDeltaUpdate: {
-        const auto v = decodePageDeltaUpdateLogPayload(r.payload); return {v.pageId, v.beforePageExisted};
-    }
-    case LogRecordType::PageUpdateV2: {
-        const auto v = decodePageUpdateV2LogPayload(r.payload); return {v.pageId, v.beforePageExisted};
-    }
-    case LogRecordType::PageDeltaUpdateV2: {
-        const auto v = decodePageDeltaUpdateV2LogPayload(r.payload); return {v.pageId, v.beforePageExisted};
-    }
-    default: throw WalError(WalErrorKind::CorruptRecord, "Expected a page update");
-    }
-}
 bool terminal(OwnedCleanupPhase phase) {
     return phase == OwnedCleanupPhase::AbortRecorded || phase == OwnedCleanupPhase::CommitRecorded;
 }
@@ -58,7 +36,9 @@ std::map<TransactionId, OwnedRollbackAnalysis> analyzeOwnedRollbackHistory(std::
             const auto it = byLsn.find(target);
             require(it != byLsn.end() && it->second->transactionId == owner, "UNDO reference is not an owned record boundary");
             const auto& r = *it->second;
-            if (r.type != LogRecordType::PageReserve && !(isPageUpdateRecord(r.type) && !identity(r).existed)) break;
+            if (r.type != LogRecordType::PageReserve
+                && !(isPageUpdateRecordType(r.type)
+                    && !decodePageUpdateIdentity(r).beforePageExisted)) break;
             target = r.prevLsn;
         }
         return target;
@@ -126,19 +106,23 @@ std::map<TransactionId, OwnedRollbackAnalysis> analyzeOwnedRollbackHistory(std::
             claim(v.pageId, r.transactionId);
             t.reservations.emplace(v.pageId, OwnedReservationEvidence{
                 PageReservationEntry{v.pageId, r.lsn, v.source, v.expectedOldPageCount, false}});
-        } else if (isPageUpdateRecord(r.type)) {
-            const auto v = identity(r);
-            require(t.phase == OwnedCleanupPhase::OwnedActive && v.existed == (v.page < t.startPageCount),
+        } else if (isPageUpdateRecordType(r.type)) {
+            const auto v = decodePageUpdateIdentity(r);
+            require(t.phase == OwnedCleanupPhase::OwnedActive
+                && v.beforePageExisted == (v.pageId < t.startPageCount),
                     "Page update state/extent inconsistent with BEGIN");
-            require(!owned || v.existed || t.reservations.contains(v.page), "Owned append update lacks reservation");
-            claim(v.page, r.transactionId);
-            (v.existed ? t.preexistingUpdates : t.appendedUpdates)[v.page] = r.lsn;
+            require(!owned || v.beforePageExisted || t.reservations.contains(v.pageId),
+                    "Owned append update lacks reservation");
+            claim(v.pageId, r.transactionId);
+            (v.beforePageExisted ? t.preexistingUpdates : t.appendedUpdates)[v.pageId] = r.lsn;
         } else if (r.type == LogRecordType::Compensation) {
             const auto v = decodeCompensationLogPayload(r.payload);
             const auto original = byLsn.find(v.compensatedUpdateLsn);
             require(original != byLsn.end() && original->second->transactionId == r.transactionId
-                && isPageUpdateRecord(original->second->type) && identity(*original->second).existed
-                && identity(*original->second).page == v.pageId && original->second->prevLsn == v.undoNextLsn,
+                && isPageUpdateRecordType(original->second->type)
+                && decodePageUpdateIdentity(*original->second).beforePageExisted
+                && decodePageUpdateIdentity(*original->second).pageId == v.pageId
+                && original->second->prevLsn == v.undoNextLsn,
                 "CLR does not compensate its owner's existing-page update");
             const auto target = nextRequiredUndo(t.phase == OwnedCleanupPhase::Undoing ? undoNext.at(r.transactionId) : r.prevLsn,
                                                  r.transactionId, t.beginLsn);

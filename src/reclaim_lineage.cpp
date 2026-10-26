@@ -13,12 +13,9 @@ using Page = DiskManager::Page;
         +" LSN="+std::to_string(lsn)+": "+reason);
 }
 std::optional<PageId> affected(const LogRecord& r) {
+    if(isPageUpdateRecordType(r.type))return decodePageUpdateIdentity(r).pageId;
     switch(r.type) {
     case LogRecordType::PageReclaim:return decodePageReclaim(r).page;
-    case LogRecordType::PageUpdate:return decodePageUpdateLogPayload(r.payload).pageId;
-    case LogRecordType::PageDeltaUpdate:return decodePageDeltaUpdateLogPayload(r.payload).pageId;
-    case LogRecordType::PageUpdateV2:return decodePageUpdateV2LogPayload(r.payload).pageId;
-    case LogRecordType::PageDeltaUpdateV2:return decodePageDeltaUpdateV2LogPayload(r.payload).pageId;
     case LogRecordType::Compensation:return decodeCompensationLogPayload(r.payload).pageId;
     default:return std::nullopt;
     }
