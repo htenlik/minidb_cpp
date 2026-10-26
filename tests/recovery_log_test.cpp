@@ -1,4 +1,5 @@
 #include "minidb/byte_codec.hpp"
+#include "minidb/page_reclaim.hpp"
 #include "minidb/recovery_log.hpp"
 #include "test_utils.hpp"
 
@@ -7,6 +8,8 @@
 #include <cstdint>
 #include <iostream>
 #include <random>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -533,6 +536,106 @@ void testPageLsnAwarePayloadsAndAdaptiveBoundary() {
         "New PAGE_UPDATE_V2 accepted a beforePageLsn");
 }
 
+void testPageUpdateIdentity() {
+    using namespace minidb;
+    const auto error = [](auto&& operation) {
+        try { operation(); }
+        catch (const WalError& e) { return std::pair{e.kind(), std::string(e.what())}; }
+        throw std::runtime_error("Malformed WAL was accepted");
+    };
+    const auto reject = [&](const LogRecord& record) {
+        const auto expected = error([&] { validateTransactionRecordPayload(record); });
+        const auto actual = error([&] { static_cast<void>(decodePageUpdateIdentity(record)); });
+        require(expected.first == WalErrorKind::CorruptRecord && actual == expected,
+                "Identity decoding changed strict payload rejection category or diagnostic");
+    };
+    constexpr std::array types{LogRecordType::PageUpdate, LogRecordType::PageDeltaUpdate,
+        LogRecordType::PageUpdateV2, LogRecordType::PageDeltaUpdateV2};
+    constexpr std::array versionOrReserved{page_update_log_layout::RESERVED_OFFSET,
+        page_delta_update_log_layout::VERSION_OFFSET, page_update_v2_log_layout::VERSION_OFFSET,
+        page_delta_update_v2_log_layout::VERSION_OFFSET};
+    for (const PageId page : {PageId{0}, PageId{0x01020304U}, PageId{INVALID_PAGE_ID - 1}})
+      for (const bool existed : {false, true}) {
+        const auto before = filledPage(existed ? std::byte{0xA5} : std::byte{0});
+        auto after = before; after[100] ^= std::byte{0x5A};
+        const auto ranges = computePageDelta(before, after);
+        const auto beforeLsn = existed ? Lsn{64} : INVALID_LSN;
+        const std::array payloads{
+            encodePageUpdateLogPayload({page, existed, before, after}),
+            encodePageDeltaUpdateLogPayload({page, existed, ranges}),
+            encodePageUpdateV2LogPayload({page, existed, beforeLsn, before, after}),
+            encodePageDeltaUpdateV2LogPayload({page, existed, beforeLsn, ranges})};
+        for (std::size_t index = 0; index < types.size(); ++index) {
+            const LogRecord record{types[index], 7, 64, payloads[index], 128};
+            require(isPageUpdateRecordType(record.type), "Ordinary update not classified");
+            validateTransactionRecordPayload(record);
+            const auto identity = decodePageUpdateIdentity(record);
+            require(identity.pageId == page && identity.beforePageExisted == existed,
+                    "Ordinary update identity mismatch");
+            const auto roundTrip = decodeWalRecord(encodeWalRecord(record, record.lsn), record.lsn);
+            const auto decoded = decodePageUpdateIdentity(roundTrip);
+            require(decoded.pageId == page && decoded.beforePageExisted == existed,
+                    "Identity changed through legacy/v2 WAL record codec");
+            for (const auto length : {std::size_t{0}, versionOrReserved[index], record.payload.size() - 1}) {
+                auto bad = record; bad.payload.resize(length); reject(bad);
+            }
+            auto bad = record; bad.payload.push_back(std::byte{0}); reject(bad);
+            bad = record;
+            byte_codec::writeUint32(bad.payload, page_update_log_layout::PAGE_ID_OFFSET, INVALID_PAGE_ID);
+            reject(bad);
+            for (const auto offset : {page_update_log_layout::FLAGS_OFFSET,
+                                     page_update_log_layout::PAGE_SIZE_OFFSET, versionOrReserved[index]}) {
+                bad = record; bad.payload[offset] ^= std::byte{0x80}; reject(bad);
+            }
+            const bool delta = record.type == LogRecordType::PageDeltaUpdate
+                || record.type == LogRecordType::PageDeltaUpdateV2;
+            const bool v2 = record.type == LogRecordType::PageUpdateV2
+                || record.type == LogRecordType::PageDeltaUpdateV2;
+            if (v2) {
+                const auto offset = delta ? page_delta_update_v2_log_layout::BEFORE_PAGE_LSN_OFFSET
+                    : page_update_v2_log_layout::BEFORE_PAGE_LSN_OFFSET;
+                bad = record; byte_codec::writeUint64(bad.payload, offset, INVALID_LSN); reject(bad);
+                if (!existed) {
+                    bad = record; byte_codec::writeUint64(bad.payload, offset, 64); reject(bad);
+                }
+            }
+            if (delta) {
+                const auto header = v2 ? page_delta_update_v2_log_layout::HEADER_SIZE
+                    : page_delta_update_log_layout::HEADER_SIZE;
+                bad = record;
+                byte_codec::writeUint16(bad.payload, header + page_delta_update_log_layout::RANGE_LENGTH_OFFSET, 0);
+                reject(bad);
+            } else if (!existed) {
+                const auto offset = v2 ? page_update_v2_log_layout::BEFORE_IMAGE_OFFSET
+                    : page_update_log_layout::BEFORE_IMAGE_OFFSET;
+                bad = record; bad.payload[offset] = std::byte{1}; reject(bad);
+            }
+            // Identity decoding must not replace the separate record/chain checks.
+            bad = record; bad.prevLsn = INVALID_LSN;
+            require(error([&] { validateTransactionRecordPayload(bad); }).first == WalErrorKind::CorruptRecord,
+                    "Phase-specific prevLSN rejection changed");
+        }
+    }
+    for (std::uint16_t raw = 0; raw <= static_cast<std::uint16_t>(LogRecordType::RollbackCleanupProgress) + 1; ++raw) {
+        const auto type = static_cast<LogRecordType>(raw);
+        if (std::find(types.begin(), types.end(), type) != types.end()) continue;
+        LogRecord record{type, 7, 128, {}, 256};
+        if (type == LogRecordType::Compensation) {
+            record.payload = encodeCompensationLogPayload({7, true, false, 64, 128, {}});
+            validateTransactionRecordPayload(record);
+        } else if (type == LogRecordType::PageReclaim) {
+            record.transactionId = INVALID_TRANSACTION_ID; record.prevLsn = INVALID_LSN;
+            record.payload = encodePageReclaim({7, INVALID_PAGE_ID, 8});
+            require(decodePageReclaim(record).page == 7, "Invalid distinct reclaim fixture");
+        }
+        require(!isPageUpdateRecordType(type), "Non-update/CLR/reclaim classified as ordinary update");
+        const auto rejected = error([&] { static_cast<void>(decodePageUpdateIdentity(record)); });
+        require(rejected.first == WalErrorKind::CorruptRecord
+            && rejected.second == "WAL record is not a page-update record",
+            "Unsupported update identity changed error contract");
+    }
+}
+
 void testCommitAndAbortHaveExactEmptyPayloads() {
     for (const auto type : {minidb::LogRecordType::Commit, minidb::LogRecordType::Abort}) {
         minidb::LogRecord record{type, 9, 64, {}, minidb::INVALID_LSN};
@@ -564,6 +667,7 @@ int main() {
         testDeterministicDeltaDecoderFuzz();
         testMalformedPayloads();
         testPageLsnAwarePayloadsAndAdaptiveBoundary();
+        testPageUpdateIdentity();
         testCommitAndAbortHaveExactEmptyPayloads();
         std::cout << "recovery_log_test passed\n";
         return 0;

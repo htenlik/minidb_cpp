@@ -689,6 +689,30 @@ CompensationLogPayload decodeCompensationLogPayload(
     return payload;
 }
 
+PageUpdateIdentity decodePageUpdateIdentity(const LogRecord& record) {
+    switch (record.type) {
+    case LogRecordType::PageUpdate: {
+        const auto update = decodePageUpdateLogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    case LogRecordType::PageDeltaUpdate: {
+        const auto update = decodePageDeltaUpdateLogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    case LogRecordType::PageUpdateV2: {
+        const auto update = decodePageUpdateV2LogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    case LogRecordType::PageDeltaUpdateV2: {
+        const auto update = decodePageDeltaUpdateV2LogPayload(record.payload);
+        return {update.pageId, update.beforePageExisted};
+    }
+    default:
+        throw WalError(WalErrorKind::CorruptRecord,
+                       "WAL record is not a page-update record");
+    }
+}
+
 void validateTransactionRecordPayload(const LogRecord& record) {
     if (record.transactionId == INVALID_TRANSACTION_ID) {
         throw WalError(WalErrorKind::CorruptRecord, "Transaction record uses transaction ID zero");
