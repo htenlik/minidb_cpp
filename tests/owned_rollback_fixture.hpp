@@ -11,6 +11,11 @@ namespace minidb::test {
 // this header, and no constructor/SQL/CLI/environment activation path exists.
 class OwnedRollbackTestAccess {
 public:
+    static void requireTransaction(const RecoveryCoordinator& recovery, TransactionId id,
+        const TransactionManager& manager, std::uint64_t session,
+        const DatabaseAccessGate& gate, const DatabaseAccessGate::Lease& lease) {
+        recovery.requireOwnedTransaction(id, manager, session, gate, lease);
+    }
     static void bindExisting(RecoveryCoordinator& recovery, const DatabaseAccessGate& gate,
                             const DatabaseAccessGate::Lease& lease, TransactionId id) {
         require(lease.owns(gate) && lease.mode()==AccessMode::ReadWrite,"SQL owned binding lacks exclusive lease");
