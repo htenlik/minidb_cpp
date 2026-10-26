@@ -202,6 +202,20 @@ struct CompensationLogPayload {
     bool operator==(const CompensationLogPayload&) const = default;
 };
 
+struct PageUpdateIdentity {
+    PageId pageId = INVALID_PAGE_ID;
+    bool beforePageExisted = false;
+};
+
+[[nodiscard]] constexpr bool isPageUpdateRecordType(LogRecordType type) noexcept {
+    return type == LogRecordType::PageUpdate || type == LogRecordType::PageDeltaUpdate
+        || type == LogRecordType::PageUpdateV2 || type == LogRecordType::PageDeltaUpdateV2;
+}
+
+// Strict payload decoding only: callers retain record/transaction/chain validation.
+// Compensation and PageReclaim are deliberately not ordinary page updates.
+[[nodiscard]] PageUpdateIdentity decodePageUpdateIdentity(const LogRecord& record);
+
 inline constexpr std::size_t FULL_PAGE_UPDATE_RECORD_SIZE =
     wal_record_layout::HEADER_SIZE + page_update_log_layout::PAYLOAD_SIZE;
 inline constexpr std::size_t FULL_PAGE_UPDATE_V2_RECORD_SIZE =

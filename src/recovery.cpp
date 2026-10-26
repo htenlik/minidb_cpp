@@ -35,45 +35,17 @@ struct AnalyzedTransaction : RecoveryTransactionEntry {
     std::vector<const LogRecord*> clrs;
 };
 
-struct PageUpdateIdentity {
-    PageId pageId = INVALID_PAGE_ID;
-    bool beforePageExisted = false;
-};
-
-PageUpdateIdentity pageUpdateIdentity(const LogRecord& record) {
+// REDO/DPT also visits CLRs; they are not ordinary page updates.
+PageUpdateIdentity pageAffectingIdentity(const LogRecord& record) {
     if (record.type == LogRecordType::Compensation) {
         const auto compensation = decodeCompensationLogPayload(record.payload);
         return {compensation.pageId, compensation.pageExisted};
     }
-    if (record.type == LogRecordType::PageUpdate) {
-        const auto update = decodePageUpdateLogPayload(record.payload);
-        return {update.pageId, update.beforePageExisted};
-    }
-    if (record.type == LogRecordType::PageDeltaUpdate) {
-        const auto update = decodePageDeltaUpdateLogPayload(record.payload);
-        return {update.pageId, update.beforePageExisted};
-    }
-    if (record.type == LogRecordType::PageUpdateV2) {
-        const auto update = decodePageUpdateV2LogPayload(record.payload);
-        return {update.pageId, update.beforePageExisted};
-    }
-    if (record.type == LogRecordType::PageDeltaUpdateV2) {
-        const auto update = decodePageDeltaUpdateV2LogPayload(record.payload);
-        return {update.pageId, update.beforePageExisted};
-    }
-    throw WalError(WalErrorKind::CorruptRecord,
-                   "WAL record is not a page-update record");
-}
-
-bool isPageUpdateRecord(LogRecordType type) noexcept {
-    return type == LogRecordType::PageUpdate
-        || type == LogRecordType::PageDeltaUpdate
-        || type == LogRecordType::PageUpdateV2
-        || type == LogRecordType::PageDeltaUpdateV2;
+    return decodePageUpdateIdentity(record);
 }
 
 bool isPageAffectingRecord(LogRecordType type) noexcept {
-    return isPageUpdateRecord(type) || type == LogRecordType::Compensation;
+    return isPageUpdateRecordType(type) || type == LogRecordType::Compensation;
 }
 
 DiskManager::Page compensatedPageFor(
@@ -86,7 +58,7 @@ DiskManager::Page compensatedPageFor(
         compensated = decodePageUpdateV2LogPayload(record.payload).beforeImage;
     } else if (record.type == LogRecordType::PageDeltaUpdate
                || record.type == LogRecordType::PageDeltaUpdateV2) {
-        const auto identity = pageUpdateIdentity(record);
+        const auto identity = decodePageUpdateIdentity(record);
         readUndoBase(identity.pageId, compensated);
         if (record.type == LogRecordType::PageDeltaUpdate) {
             applyPageDeltaBefore(
@@ -207,7 +179,7 @@ void undoTransactions(
             work.push({nextUndoLsn, transactionId, index});
             continue;
         }
-        if (!isPageUpdateRecord(record.type)) {
+        if (!isPageUpdateRecordType(record.type)) {
             if (record.type == LogRecordType::PageReserve) {
                 nextUndoLsn = record.prevLsn;
                 work.push({nextUndoLsn, transactionId, index});
@@ -217,7 +189,7 @@ void undoTransactions(
                            "UNDO chain contains a non-undoable record");
         }
         ++stats.undoUserRecordsVisited;
-        const auto identity = pageUpdateIdentity(record);
+        const auto identity = decodePageUpdateIdentity(record);
         nextUndoLsn = record.prevLsn;
         // Legacy appends truncate; owned appends are reclaimed after user UNDO.
         if (!identity.beforePageExisted) {
@@ -679,11 +651,11 @@ RecoveryStats RecoveryManager::recover() {
             transaction.reservations.emplace(payload.pageId, PageReservationEntry{
                 payload.pageId, record.lsn, payload.source, payload.expectedOldPageCount, false});
             ++stats.pageReservationsRecovered;
-        } else if (isPageUpdateRecord(record.type)) {
+        } else if (isPageUpdateRecordType(record.type)) {
             if (found->second.status != TransactionStatus::Active) {
                 throw WalError(WalErrorKind::CorruptRecord, "Page update after transaction entered UNDO");
             }
-            const auto identity = pageUpdateIdentity(record);
+            const auto identity = decodePageUpdateIdentity(record);
             const auto pageId = identity.pageId;
             const auto beforePageExisted = identity.beforePageExisted;
             if (beforePageExisted != (pageId < found->second.startPageCount)) {
@@ -709,10 +681,10 @@ RecoveryStats RecoveryManager::recover() {
                 compensation.compensatedUpdateLsn);
             if (compensated == recordsByLsn.end()
                 || compensated->second->transactionId != record.transactionId
-                || !isPageUpdateRecord(compensated->second->type)
+                || !isPageUpdateRecordType(compensated->second->type)
                 || compensated->second->lsn >= record.lsn
                 || compensated->second->prevLsn != compensation.undoNextLsn
-                || pageUpdateIdentity(*compensated->second).pageId
+                || decodePageUpdateIdentity(*compensated->second).pageId
                     != compensation.pageId) {
                 throw WalError(
                     WalErrorKind::CorruptRecord,
@@ -727,8 +699,8 @@ RecoveryStats RecoveryManager::recover() {
                     throw WalError(WalErrorKind::CorruptRecord, "CLR undoNext chain is malformed");
                 }
                 if (prior->second->type != LogRecordType::PageReserve
-                    && (!isPageUpdateRecord(prior->second->type)
-                        || pageUpdateIdentity(*prior->second).beforePageExisted)) break;
+                    && (!isPageUpdateRecordType(prior->second->type)
+                        || decodePageUpdateIdentity(*prior->second).beforePageExisted)) break;
                 target = prior->second->prevLsn;
             }
             if (target != compensation.compensatedUpdateLsn) {
@@ -762,7 +734,7 @@ RecoveryStats RecoveryManager::recover() {
             --activeTransactionCount;
             found->second.undoNextLsn = INVALID_LSN;
             for (const auto* update : found->second.updates) {
-                activePageOwners.erase(pageUpdateIdentity(*update).pageId);
+                activePageOwners.erase(decodePageUpdateIdentity(*update).pageId);
             }
             for (const auto& [page, reservation] : found->second.reservations) {
                 static_cast<void>(reservation);
@@ -831,7 +803,7 @@ RecoveryStats RecoveryManager::recover() {
                     }
                 }
                 for (const auto* update : transaction.updates) {
-                    if (pageUpdateIdentity(*update).pageId >= minimumStart) {
+                    if (decodePageUpdateIdentity(*update).pageId >= minimumStart) {
                         throw WalError(WalErrorKind::CorruptRecord, "Loser truncation would remove a winner page");
                     }
                 }
@@ -914,7 +886,7 @@ RecoveryStats RecoveryManager::recover() {
                         : later.page == page && actual == reclaimedPage(later, lsn);
                 }
                 const auto& later = *found->second;
-                if (!isPageAffectingRecord(later.type) || pageUpdateIdentity(later).pageId != page) return false;
+                if (!isPageAffectingRecord(later.type) || pageAffectingIdentity(later).pageId != page) return false;
                 if (later.type == LogRecordType::PageDeltaUpdate || later.type == LogRecordType::PageDeltaUpdateV2) {
                     const auto ranges = later.type == LogRecordType::PageDeltaUpdate
                         ? decodePageDeltaUpdateLogPayload(later.payload).ranges
@@ -936,7 +908,7 @@ RecoveryStats RecoveryManager::recover() {
             continue; // Synchronously persisted system records bypass user DPT filtering.
         }
         if (historicalHead.has_value()) {
-            const auto page = pageUpdateIdentity(*record).pageId;
+            const auto page = pageAffectingIdentity(*record).pageId;
             auto prior = reclaimedHistory.find(page);
             // Page 0 needs only the root field projected through chronological
             // delta records. Reclaimed targets retain full logical page images.
@@ -966,7 +938,7 @@ RecoveryStats RecoveryManager::recover() {
             }
         }
         if (fuzzyCheckpoint.has_value()) {
-            const auto identity = pageUpdateIdentity(*record);
+            const auto identity = pageAffectingIdentity(*record);
             const auto foundDpt = dirtyPageTable.find(identity.pageId);
             if (foundDpt == dirtyPageTable.end()) {
                 ++stats.redoSkippedNotInDpt;
@@ -1039,17 +1011,9 @@ RecoveryStats RecoveryManager::recover() {
             diskManager_.writePhysicalPage(update.pageId, page);
             ++stats.legacyRedoRecords;
         } else {
-            PageId pageId = INVALID_PAGE_ID;
-            bool beforePageExisted = false;
-            if (record->type == LogRecordType::PageUpdateV2) {
-                const auto update = decodePageUpdateV2LogPayload(record->payload);
-                pageId = update.pageId;
-                beforePageExisted = update.beforePageExisted;
-            } else {
-                const auto update = decodePageDeltaUpdateV2LogPayload(record->payload);
-                pageId = update.pageId;
-                beforePageExisted = update.beforePageExisted;
-            }
+            const auto identity = decodePageUpdateIdentity(*record);
+            const auto pageId = identity.pageId;
+            const auto beforePageExisted = identity.beforePageExisted;
 
             DiskManager::Page current{};
             const bool pageExists = pageId < diskManager_.pageCount();
