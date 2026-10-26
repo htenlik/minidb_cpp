@@ -22,6 +22,47 @@ namespace minidb::test {
 // SqlEngine::execute unchanged. Implicit mutation dispatch mirrors that method.
 class OwnedSqlTestAccess {
 public:
+    static void writerValidation(sql::SqlEngine& engine, SessionId session, bool commit) {
+        auto& manager = engine.transactions_;
+        manager.begin(session);
+        auto guard = manager.lockSession(session);
+        const auto context = manager.findSession(session);
+        const auto id = context->writerId;
+        manager.requireWriter(*context);
+        const auto check = [&](const TransactionManager& owner, SessionId ownerSession,
+            TransactionId transaction, const DatabaseAccessGate& gate,
+            const DatabaseAccessGate::Lease& lease) {
+            OwnedRollbackTestAccess::requireTransaction(*manager.recovery_, transaction,
+                owner, ownerSession, gate, lease);
+        };
+        TransactionManager foreign(manager.recovery_, nullptr);
+        DatabaseAccessGate foreignGate;
+        const DatabaseAccessGate::Lease absent;
+        requireThrows<std::logic_error>([&] { check(foreign, session, id, manager.gate_, *context->lease); },
+            "Foreign manager accepted");
+        requireThrows<std::logic_error>([&] { check(manager, session + 1, id, manager.gate_, *context->lease); },
+            "Wrong session accepted");
+        requireThrows<std::logic_error>([&] { check(manager, session, id + 1, manager.gate_, *context->lease); },
+            "Wrong transaction accepted");
+        requireThrows<std::logic_error>([&] { check(manager, session, id, foreignGate, *context->lease); },
+            "Wrong gate accepted");
+        requireThrows<std::logic_error>([&] { check(manager, session, id, manager.gate_, absent); },
+            "Absent writer lease accepted");
+        auto heldLease = std::move(*context->lease);
+        requireThrows<std::logic_error>([&] { check(manager, session, id, manager.gate_, heldLease); },
+            "Different lease object accepted");
+        requireThrows<std::logic_error>([&] { check(manager, session, id, manager.gate_, *context->lease); },
+            "Inactive bound lease accepted");
+        *context->lease = std::move(heldLease);
+        manager.requireWriter(*context);
+        // Complete only the recovery context, retaining the real session binding
+        // to prove requireWriter rejects its absence before the snapshot scan.
+        if (commit) manager.recovery_->commitTransaction(id);
+        else manager.recovery_->rollbackTransaction(id);
+        requireThrows<std::logic_error>([&] { manager.requireWriter(*context); },
+            "Finished/missing recovery context accepted");
+        manager.endExplicit(*context);
+    }
     static void bind(sql::SqlEngine& engine, SessionId session = LOCAL_SESSION_ID) {
         auto& manager = engine.transactions_;
         const auto context = manager.findSession(session);
@@ -95,6 +136,16 @@ struct Storage : test::OwnedFixture {
         pool.flushAll(); disk.sync(); validate();
     }
 };
+void writerValidation() {
+    test::TemporaryDatabase db("owned_writer_validation");
+    Storage f(db.path().string());
+    for (const bool commit : {false, true})
+        test::OwnedSqlTestAccess::writerValidation(f.engine, 73, commit);
+    require(!f.recovery.hasActiveStatement()
+        && !f.engine.transactionManager().accessGate().stats().writerActive,
+        "Writer validation test leaked its recovery context or lease");
+    f.validate();
+}
 void directed() {
     for (auto mode : {WalUpdateMode::FullPage, WalUpdateMode::ByteRange, WalUpdateMode::Adaptive})
       for (auto store : {WalStorageMode::LegacySingleFile, WalStorageMode::Segmented}) {
@@ -349,7 +400,7 @@ void crashAndRetention() {
 int main(int argc, char** argv) {
     try {if (argc == 2 && std::string_view(argv[1]) == "--crash") crashAndRetention();
         else if (argc == 2 && std::string_view(argv[1]) == "--tcp") tcpLifetime();
-        else {directed(); implicitFailure();}
+        else {writerValidation(); directed(); implicitFailure();}
         std::cout << "Owned SQL/storage integration passed (test-only dispatch)\n";}
     catch (const std::exception& e) {std::cerr << e.what() << '\n'; return 1;}
 }
