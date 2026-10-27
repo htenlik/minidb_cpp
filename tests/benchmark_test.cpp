@@ -128,6 +128,18 @@ void testConfigurationParsing() {
         "--benchmark", "txn_insert", "--wal-update-mode", "adaptive"}).config;
     minidb::test::require(adaptive.walUpdateMode == minidb::WalUpdateMode::Adaptive,
                           "adaptive WAL update mode was not parsed");
+    minidb::test::require(adaptive.checkpointMode == minidb::CheckpointMode::Sharp,
+                          "default checkpoint mode changed");
+    for (const auto mode : {"sharp", "fuzzy"}) {
+        const auto checkpoint = parseArguments(std::vector<std::string_view>{
+            "--benchmark", "txn_insert", "--checkpoint-mode", mode}).config;
+        minidb::test::require(checkpoint.checkpointMode == (std::string_view(mode) == "sharp"
+            ? minidb::CheckpointMode::Sharp : minidb::CheckpointMode::Fuzzy),
+            "checkpoint mode was not parsed");
+    }
+    reject([] { static_cast<void>(parseArguments(std::vector<std::string_view>{
+        "--benchmark", "txn_insert", "--checkpoint-mode", "unknown"})); },
+        "unknown checkpoint mode was accepted");
     const auto concurrency = parseArguments(std::vector<std::string_view>{
         "--benchmark", "concurrency_pk_read", "--client-threads", "8", "--writer-hold-ms", "25"}).config;
     minidb::test::require(concurrency.clientThreads == 8 && concurrency.writerHoldMs == 25,
