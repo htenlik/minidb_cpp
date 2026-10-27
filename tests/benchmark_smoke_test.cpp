@@ -1,4 +1,5 @@
 #include "minidb/benchmark.hpp"
+#include "minidb/checkpoint_control.hpp"
 #include "test_utils.hpp"
 
 #include <filesystem>
@@ -6,8 +7,105 @@
 #include <string>
 #include <vector>
 
+namespace {
+
+void testTransactionalCheckpointMode() {
+    for (const auto mode : {minidb::CheckpointMode::Sharp, minidb::CheckpointMode::Fuzzy}) {
+        for (const bool triggered : {true, false}) {
+            minidb::test::TemporaryDatabase database("benchmark_transactional_checkpoint");
+            minidb::bench::BenchmarkConfig config;
+            config.benchmark = "txn_insert";
+            config.databasePath = database.path().string();
+            config.operations = 4;
+            config.warmupOperations = 0;
+            config.checkpointMode = mode;
+            config.checkpointWalBytes = 0;
+            config.checkpointStatements = triggered ? 1 : 1000;
+            const auto results = minidb::bench::runConfiguredBenchmarks(config);
+            const auto& result = results.at(0);
+            const auto& checkpoints = result.checkpoint;
+            const auto expected = triggered ? config.operations : 0;
+            const bool sharp = mode == minidb::CheckpointMode::Sharp;
+            minidb::test::require(results.size() == 1 && result.validationPassed
+                && result.configuration.checkpointMode == mode
+                && result.timing.operationCount == config.operations
+                && result.recovery.transactions.transactionsCommitted == config.operations,
+                "Transactional checkpoint benchmark configuration/counters changed");
+            std::cout << "txn_insert requested=" << minidb::checkpointModeName(mode)
+                      << " triggered=" << triggered
+                      << " sharp=" << checkpoints.sharpCheckpointsCompleted
+                      << " fuzzy=" << checkpoints.fuzzyCheckpointsCompleted << '\n';
+            // runTransactional resets statistics after setup; only measured
+            // autocommits contribute to these automatic checkpoint counts.
+            minidb::test::require(checkpoints.checkpointsCompleted == expected
+                && checkpoints.sharpCheckpointsCompleted == (sharp ? expected : 0)
+                && checkpoints.fuzzyCheckpointsCompleted == (sharp ? 0 : expected)
+                && checkpoints.checkpointFailures == 0,
+                "Transactional benchmark executed a different checkpoint mode than reported");
+            const auto json = minidb::bench::resultsToJson(results);
+            const auto modeField = json.find("\"checkpoint_mode\":");
+            const auto expectedMode = std::string("\"checkpoint_mode\":\"")
+                + std::string(minidb::checkpointModeName(mode)) + '"';
+            minidb::test::require(modeField != std::string::npos
+                && json.compare(modeField, expectedMode.size(), expectedMode) == 0
+                && json.find("\"sharp_checkpoints\":"
+                    + std::to_string(checkpoints.sharpCheckpointsCompleted)) != std::string::npos
+                && json.find("\"fuzzy_checkpoints\":"
+                    + std::to_string(checkpoints.fuzzyCheckpointsCompleted)) != std::string::npos,
+                "Transactional benchmark JSON mode disagrees with execution");
+        }
+    }
+}
+
+void testRelatedCheckpointModes() {
+    bool matched = true;
+    for (const auto* name : {"tcp_insert", "recovery_full_scan", "recovery_loser"}) {
+        for (const auto mode : {minidb::CheckpointMode::Sharp, minidb::CheckpointMode::Fuzzy}) {
+            minidb::test::TemporaryDatabase database("benchmark_related_checkpoint");
+            minidb::bench::BenchmarkConfig config;
+            config.benchmark = name;
+            config.databasePath = database.path().string();
+            config.rows = 3;
+            config.operations = 3;
+            config.warmupOperations = 0;
+            config.checkpointMode = mode;
+            config.checkpointWalBytes = 0;
+            config.checkpointStatements = 1;
+            config.keepDatabase = true;
+            const auto result = minidb::bench::runConfiguredBenchmarks(config).at(0);
+            minidb::test::require(result.validationPassed
+                && result.configuration.checkpointMode == mode,
+                "Related benchmark checkpoint configuration changed");
+            minidb::LogManager log(minidb::walPathForDatabase(config.databasePath),
+                minidb::LogManager::DEFAULT_BUFFER_SIZE, minidb::LogOpenMode::EagerValidated,
+                minidb::WalStorageMode::Auto);
+            const auto selected = minidb::CheckpointControl(
+                minidb::checkpointPathForDatabase(config.databasePath)).select(log);
+            minidb::test::require(selected.slot.has_value(),
+                "Related benchmark did not publish an automatic checkpoint");
+            const auto end = log.readRecordAt(selected.slot->checkpointEndLsn);
+            const auto expected = mode == minidb::CheckpointMode::Sharp
+                ? minidb::LogRecordType::CheckpointEnd : minidb::LogRecordType::FuzzyCheckpointEnd;
+            std::cout << name << " requested=" << minidb::checkpointModeName(mode)
+                      << " persisted=" << (end.type == minidb::LogRecordType::FuzzyCheckpointEnd
+                          ? "fuzzy" : "sharp") << '\n';
+            matched = matched && end.type == expected;
+            if (config.benchmark != "tcp_insert") {
+                matched = matched && result.recovery.recovery.checkpointUsed
+                    && result.recovery.recovery.checkpointMode == mode;
+            }
+        }
+    }
+    minidb::test::require(matched,
+        "Related benchmarks executed a different checkpoint mode than reported");
+}
+
+} // namespace
+
 int main() {
     try {
+        testRelatedCheckpointModes();
+        testTransactionalCheckpointMode();
         const std::vector<std::string> families{
             "pager", "buffer", "bplus", "tuple", "sql", "tcp", "mixed", "wal",
         };

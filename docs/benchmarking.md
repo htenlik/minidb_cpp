@@ -310,6 +310,24 @@ scan; it is a projected byte count, not a timed recovery run. `recovery_full_sca
 builds deterministic committed history and measures winner REDO; `recovery_loser` adds
 an uncommitted appended page and measures loser UNDO/truncation. Both validate through
 normal reopen.
+
+Checkpoint mode accuracy: the durable SQL `txn_*`, `tcp_*`, and `recovery_full_scan`/`recovery_loser`
+history-generation paths now forward `--checkpoint-mode` to the server's automatic
+policy. Previously, a Fuzzy request was reported in JSON but these paths selected
+Sharp. Earlier Fuzzy results from these paths may therefore measure Sharp behavior;
+any comparison depending on them needs fresh measurement, not relabeling or an
+invented replacement. No historical measurements have been replaced here.
+
+Dedicated `checkpoint_*`, `recovery_checkpoint_compare`, and `transaction_*`
+experiments already select the requested mode. The frame-retirement and physical
+writeback tables above use explicit checkpoint selection and are unaffected by this
+configuration bug. `concurrency_*` intentionally uses a Sharp setup checkpoint and
+disables automatic checkpoints; validation-only server instances do not execute
+mutations. Raw `txn_wal_*` statements do not notify the automatic checkpoint policy.
+An unreached or disabled trigger legitimately yields zero checkpoints. For SQL
+`txn_*`, reported checkpoint counters exclude setup because statistics are reset
+before the measured statements; schema-v1 JSON field names remain unchanged.
+
 `recovery_page_lsn_compare` creates one PageLSN-aware page and a deterministic committed
 update history, persists 0–100% of that history according to
 `--redo-persisted-percent`, clones identical database/WAL inputs, and recovers one clone

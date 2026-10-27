@@ -1080,7 +1080,8 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
                 config.checkpointWalBytes,
                 config.checkpointStatements,
                 config.walSegmentBytes,
-                config.walUpdateMode});
+                config.walUpdateMode,
+                config.checkpointMode});
         server.start();
         std::exception_ptr serverError;
         std::thread serverThread([&] {
@@ -1192,7 +1193,8 @@ BenchmarkResult runTransactional(
                               config.checkpointWalBytes,
                               config.checkpointStatements,
                               config.walSegmentBytes,
-                              config.walUpdateMode});
+                              config.walUpdateMode,
+                              config.checkpointMode});
         auto& engine = server.sqlEngine();
         const bool rawWalWorkload = name == "txn_wal_delta_friendly"
             || name == "txn_wal_fragmentation";
@@ -1330,7 +1332,8 @@ BenchmarkResult runRecoveryBenchmark(
                               config.checkpointWalBytes,
                               config.checkpointStatements,
                               config.walSegmentBytes,
-                              config.walUpdateMode});
+                              config.walUpdateMode,
+                              config.checkpointMode});
         createUsers(server.sqlEngine());
         populateUsers(server.sqlEngine(), config.operations);
         if (name == "recovery_loser") {
