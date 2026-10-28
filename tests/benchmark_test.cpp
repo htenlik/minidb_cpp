@@ -111,6 +111,9 @@ void testConfigurationParsing() {
     reject([] { static_cast<void>(parseArguments(
         std::vector<std::string_view>{"--benchmark", "buffer", "--lru-k", "0"})); },
         "zero LRU-K K was accepted");
+    reject([] { static_cast<void>(parseArguments(std::vector<std::string_view>{
+        "--benchmark", "txn_insert", "--reopen-interval", "0"})); },
+        "Output-only unused cadence sentinel changed CLI validation");
     reject([] { static_cast<void>(parseArguments(
         std::vector<std::string_view>{"--benchmark", "missing"})); },
         "unknown benchmark was accepted");

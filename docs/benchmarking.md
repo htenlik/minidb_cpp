@@ -224,7 +224,8 @@ tuple index. The size modes are `small` (1–64 bytes), `medium` (129–512), `l
 
 ### Hot and reopen modes
 
-`--mode hot` retains one backend owner. Relevant point-read workloads can perform
+For workloads implementing the generic cache policy, `--mode hot` retains one
+backend owner. Relevant point-read workloads can perform
 `--warmup N` untimed operations before counters reset. `--mode reopen` flushes through
 normal owners where applicable, destroys and recreates the Pager or DiskManager/buffer
 pool/component owner every
@@ -232,6 +233,37 @@ pool/component owner every
 
 Reopen clears MiniDB++'s cache. It is **not** a cold-disk benchmark: the operating
 system may retain file pages. The harness never drops OS caches or requires privileges.
+
+### Requested options and effective configuration
+
+CLI parsing preserves the requested options. The families below report effective
+cache, warmup and WAL-buffer settings in `BenchmarkResult.configuration`, schema-v1
+JSON, and console fields that display those settings. Other generic controls have
+workload-specific meanings; not every family implements every option.
+For the fixed-policy families below, `reopen_interval: 0` means **unused**, just as
+zero warmup means no warmup. It is an output sentinel, not a newly accepted CLI
+value: `--reopen-interval` still requires a positive integer.
+
+| Family | Cache policy / warmup | WAL buffer during measurement |
+| --- | --- | --- |
+| `txn_*` | One server; `hot`, zero warmup and unused cadence | Fixed 65,536 bytes |
+| `tcp_*` | Requested hot/reopen batching; warmup runs before the first batch, except `tcp_insert` starts empty and performs none; cadence is unused in hot mode | Fixed 65,536 bytes |
+| `transaction_*`, `concurrency_*` | Fixed experiment sequence; `hot`, zero warmup and unused cadence | Fixed 65,536 bytes |
+| `recovery_full_scan`, `recovery_loser` | Fixed history creation, measured recovery open, then validation; no generic warmup/reopen cadence | Fixed 65,536 bytes |
+| `checkpoint_latency`, `checkpoint_retention`, `recovery_checkpoint_compare` | Fixed setup/checkpoint/recovery sequence; no generic warmup/reopen cadence | Fixed 65,536 bytes |
+
+The fixed recovery experiments retain their required real opens/restarts. Reporting
+`hot` with unused cadence means **no generic periodic-reopen policy**, not that
+startup recovery uses a warmed cache. Dedicated checkpoint experiments report
+automatic triggers as disabled; their explicitly invoked manual checkpoints and
+selected Sharp/Fuzzy mode remain measured. Existing concurrency overrides also
+retain disabled automatic checkpoints and their Sharp setup checkpoint.
+
+Custom `--wal-buffer-bytes` remains effective for raw WAL workloads and the raw
+`recovery_clr_resume` / `recovery_page_lsn_compare` experiments. It does not configure
+DatabaseServer. Earlier server-backed results could repeat requested, unused
+settings; comparisons relying on those labels require fresh measurement. Historical
+results and tables are not rewritten or relabeled here.
 
 `--working-set N` limits the key/page population sampled by supported lookup workloads;
 zero means the whole available dataset. Choose both a hot-set run where the sampled
@@ -511,8 +543,11 @@ Recovery forks a writer, flushes loser pages under STEAL, exits without destruct
 then measures real startup analysis/REDO/UNDO and total open/validation/close time.
 `recovery.total_ns` isolates the recovery phases from that enclosing wall time.
 
-The checkpoint workload verifies pending=true and zero published checkpoints while
-active, then exactly one checkpoint after COMMIT. Repeat with `--checkpoint-mode fuzzy`.
+With Sharp mode, the transaction checkpoint workload defers publication until the
+appropriate idle boundary: its directed case observes pending=true while active,
+then one checkpoint after COMMIT. Fuzzy mode may checkpoint with live ATT at the
+documented safe between-statements boundaries; it need not defer until COMMIT or
+publish exactly one checkpoint. Neither mode checkpoints a half-completed mutation.
 Retained peak includes buffered WAL; retained-after includes completion and optional
 reclamation, so fuzzy retention may remain high while its DPT still needs history.
 Before-image metrics exclude map allocator overhead, temporary encodings, and global
