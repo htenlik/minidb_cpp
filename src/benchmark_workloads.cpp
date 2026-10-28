@@ -1173,6 +1173,9 @@ BenchmarkResult runTcp(const BenchmarkConfig& config, const std::string& name) {
         static_cast<double>(rowsExamined) / static_cast<double>(config.operations),
         static_cast<double>(indexLookups) / static_cast<double>(config.operations),
         accumulated);
+    result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    if (config.cacheMode == CacheMode::Hot) result.configuration.reopenInterval = 0;
+    if (name == "tcp_insert") result.configuration.warmupOperations = 0;
     cleanupDatabase(config);
     return result;
 }
@@ -1283,6 +1286,10 @@ BenchmarkResult runTransactional(
         result = finish(
             name, config, std::move(latencies), {}, before, after,
             0.0, 0.0, server.bufferPool().stats());
+        result.configuration.cacheMode = CacheMode::Hot;
+        result.configuration.warmupOperations = 0;
+        result.configuration.reopenInterval = 0;
+        result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
         result.storageBackend = "buffer_pool_" + std::string(walUpdateModeName(
             config.walUpdateMode)) + "_wal";
         result.wal.manager = server.logManager().stats();
@@ -1377,6 +1384,10 @@ BenchmarkResult runRecoveryBenchmark(
     result.storageBackend = "physical_recovery";
     result.seed = config.seed;
     result.configuration = config;
+    result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.warmupOperations = 0;
+    result.configuration.reopenInterval = 0;
+    result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
     result.timing = summarizeTimings(latency, totalLatency(latency));
     result.recovery.recovery = recovery;
     result.recovery.walBytes = walBytes;
@@ -1558,6 +1569,7 @@ BenchmarkResult runConcurrencyBenchmark(const BenchmarkConfig& config, std::stri
     result.benchmark = name; result.storageBackend = "buffer_pool";
     result.configuration = config; result.seed = config.seed; result.environment = currentEnvironment();
     result.configuration.warmupOperations = 0; result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.reopenInterval = 0;
     result.configuration.checkpointWalBytes = result.configuration.checkpointStatements = 0;
     result.configuration.checkpointMode = CheckpointMode::Sharp;
     result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
@@ -1695,6 +1707,7 @@ BenchmarkResult runExplicitTransactionBenchmark(const BenchmarkConfig& config, s
     result.configuration.rows = 1;
     result.configuration.warmupOperations = 0;
     result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.reopenInterval = 0;
     result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
     if (name != "transaction_checkpoint") {
         result.configuration.checkpointWalBytes = 0;
@@ -1837,6 +1850,11 @@ BenchmarkResult runCheckpointLatency(const BenchmarkConfig& config) {
                         storageMetrics(server.diskManager(), server.bufferPool(),
                                        server.pageAllocator()),
                         0.0, 0.0, server.bufferPool().stats());
+        result.configuration.cacheMode = CacheMode::Hot;
+        result.configuration.warmupOperations = 0;
+        result.configuration.reopenInterval = 0;
+        result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+        result.configuration.checkpointWalBytes = result.configuration.checkpointStatements = 0;
         result.storageBackend = config.checkpointMode == CheckpointMode::Sharp
             ? "sharp_checkpoint" : "fuzzy_checkpoint";
         result.checkpoint = server.checkpointManager().stats();
@@ -1889,6 +1907,11 @@ BenchmarkResult runCheckpointRetention(const BenchmarkConfig& config) {
                         storageMetrics(server.diskManager(), server.bufferPool(),
                                        server.pageAllocator()),
                         0.0, 0.0, server.bufferPool().stats());
+        result.configuration.cacheMode = CacheMode::Hot;
+        result.configuration.warmupOperations = 0;
+        result.configuration.reopenInterval = 0;
+        result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+        result.configuration.checkpointWalBytes = result.configuration.checkpointStatements = 0;
         result.storageBackend = config.redoPersistedPercent == 100
             ? "regularly_flushed_checkpoint" : "long_lived_dirty_checkpoint";
         result.checkpoint = server.checkpointManager().stats();
@@ -1966,6 +1989,11 @@ BenchmarkResult runCheckpointRecoveryComparison(const BenchmarkConfig& config) {
         ? "sharp_checkpoint_recovery" : "fuzzy_checkpoint_recovery";
     result.seed = config.seed;
     result.configuration = config;
+    result.configuration.cacheMode = CacheMode::Hot;
+    result.configuration.warmupOperations = 0;
+    result.configuration.reopenInterval = 0;
+    result.configuration.walBufferBytes = LogManager::DEFAULT_BUFFER_SIZE;
+    result.configuration.checkpointWalBytes = result.configuration.checkpointStatements = 0;
     result.timing = summarizeTimings(boundedLatency, totalLatency(boundedLatency));
     result.recovery.recovery = bounded;
     result.recovery.fullScanRecovery = full;

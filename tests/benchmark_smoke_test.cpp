@@ -9,6 +9,82 @@
 
 namespace {
 
+void requireFixedServerReporting(const minidb::bench::BenchmarkResult& result) {
+    minidb::test::require(result.configuration.cacheMode == minidb::bench::CacheMode::Hot
+        && result.configuration.warmupOperations == 0 && result.configuration.reopenInterval == 0
+        && result.configuration.walBufferBytes == minidb::LogManager::DEFAULT_BUFFER_SIZE,
+        result.benchmark + " reports requested reopen/warmup/WAL buffer instead of effective settings");
+    const auto json = minidb::bench::resultsToJson({result});
+    minidb::test::require(json.find("\"schema_version\":1") != std::string::npos
+        && json.find("\"cache_mode\":\"hot\"") != std::string::npos
+        && json.find("\"warmup_operations\":0") != std::string::npos
+        && json.find("\"reopen_interval\":0") != std::string::npos
+        && json.find("\"wal_buffer_bytes\":" + std::to_string(minidb::LogManager::DEFAULT_BUFFER_SIZE))
+            != std::string::npos,
+        "Effective configuration was not serialized with existing schema fields");
+    minidb::test::require(minidb::bench::formatHuman(result).find(
+        "seed/mode: " + std::to_string(result.seed) + "/hot\n") != std::string::npos,
+        "Console output still reports requested reopen mode");
+}
+
+void testTransactionalEffectiveConfiguration() {
+    minidb::test::TemporaryDatabase database("benchmark_transactional_effective_config");
+    const std::vector<std::string_view> arguments{
+        "--benchmark", "txn_insert", "--operations", "2", "--wal-buffer-bytes", "1",
+        "--mode", "reopen", "--reopen-interval", "1", "--warmup", "7",
+    };
+    auto requested = minidb::bench::parseArguments(arguments).config;
+    requested.databasePath = database.path().string();
+    const auto results = minidb::bench::runConfiguredBenchmarks(requested);
+    const auto& result = results.at(0);
+    minidb::test::require(requested.cacheMode == minidb::bench::CacheMode::Reopen
+        && requested.warmupOperations == 7 && requested.reopenInterval == 1 && requested.walBufferBytes == 1,
+        "CLI did not preserve requested benchmark options");
+    requireFixedServerReporting(result);
+    minidb::test::require(result.validationPassed && result.timing.operationCount == 2
+        && result.recovery.transactions.transactionsCommitted == 2,
+        "Effective reporting changed the measured transaction workload");
+    for (const auto* name : {"txn_update", "txn_varchar_update", "txn_delete", "txn_bplus_insert",
+                             "txn_mixed", "txn_wal_delta_friendly", "txn_wal_fragmentation"}) {
+        minidb::test::TemporaryDatabase other(name);
+        requested.benchmark = name; requested.databasePath = other.path().string(); requested.rows = 2;
+        const auto measured = minidb::bench::runConfiguredBenchmarks(requested).at(0);
+        requireFixedServerReporting(measured);
+        minidb::test::require(measured.validationPassed && measured.timing.operationCount == 2
+            && measured.recovery.transactions.transactionsCommitted == 2,
+            "Effective reporting changed another txn_* workload");
+    }
+}
+
+void testTcpEffectiveConfiguration() {
+    for (const auto* name : {"tcp_pk_lookup", "tcp_heap_scan", "tcp_insert", "tcp_mixed"}) {
+        for (const auto mode : {minidb::bench::CacheMode::Hot, minidb::bench::CacheMode::Reopen}) {
+            minidb::test::TemporaryDatabase database(name);
+            minidb::bench::BenchmarkConfig config;
+            config.benchmark = name; config.databasePath = database.path().string();
+            config.rows = 2; config.operations = 2; config.warmupOperations = 7;
+            config.cacheMode = mode; config.reopenInterval = 1; config.walBufferBytes = 1;
+            const auto measured = minidb::bench::runConfiguredBenchmarks(config);
+            const auto& result = measured.at(0);
+            const auto warmup = config.benchmark == "tcp_insert" ? 0 : config.warmupOperations;
+            const auto cadence = mode == minidb::bench::CacheMode::Reopen ? config.reopenInterval : 0;
+            minidb::test::require(result.validationPassed && result.timing.operationCount == config.operations
+                && result.configuration.cacheMode == mode && result.configuration.reopenInterval == cadence
+                && result.configuration.warmupOperations == warmup
+                && result.configuration.walBufferBytes == minidb::LogManager::DEFAULT_BUFFER_SIZE,
+                "TCP reporting lost implemented reopen/warmup behavior or retained custom WAL buffer");
+            const auto json = minidb::bench::resultsToJson(measured);
+            const auto modeName = mode == minidb::bench::CacheMode::Reopen ? "reopen" : "hot";
+            minidb::test::require(json.find(std::string("\"cache_mode\":\"") + modeName + '"') != std::string::npos
+                && json.find("\"warmup_operations\":" + std::to_string(warmup)) != std::string::npos
+                && json.find("\"reopen_interval\":" + std::to_string(cadence)) != std::string::npos
+                && json.find("\"wal_buffer_bytes\":" + std::to_string(minidb::LogManager::DEFAULT_BUFFER_SIZE))
+                    != std::string::npos,
+                "TCP JSON configuration disagrees with the effective result");
+        }
+    }
+}
+
 void testTransactionalCheckpointMode() {
     for (const auto mode : {minidb::CheckpointMode::Sharp, minidb::CheckpointMode::Fuzzy}) {
         for (const bool triggered : {true, false}) {
@@ -67,7 +143,10 @@ void testRelatedCheckpointModes() {
             config.databasePath = database.path().string();
             config.rows = 3;
             config.operations = 3;
-            config.warmupOperations = 0;
+            config.warmupOperations = 7;
+            config.cacheMode = minidb::bench::CacheMode::Reopen;
+            config.reopenInterval = 1;
+            config.walBufferBytes = 1;
             config.checkpointMode = mode;
             config.checkpointWalBytes = 0;
             config.checkpointStatements = 1;
@@ -91,6 +170,7 @@ void testRelatedCheckpointModes() {
                           ? "fuzzy" : "sharp") << '\n';
             matched = matched && end.type == expected;
             if (config.benchmark != "tcp_insert") {
+                requireFixedServerReporting(result);
                 matched = matched && result.recovery.recovery.checkpointUsed
                     && result.recovery.recovery.checkpointMode == mode;
             }
@@ -104,6 +184,8 @@ void testRelatedCheckpointModes() {
 
 int main() {
     try {
+        testTransactionalEffectiveConfiguration();
+        testTcpEffectiveConfiguration();
         testRelatedCheckpointModes();
         testTransactionalCheckpointMode();
         const std::vector<std::string> families{
@@ -164,6 +246,10 @@ int main() {
                 transaction.databasePath = database.path().string();
                 transaction.benchmark = name;
                 transaction.operations = 10;
+                transaction.cacheMode = minidb::bench::CacheMode::Reopen;
+                transaction.reopenInterval = 1;
+                transaction.warmupOperations = 7;
+                transaction.walBufferBytes = 1;
                 transaction.checkpointWalBytes = 1024;
                 transaction.checkpointMode = mode;
                 transaction.walSegmentBytes = 16 * 1024;
@@ -171,6 +257,7 @@ int main() {
                 minidb::test::require(measured.size() == 1 && measured[0].validationPassed,
                                       "Transaction benchmark failed validation");
                 const auto& result = measured[0];
+                requireFixedServerReporting(result);
                 minidb::test::require(result.storageBackend == "buffer_pool"
                     && result.configuration.rows == 1 && result.configuration.warmupOperations == 0,
                     "Transaction benchmark reported unused generic configuration");
@@ -206,7 +293,14 @@ int main() {
             config.databasePath = database.path().string(); config.benchmark = name;
             config.rows = 32; config.operations = 24; config.clientThreads = 4; config.bufferFrames = 3;
             config.writerHoldMs = 1;
+            config.cacheMode = minidb::bench::CacheMode::Reopen;
+            config.reopenInterval = 1; config.warmupOperations = 7; config.walBufferBytes = 1;
             const auto results = minidb::bench::runConfiguredBenchmarks(config);
+            requireFixedServerReporting(results.at(0));
+            minidb::test::require(results[0].configuration.checkpointWalBytes == 0
+                && results[0].configuration.checkpointStatements == 0
+                && results[0].configuration.checkpointMode == minidb::CheckpointMode::Sharp,
+                "Concurrency experiment's intentional checkpoint overrides changed");
             minidb::test::require(results.size() == 1 && results[0].validationPassed
                 && results[0].timing.operationCount == (config.benchmark == "concurrency_writer_exclusion" ? 4U : 24U)
                 && results[0].concurrency.server.peakActiveSessions >= 4,
