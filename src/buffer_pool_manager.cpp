@@ -35,6 +35,7 @@ BufferPoolManager::BufferPoolManager(
 }
 
 BufferPoolManager::~BufferPoolManager() {
+    if (!flushOnDestruction_) return;
     try {
         flushAll();
     } catch (...) {

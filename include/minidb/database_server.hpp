@@ -22,7 +22,8 @@ namespace minidb::net {
 
 // Declaration order makes the ownership lifetime explicit: the socket server and
 // SQL engine are destroyed before Catalog/PageAllocator, then the buffer pool flushes
-// before its DiskManager is destroyed.
+// before its DiskManager is destroyed. Failed shutdown abandons volatile frames
+// before session authority expires; only startup recovery may complete that work.
 class DatabaseServer {
 public:
     DatabaseServer(std::string databasePath, ServerConfig config);

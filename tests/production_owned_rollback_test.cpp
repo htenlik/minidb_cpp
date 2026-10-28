@@ -81,8 +81,9 @@ void directed() {
     }
 }
 void poisonedCleanup() {
+    for (auto mode : {WalUpdateMode::FullPage, WalUpdateMode::ByteRange, WalUpdateMode::Adaptive}) {
     test::TemporaryDatabase db("production_owned_failure");
-    {DatabaseServer s(db.path().string(), config(WalUpdateMode::Adaptive));
+    {DatabaseServer s(db.path().string(), config(mode));
      exec(s, "CREATE TABLE t (id UINT32 PRIMARY KEY, value VARCHAR(4000) NOT NULL)");
      exec(s, "BEGIN"); exec(s, "INSERT INTO t VALUES (1, 'pending')");
      ::setenv("MINIDB_THROWPOINT", "owned_after_intent_force", 1);
@@ -92,8 +93,84 @@ void poisonedCleanup() {
      test::requireThrows<sql::SqlExecutionError>([&]{static_cast<void>(rows(s));}, "Failed engine resumed reads");
      test::requireThrows<sql::SqlExecutionError>([&]{exec(s, "BEGIN READ ONLY");}, "Failed engine resumed admission");
      test::requireThrows<std::runtime_error>([&]{s.close();}, "Failed engine shutdown acknowledged unresolved cleanup");}
-    DatabaseServer recovered(db.path().string(), config(WalUpdateMode::Adaptive));
+    DatabaseServer recovered(db.path().string(), config(mode));
     require(rows(recovered).rows.empty(), "Poisoned cleanup did not restart"); validate(recovered);
+    }
+    std::cout << "Later cleanup shutdown scenarios passed: 3\n";
+}
+void failedRollbackShutdown() {
+    unsigned scenarios = 0;
+    for (auto mode : {WalUpdateMode::FullPage, WalUpdateMode::ByteRange, WalUpdateMode::Adaptive}) {
+        for (bool explicitTransaction : {true, false}) for (bool explicitClose : {true, false}) {
+            test::TemporaryDatabase db("production_owned_early_shutdown_failure");
+            auto settings = config(mode);
+            settings.bufferFrames = 64; // Keep the modified page resident until failed preparation.
+            sql::SelectResult expected;
+            PageId catalogRoot = INVALID_PAGE_ID;
+            std::uint64_t extent = 0;
+            std::vector<PageId> freePages;
+            std::vector<DiskManager::Page> physicalBeforeDestruction;
+            Lsn walEnd = INVALID_LSN;
+            {
+                DatabaseServer s(db.path().string(), settings);
+                exec(s, "CREATE TABLE t (id UINT32 PRIMARY KEY, value UINT32)");
+                exec(s, "INSERT INTO t VALUES (1, 10)");
+                expected = rows(s);
+                catalogRoot = s.diskManager().databaseHeader().catalogRootPageId;
+                extent = s.diskManager().pageCount(); freePages = s.pageAllocator().freePageIds();
+                require(!s.bufferPool().dirtyPageTableSnapshot().empty(), "Committed setup was not dirty");
+                if (explicitTransaction) exec(s, "BEGIN READ WRITE");
+                ::setenv("MINIDB_THROWPOINT", "before_page_update_append", 1);
+                test::requireThrows<sql::SqlExecutionError>([&]{exec(s, "UPDATE t SET value = 20 WHERE id = 1");},
+                    "Early preparation failure did not interrupt mutation/rollback");
+                ::unsetenv("MINIDB_THROWPOINT");
+                auto& transactions = s.sqlEngine().transactionManager();
+                require(transactions.accessGate().stats().writerActive && s.recoveryCoordinator().hasActiveStatement(),
+                    "Failed preparation released unfinished writer authority");
+                bool dirty = false;
+                for (PageId page = 1; page < extent; ++page) dirty |= s.bufferPool().isDirty(page).value_or(false);
+                require(dirty && s.bufferPool().totalPinCount() == 0,
+                    "Failure did not leave unpinned dirty frames for teardown");
+                test::requireThrows<sql::SqlExecutionError>([&]{static_cast<void>(rows(s));}, "Poisoned engine admitted SELECT");
+                test::requireThrows<sql::SqlExecutionError>([&]{exec(s, "BEGIN READ ONLY");}, "Poisoned engine admitted BEGIN");
+                if (explicitClose) {
+                    test::requireThrows<std::runtime_error>([&]{s.close();}, "Close acknowledged unfinished cleanup");
+                    require(transactions.accessGate().stats().writerActive, "Failed close released writer exclusion");
+                }
+                physicalBeforeDestruction.resize(extent);
+                for (PageId page = 0; page < extent; ++page)
+                    s.diskManager().readPhysicalPage(page, physicalBeforeDestruction[page]);
+                walEnd = s.logManager().lastValidOffset();
+            } // Must not flush through the now-destroyed session authority.
+            {
+                DiskManager disk(db.path().string());
+                require(disk.pageCount() == extent, "Failed destruction changed physical extent");
+                for (PageId page = 0; page < extent; ++page) {
+                    DiskManager::Page actual{}; disk.readPhysicalPage(page, actual);
+                    require(actual == physicalBeforeDestruction[page], "Failed destruction wrote a volatile frame");
+                }
+                LogManager log(walPathForDatabase(db.path().string()), LogManager::DEFAULT_BUFFER_SIZE,
+                    LogOpenMode::DeferredRecovery, WalStorageMode::Auto, settings.walSegmentBytes);
+                require(log.scan().validBytes == walEnd, "Failed destruction appended recovery/completion records");
+            }
+            for (unsigned reopen = 0; reopen < 2; ++reopen) {
+                DatabaseServer s(db.path().string(), settings);
+                const auto actual = rows(s);
+                require(actual.rows == expected.rows && actual.recordIds == expected.recordIds,
+                    "Failed teardown lost committed rows/RIDs or retained uncommitted UPDATE");
+                require(s.diskManager().databaseHeader().catalogRootPageId == catalogRoot
+                    && s.diskManager().pageCount() == extent && s.pageAllocator().freePageIds() == freePages,
+                    "Failed teardown changed catalog, extent or free-list membership");
+                validate(s);
+                s.bufferPool().flushAll();
+                DiskManager::Page page{}; s.diskManager().readPhysicalPage(catalogRoot, page);
+                require(isValidLsn(readPersistentPageLsn(page)), "Recovered catalog has no persistent PageLSN");
+                s.close();
+            }
+            ++scenarios;
+        }
+    }
+    std::cout << "Failed rollback shutdown scenarios passed: " << scenarios << '\n';
 }
 void implicitAppendFailure() {
     for (auto mode : {WalUpdateMode::FullPage, WalUpdateMode::ByteRange, WalUpdateMode::Adaptive}) {
@@ -171,7 +248,9 @@ void crashes() {
 }
 }
 int main(int argc, char** argv) {
-    try {if (argc == 2 && std::string_view(argv[1]) == "--crash") crashes(); else {directed(); internalStructure(); implicitAppendFailure(); poisonedCleanup();}
+    try {if (argc == 2 && std::string_view(argv[1]) == "--crash") crashes();
+        else if (argc == 2 && std::string_view(argv[1]) == "--shutdown") {failedRollbackShutdown(); poisonedCleanup();}
+        else {directed(); internalStructure(); implicitAppendFailure(); poisonedCleanup(); failedRollbackShutdown();}
         std::cout << "Default production owned rollback gate passed\n";
     } catch (const std::exception& e) {std::cerr << e.what() << '\n'; return 1;}
 }

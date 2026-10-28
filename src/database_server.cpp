@@ -6,8 +6,11 @@ DatabaseServer::~DatabaseServer() {
     try {
         close();
     } catch (...) {
-        // No further requests are accepted; durable WAL remains available for
-        // startup recovery if best-effort shutdown could not finish rollback.
+        // close() has stopped/joined workers. The unfinished writer's lease is
+        // still alive now, but engine destruction will release it before the
+        // pool dies. Do not prepare or persist its volatile frames afterwards.
+        // Committed WAL is already durable; startup recovery owns the remainder.
+        bufferPool_->abandonForFailedShutdown();
     }
 }
 
