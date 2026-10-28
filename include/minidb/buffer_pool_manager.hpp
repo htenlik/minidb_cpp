@@ -20,6 +20,7 @@
 #include <vector>
 
 namespace minidb {
+namespace net { class DatabaseServer; }
 
 struct BufferFrame {
     DiskManager::Page data{};
@@ -118,6 +119,7 @@ public:
 private:
     friend class BasicPageGuard;
     friend class CheckpointManager;
+    friend class net::DatabaseServer;
     friend struct BufferPoolTestAccess;
 
     DiskManager& diskManager_;
@@ -134,6 +136,11 @@ private:
     PageRecoveryHook* recoveryHook_;
     mutable BufferPoolStats stats_{};
     bool waitForReadFrames_;
+    bool flushOnDestruction_ = true;
+
+    // Only terminal server destruction, after workers stop and shutdown fails.
+    // Leave volatile frames to WAL recovery; never flush without live authority.
+    void abandonForFailedShutdown() noexcept { flushOnDestruction_ = false; }
 
     [[nodiscard]] std::optional<BasicPageGuard> fetchPage(PageId pageId, bool writable);
     [[nodiscard]] std::optional<FrameId> availableFrame() const;

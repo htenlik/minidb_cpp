@@ -23,6 +23,16 @@ completion failure poisons the engine, shuts admission, retains the writer lease
 and requires reopen; disconnect/shutdown cannot acknowledge unfinished cleanup.
 Gate shutdown cancels admission but does not revoke existing cleanup authority.
 
+Explicit `DatabaseServer::close()` reports unfinished cleanup and keeps admission
+closed and the writer lease retained while the engine lives. If shutdown still
+fails during destruction, workers have already stopped/joined; the server privately
+disables only the buffer pool's destructor flush before session authority expires.
+Volatile frames are abandoned, not prepared or written without authority. COMMIT
+already forced every acknowledged transaction's WAL; normal startup recovery
+reconstructs committed pages and finishes loser UNDO/cleanup from retained WAL.
+Successful shutdown and ordinary buffer flushing are unchanged. This is terminal
+destruction, not a public no-flush option or support for restarting in place.
+
 Lock order is unchanged: session latch, short gate admission, recovery context
 mutex, then existing page/WAL/disk operations. The gate mutex is not held during
 I/O; authority checks inspect the held lease rather than reacquiring the gate.
