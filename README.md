@@ -1,46 +1,44 @@
 # MiniDB++
 
-MiniDB++ is a relational database engine built from scratch in C++20 to explore
-database storage, indexing, query execution, buffering, durability, and crash recovery.
-Its design emphasizes explicit binary formats and visible storage-engine boundaries.
+[![CI](https://github.com/htenlik/minidb_cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/htenlik/minidb_cpp/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/htenlik/minidb_cpp)](https://github.com/htenlik/minidb_cpp/releases/tag/v1.0.0)
+
+**A relational database engine built from scratch in C++20.** MiniDB++ brings
+persistent storage, indexing, SQL execution, transactions, and crash recovery
+together in one end-to-end systems project. It is designed for learning and
+engineering exploration, **not as a production-ready database**.
+
+**Explore:** [Architecture](#architecture) · [Build & run](#quick-start) ·
+[SQL demo](#demo) · [Recovery](#wal-and-crash-recovery) ·
+[Testing](#testing) · [Limitations](#current-limitations)
 
 ## Highlights
 
-- Persistent storage built from fixed 4 KiB pages and variable-length slotted pages
-- Durable tuple heaps addressed by stable `(PageId, SlotId)` record identifiers
-- Page-native B+ tree primary indexes with split, merge, deletion, and page reclamation
-- Persistent schema, catalog, and table layers
-- Hand-written SQL lexer, parser, AST, semantic binder, and executor
-- Primary-key lookup or deterministic heap-scan access paths
-- Bounded buffer pool with move-only RAII page guards and LRU-K eviction
-- Persistent free-page reuse through a validated global free list
-- Versioned binary TCP protocol with command-line server and client
-- Bounded concurrent TCP sessions, concurrent readers, and one database-wide exclusive writer
-- CRC32C-protected, segmented write-ahead log with safe segment reclamation
-- Autocommit and explicit serial `BEGIN` / `COMMIT` / `ROLLBACK` transactions
-- STEAL / NO-FORCE physical REDO and restartable CLR-based UNDO
-- Ownership-scoped, non-truncating SQL rollback with reusable appended pages
-- Persistent PageLSNs with database-format-v2 selective REDO and v1 migration
-- Sharp and opt-in fuzzy checkpoints with DPT/recLSN-bounded startup recovery
-- Subprocess crash-injection, randomized differential, corruption, and sanitizer tests
-- Deterministic benchmark and observability framework
+- **Storage:** versioned 4 KiB pages, variable-length slotted-page tuples, stable page/slot record IDs, and validated free-page reuse.
+- **Indexes & SQL:** persistent page-native B+ tree primary indexes and a hand-written SQL lexer, parser, semantic binder, and executor.
+- **Buffer management:** bounded LRU-K cache, move-only RAII page guards, and WAL-aware dirty-page eviction.
+- **Transactions:** autocommit and explicit `BEGIN` / `COMMIT` / `ROLLBACK`, concurrent readers, and one exclusive writer.
+- **Durability & recovery:** CRC32C segmented WAL, full-page/byte-range/adaptive update records, persistent PageLSNs, restartable CLR-based UNDO, and ownership-scoped non-truncating rollback.
+- **Checkpoints:** sharp and opt-in fuzzy checkpoints with dirty-page/live-transaction tracking and retention-aware WAL reclamation.
+- **Verification:** 103 CTest targets on the [v1.0.0 release](https://github.com/htenlik/minidb_cpp/releases/tag/v1.0.0), including crash injection, randomized models, format compatibility, and focused sanitizer checks.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    Client[CLI client] --> Wire[Versioned TCP wire protocol]
+    Client[CLI client] --> Wire[Versioned TCP protocol]
     Wire --> Engine[SqlEngine]
     Engine --> SQL[Parser / semantic binding / executor]
+    Engine --> Txn[TransactionManager]
     SQL --> Relational[Catalog / Table]
-    Relational --> Storage[B+ tree + TupleStore]
+    Relational --> Storage[TupleStore + B+ tree]
     Storage --> Allocator[PageAllocator]
-    Allocator --> Pool[BufferPoolManager]
-    Pool --> Replacer[LRU-K]
+    Allocator --> Pool[BufferPoolManager + LRU-K]
     Pool --> Disk[DiskManager]
     Disk --> Database[(database.db)]
 
-    Recovery[RecoveryCoordinator] --> Log[LogManager]
+    Txn --> Recovery[RecoveryCoordinator]
+    Recovery --> Log[LogManager]
     Log --> WAL[(segmented WAL)]
     Recovery --> Pool
     Checkpoint[CheckpointManager] --> Pool
