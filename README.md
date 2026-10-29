@@ -277,13 +277,6 @@ For incremental verification profiles, see [the development workflow](docs/devel
 - The TCP endpoint has no TLS, authentication, or authorization;
   it is intended for local development and protocol experimentation.
 
-## Future work
-
-- Finer-grained physiological/logical WAL and recovery experiments
-- Broader free-list reuse/release provenance and shared-allocator publication
-- Multiple writers, finer-grained locking, and isolation
-- Additional indexes and query-planning functionality
-
 ## Development
 
 The project uses C++20 and CMake. Keep normal builds warning-clean under
